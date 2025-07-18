@@ -10,3 +10,6 @@ build/
 .DS_Store
 *.sqlite3
 *.log
+.docs
+.cursor
+models
