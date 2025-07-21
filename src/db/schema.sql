@@ -15,9 +15,11 @@ CREATE TABLE IF NOT EXISTS "api_keys" (
     "secret" TEXT,
     "createdBy" INTEGER,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP 
 );
+
 CREATE TABLE sqlite_sequence(name,seq);
+--워크스페이스에 업로드된 파일(문서) 메타데이터와 경로·핀 여부 등을 보관
 CREATE TABLE IF NOT EXISTS "workspace_documents" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "docId" TEXT NOT NULL,
@@ -29,6 +31,7 @@ CREATE TABLE IF NOT EXISTS "workspace_documents" (
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "pinned" BOOLEAN DEFAULT false, "watched" BOOLEAN DEFAULT false,
     CONSTRAINT "workspace_documents_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "workspaces" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
+-- 초대 링크(코드) 발급 및 상태(pending·claimed 등) 관리, 여러 워크스페이스에 초대 가능
 CREATE TABLE IF NOT EXISTS "invites" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "code" TEXT NOT NULL,
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS "invites" (
     "createdBy" INTEGER NOT NULL,
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 , "workspaceIds" TEXT);
+-- 전역(시스템) 설정의 키-값 저장소—플래그, 기본값, UI 설정 등을 중앙 관리
 CREATE TABLE IF NOT EXISTS "system_settings" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "label" TEXT NOT NULL,
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS "system_settings" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- 	로그인 사용자 계정·권한·프로필(사진, 바이오 등) 및 상태(정지, 복구코드 확인 등) 관리
 CREATE TABLE IF NOT EXISTS "users" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "username" TEXT,
@@ -54,6 +59,7 @@ CREATE TABLE IF NOT EXISTS "users" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 , "pfpFilename" TEXT, "seen_recovery_codes" BOOLEAN DEFAULT false, "dailyMessageLimit" INTEGER, "bio" TEXT DEFAULT '');
+--docId별 임베딩 벡터 ID를 보관해 벡터 DB나 검색 인덱스와 매핑
 CREATE TABLE IF NOT EXISTS "document_vectors" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "docId" TEXT NOT NULL,
@@ -61,6 +67,7 @@ CREATE TABLE IF NOT EXISTS "document_vectors" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- 신규 사용자에게 보여줄 환영 메시지(순서 orderIndex 포함) 목록
 CREATE TABLE IF NOT EXISTS "welcome_messages" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "user" TEXT NOT NULL,
@@ -68,6 +75,7 @@ CREATE TABLE IF NOT EXISTS "welcome_messages" (
     "orderIndex" INTEGER,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- 협업 공간(프로젝트) 기본 정보·모델 설정·프롬프트·유사도 임계치 등 저장
 CREATE TABLE IF NOT EXISTS "workspaces" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "name" TEXT NOT NULL,
@@ -79,6 +87,7 @@ CREATE TABLE IF NOT EXISTS "workspaces" (
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "openAiPrompt" TEXT
 , "similarityThreshold" REAL DEFAULT 0.25, "chatModel" TEXT, "topN" INTEGER DEFAULT 4 CHECK ("topN" > 0), "chatMode" TEXT DEFAULT 'chat', "pfpFilename" TEXT, "chatProvider" TEXT, "agentModel" TEXT, "agentProvider" TEXT, "queryRefusalResponse" TEXT, "vectorSearchMode" TEXT DEFAULT 'default');
+-- 
 CREATE TABLE IF NOT EXISTS "workspace_chats" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "workspaceId" INTEGER NOT NULL,
@@ -96,6 +105,10 @@ CREATE TABLE IF NOT EXISTS "workspace_users" (
     "workspace_id" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastUpdatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+
+
+    
     CONSTRAINT "workspace_users_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "workspace_users_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
