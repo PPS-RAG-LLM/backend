@@ -1,7 +1,7 @@
-from src.db.database import get_db
+from storage.database import get_db
 import re, uuid
 from typing import List, Dict, Any
-from src.utils import get_now_str
+from utils.time import get_now_str
 
 def get_all_workspaces() -> List[Dict[str, Any]]:
     """모든 워크스페이스 목록 조회"""

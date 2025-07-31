@@ -1,9 +1,9 @@
 from abc    import ABC, abstractmethod
 from typing import Generator, List, Dict
 # 각 모델의 기존 스트리머 가져오기
-from src.models.openai.streamer import stream_chat as openai_stream
-from src.models.qwen.streamer   import stream_chat as qwen_stream
-from src.config import config
+from models.openai.streamer import stream_chat as openai_stream
+from models.qwen.streamer   import stream_chat as qwen_stream
+from config import config
 
 class BaseModel(ABC):
     @abstractmethod

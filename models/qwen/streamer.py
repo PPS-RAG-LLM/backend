@@ -1,8 +1,8 @@
 from transformers.generation.streamers import TextIteratorStreamer
-from src.models.qwen.loader import load_qwen_instruct_7b
+from models.qwen.loader import load_qwen_instruct_7b
 from threading import Thread  
 import time 
-from src.config import config
+from config import config
 from transformers.generation.configuration_utils import GenerationConfig
 
 

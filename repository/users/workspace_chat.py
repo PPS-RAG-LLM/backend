@@ -1,7 +1,7 @@
-from src.db.database import get_db
+from storage.database import get_db
 import json, re, time
 from typing import Optional, List, Dict, Any
-from src.utils import get_now_str
+from utils.time import get_now_str
 
 
 def get_chat_history(workspace_slug: str, session_id: str):

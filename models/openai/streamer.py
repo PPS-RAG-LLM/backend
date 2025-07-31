@@ -1,7 +1,7 @@
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
-from src.config import config
+from config import config
 
 load_dotenv()
 

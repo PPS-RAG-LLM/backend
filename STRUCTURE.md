@@ -2,42 +2,73 @@
 
 # 1. 디렉토리 구조 설계
 ```
-backend/
+backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서비스
+├── Dockerfile                        # 백엔드 전용 컨테이너 빌드
+├── requirements.txt                  # (Poetry 미사용 시) 의존성 고정
+├── config.py                         # Settings(BaseSettings) - .env 로딩
+├── main.py                           # `uvicorn main:app` 진입점 래퍼
+├── routers/                          # 기능별 api 라우터         
+│   ├── users/                 
+│   │   ├── doc_generation.py         # 문서 생성 
+│   │   ├── doc_summary.py            # 문서 요약
+│   │   ├── setting_workspace.py      # 워크스페이스 설정 업데이트 (Profile, QA, Vector Search)
+│   │   └── qa.py                     # Q&A
+│   └── admin/                 
+│       ├── manage_prompts_api.py     # 프롬프트 관리
+│       ├── manage_user_api.py        # 사용자 관리
+│       ├── manage_vator_DB_api.py    # 백터 DB 관리
+│       ├── manage_embedding_api.py   # 임베딩 모델 관리
+│       ├── manage_doc_api.py         # 문서 관리
+│       ├── manage_model_api.py       # 모델 관리 (추가 삭제)
+│       ├── val_model_api.py          # 모델 검증 (모델 성능 테스트 관련)
+│       ├── manage_model_ERP_api.py   # ERP 관리
+│       └── fine_tuning_api.py        # 모델 파인튜닝 관련
 │
-├── src/
-│   ├── api/                # FastAPI, Flask 등 REST API 서버
-│   │   ├── __init__.py
-│   │   ├── main.py         # API 엔트리포인트
-│   │   ├── routes/         # 각 기능별 라우트
-│   │   │   ├── chatbot.py
-│   │   │   ├── admin.py
-│   │   │   ├── document.py
-│   │   │   └── summary.py
-│   │   └── dependencies.py # DI, 공통 의존성
-│   │
-│   ├── core/               # 핵심 비즈니스 로직
-│   │   ├── __init__.py
-│   │   ├── chatbot.py      # 챗봇 로직
-│   │   ├── document.py     # 문서 처리 로직
-│   │   ├── summary.py      # 요약 생성 로직
-│   │   └── template.py     # 문서 템플릿 로직
-│   │
-│   ├── models/             # 사전학습 모델, 데이터 모델
-│   │   ├── __init__.py
-│   │   └── qwen/           # Qwen 모델 관련 코드
-│   │       ├── __init__.py
-│   │       └── loader.py   # 모델 로딩/서빙 코드
-│   │
-│   ├── config.py           # 환경설정
-│   └── utils.py            # 유틸리티 함수
+├── service/                          # 비즈니스 로직, 도메인 규칙 적용하는 계층
+│   ├── users/                        # 사용자 비즈니스 로직
+│   │   ├── doc_generation.py         # 다양한 파일 형식 파싱·저장 로직
+│   │   ├── doc_summary.py            # 요약 생성 로직
+│   │   ├── setting_workspace.py      # 워크스페이스 설정 업데이트 (Profile, QA, Vector Search)
+│   │   └── qa.py                     # RAG QA 파이프라인
+│   └── admin/                 
+│       ├── manage_prompts.py         # 프롬프트 관리
+│       ├── manage_user.py            # 사용자 관리
+│       ├── manage_vator_DB.py        # 백터 DB 관리
+│       ├── manage_embedding.py       # 임베딩 모델 관리
+│       ├── manage_doc.py             # 문서 관리
+│       ├── manage_model.py           # 모델 관리 (추가 삭제)
+│       ├── val_model.py              # 모델 검증 (모델 성능 테스트 관련)
+│       ├── manage_model_ERP.py       # ERP 관리
+│       └── fine_tuning.py           # 모델 파인튜닝 관련
 │
-├── Qwen2.5-7B-Instruct-1M/ # 모델 파일(이미 있음, 그대로 두기)
+├── repository/                    #  DB, 외부 저장소, API 호출 등 데이터 접근 계층 → CRUD 직접 처리
+│   ├── users/                 
+│   │   ├── qa.py             
+│   │   └── …          
+│   ├── admin/                 
+│   │    ├── prompts.py         
+│   │    └── … 
+│   └── vector_repo.py             # Milvus 컬렉션 생성·삽입·검색·삭제를 담당 
 │
-├── tests/                  # 테스트 코드
+├── utils/                     # 공통 헬퍼 
+|   ├── logger.py              # 로깅
+|   ├── timestamp.py           # 타임스탬프
+|   └── …           
 │
-├── requirements.txt
-├── README.md
-└── pyproject.toml
+├── storage/                   # 데이터 베이스 
+|   ├── pps_rag.db             # SQLite DB
+|   └── db.sql                 # SQL 문
+////////////////////// TEMPORARY DIRECTORY ////////////////////////////
+│
+├── models/                    # 학습/데이터 모델
+│   └── qwen/                  # 예: Qwen 계열 모델 서빙 래퍼
+│       └── loader.py
+///////////////////////////////////////////////////////////////////////
+├── tests/                     
+# 백엔드 테스트 폴더             
+│   ├── test_routes.py
+│   └── test_core.py
+└── README.md
 ```
 
 # 2. 서빙 구조

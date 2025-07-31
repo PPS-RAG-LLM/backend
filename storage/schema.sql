@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS "api_keys" (
 );
 
 CREATE TABLE sqlite_sequence(name,seq);
+
 --워크스페이스에 업로드된 파일(문서) 메타데이터와 경로·핀 여부 등을 보관
 CREATE TABLE IF NOT EXISTS "workspace_documents" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

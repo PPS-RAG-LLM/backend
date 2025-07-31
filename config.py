@@ -15,7 +15,7 @@ yaml.add_implicit_resolver('!ENV', re.compile(r'^\$\{[^}]+\}$'), Loader=yaml.Saf
 yaml.add_constructor('!ENV', env_var_constructor, Loader=yaml.SafeLoader)
 
 def load_config(path="config.yaml"):
-    with open(path, "r") as f:
+    with open(path, "r", encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
 
