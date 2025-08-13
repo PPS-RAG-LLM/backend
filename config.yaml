@@ -1,33 +1,36 @@
-default_model: qwen-2.5-7b-instruct
-
-models:
-  openai:
-    - "gpt-4o-mini"
-    - "gpt-4o"
-    - "gpt-3.5-turbo"
-  qwen:
-    - "qwen-2.5-7b-instruct"
-
-qwen:
-  system_prompt: You are a helpful assistant.
-  model_path: serve_models/Qwen2.5-7B-Instruct-1M
-  max_new_tokens: 5000
-  temperature: 1.0
-  top_p: 0.8
-  repetition_penalty: 1.2     # 기본 1.05 → 반복 억제 강화
-  no_repeat_ngram_size: 3     # 3-gram 이상 반복 금지
-  early_stopping : true       # EOS 토큰 시 즉시 중단
-
-openai:
-  model: gpt-3.5-turbo
-  api_key: !ENV ${OPENAI_API_KEY}
-  max_tokens: 512
-  temperature: 0.7
-  top_p: 1.0
-  system_prompt: "You are a helpful assistant."
-  timeout: 30
-  base_url: "https://api.openai.com/v1"
-
 server:
   host: 0.0.0.0
-  port: 8000
+  port: 3005
+  cors_origins:
+    - "http://localhost:3006"
+  trusted_hosts:
+    - "*"
+  force_https: false
+  gzip_min_size: 1000
+
+database:
+  path: storage/pps_rag.db
+  schema_path: storage/schema.sql
+
+provider:
+  openai:
+    api_key: !ENV ${OPENAI_API_KEY}
+    base_url: "https://api.openai.com/v1"
+  huggingface: {}
+  ollama:
+    base_url: "http://localhost:11434"
+
+default:
+  timeout: 60
+  top_p: 0.8
+  repetition_penalty: 1.2
+  no_repeat_ngram_size: 3
+  early_stopping: true
+  max_tokens: 8000
+
+workspace:
+  chat_history: 20
+  query_refusal_response: "There is no information about this topic."
+  top_n : 4
+  similarity_threshold: 0.25
+  temperature: 0.7

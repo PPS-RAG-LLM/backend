@@ -1,21 +1,27 @@
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.generation.streamers import TextIteratorStreamer
-from models.qwen.loader import load_qwen_instruct_7b
-from threading import Thread  
-import time 
-from config import config
 from transformers.generation.configuration_utils import GenerationConfig
+from threading import Thread  
+from config import config
+import time 
+
+def load_gpt_oss_20b(model_dir): 
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    return model, tokenizer
 
 
-def stream_chat(messages, **gen_kwargs):  
+def stream_chat(messages, model_path, **gen_kwargs):  
 
-    conf = config["qwen"]
-    model, tokenizer = load_qwen_instruct_7b(conf["model_path"])
+    model, tokenizer = load_gpt_oss_20b(model_path)
     text = build_qwen_prompt(messages)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     model_inputs = tokenizer(text, return_tensors="pt", )
     for k, v in model_inputs.items():
         model_inputs[k] = v.to(model.device)
+    
+    conf = config["registry"]["gpt-oss-20b"]
         
     generation_args = {
         "max_new_tokens": gen_kwargs.get("max_new_tokens", conf["max_new_tokens"]),

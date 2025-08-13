@@ -1,10 +1,10 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from .exceptions import BaseAPIException, ForbiddenError, InternalServerError
-import logging
 import traceback
+from utils import logger
 
-logger = logging.getLogger(__name__)
+logger = logger(__name__)
 
 async def base_api_exception_handler(request: Request, exc: Exception):
     """커스텀 API 예외 핸들러"""
