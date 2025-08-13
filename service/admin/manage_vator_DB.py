@@ -58,6 +58,35 @@ class SinglePDFIngestRequest(BaseModel):
     model: str | None = "bge"  # 'bge' | 'qwen'
 
 
+# === Runtime-configurable Defaults ===
+_CURRENT_EMBED_MODEL_KEY = "bge"   # 'bge' | 'qwen' ...
+_CURRENT_SEARCH_TYPE = "hybrid"     # 'hybrid' | 'bm25'
+
+
+def set_vector_settings(embed_model_key: str | None = None, search_type: str | None = None):
+    """Update runtime defaults for embedding model & search type."""
+    global _CURRENT_EMBED_MODEL_KEY, _CURRENT_SEARCH_TYPE  # noqa: PLW0603
+
+    if embed_model_key is not None:
+        key = embed_model_key.lower()
+        if key not in {"bge", "qwen"}:
+            raise ValueError("unsupported embeddingModel; allowed: 'bge', 'qwen'")
+        _CURRENT_EMBED_MODEL_KEY = key
+
+    if search_type is not None:
+        st = search_type.lower()
+        if st not in {"hybrid", "bm25"}:
+            raise ValueError("unsupported searchType; allowed: 'hybrid', 'bm25'")
+        _CURRENT_SEARCH_TYPE = st
+
+
+def get_vector_settings():
+    return {
+        "embeddingModel": _CURRENT_EMBED_MODEL_KEY,
+        "searchType": _CURRENT_SEARCH_TYPE,
+    }
+
+
 # -------------------------------------------------
 # Embedding utilities
 # -------------------------------------------------
@@ -142,7 +171,7 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
-        client.create_collection(COLLECTION_NAME, schema)
+        client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
 
     try:
         idx_list = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
@@ -224,7 +253,9 @@ async def extract_pdfs(req: PDFExtractRequest):
 # -------------------------------------------------
 # 2) 전체 임베딩 & 인제스트
 # -------------------------------------------------
-async def ingest_embeddings(model_key: str | None = "bge"):
+async def ingest_embeddings(model_key: str | None = None):
+    if model_key is None:
+        model_key = _CURRENT_EMBED_MODEL_KEY
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 PDF 추출을 수행하세요."}
 

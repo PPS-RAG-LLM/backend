@@ -1,8 +1,8 @@
 # Install
 ```
-conda create -n rag python=3.13
+conda create -n coreIQ python=3.13
 
-conda activate rag
+conda activate coreIQ
 
 pip install uv
 
@@ -10,5 +10,17 @@ uv pip install -r requirements.txt
 ```
 
 ```
-uvicorn src.api.main:app --host 172.16.0.105 --port 8000
+python main.py
 ```
+
+
+# ssh Port Forwarding
+```
+
+# 기존 터미널 server 실행
+python main.py
+
+# 터미널 새창(`config.yaml` 포트번호 참고)
+ssh -L 3005:localhost:3005 bai-vscode
+```
+
