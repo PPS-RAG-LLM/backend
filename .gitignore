@@ -12,9 +12,9 @@ build/
 *.log
 .docs
 .cursor
-serve_models
-
-
+*.db
+backup/
+user_data/
 .vscode/
 *.th
 pretrain/
@@ -276,4 +276,10 @@ $RECYCLE.BIN/
 
 # End of https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,linux,windows,audio,text
 
-!resources/*
+# !resources/*
+/service/admin/resources/
+/storage/user_data/
+*.onnx
+*.safetensors
+*.bin
+*.pt

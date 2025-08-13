@@ -295,3 +295,4 @@ def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str
         raise DatabaseError(f"workspace update failed: {exc}") from exc
     finally:
         con.close()
+

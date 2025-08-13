@@ -1,12 +1,14 @@
 from typing import Optional
 from fastapi import APIRouter, Query, HTTPException, Depends
 from pydantic import BaseModel, Field
+from fastapi import File, UploadFile
 from service.users.workspace import (
     create_workspace_for_user,
     list_workspaces,
     get_workspace_detail,
     delete_workspace as delete_workspace_service,
     update_workspace as update_workspace_service,
+    upload_and_embed_document,
 )
 from typing import Dict, List, Any
 from utils import logger
@@ -124,3 +126,4 @@ def update_workspace(slug: str, body: WorkspaceUpdateBody):
     user_id = 1
     result = update_workspace_service(user_id, slug, body.model_dump(exclude_unset=True))
     return result
+

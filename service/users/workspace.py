@@ -2,6 +2,9 @@ from typing import Dict, Any, Optional
 from config import config
 from utils import generate_unique_slug, logger, to_kst
 from errors import BadRequestError, InternalServerError, NotFoundError
+from pathlib import Path
+import uuid
+from fastapi import UploadFile
 from repository.users.workspace import (
     get_default_llm_model,
     insert_workspace,
@@ -169,5 +172,11 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
         },
         "message": None,
     }
+
+def upload_and_embed_document(user_id: int, slug: str, file: UploadFile) -> Dict[str, Any]:
+    """임시 스텁: 파일 업로드 + 벡터 DB 인제스트 예정 구현."""
+    # TODO: 구현
+    raise NotImplementedError("upload_and_embed_document is not yet implemented")
+
 
 
