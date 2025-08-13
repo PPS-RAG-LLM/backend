@@ -284,3 +284,7 @@ $RECYCLE.BIN/
 *.bin
 *.pt
 SETTING.md
+
+# DB files
+storage/pps_rag.db
+storage/*.db
