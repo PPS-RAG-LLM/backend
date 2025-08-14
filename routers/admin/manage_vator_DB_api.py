@@ -42,6 +42,14 @@ class VectorSettingsBody(BaseModel):
 class DeleteFilesBody(BaseModel):
     filesToDelete: List[str] = Field(..., description="삭제할 파일 이름 배열", examples=[["회사내규.pdf", "20240835_보고서.pdf"]])
 
+class ExecuteBody(BaseModel):
+    question: str
+    topK: int = Field(5, gt=0)
+    securityLevel: int = Field(1, ge=1)
+    sourceFilter: Optional[List[str]] = None
+    model: Optional[str] = None
+
+
 @router.put("/admin/vector/settings", summary="벡터 설정(임베딩 모델/검색 타입) 변경. 임베딩 모델, 검색 방식 등 벡터 DB와 관련된 주요 설정을 업데이트합니다. 설정 변경 시 DB 리셋이 필요할 수 있습니다.")
 async def update_vector_settings(body: VectorSettingsBody):
     set_vector_settings(body.embeddingModel, body.searchType)
@@ -72,9 +80,15 @@ async def rag_ingest_file_endpoint(req: SinglePDFIngestRequest, request: Request
     return await ingest_single_pdf(req)
 
 @router.post("/admin/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
-async def rag_search_endpoint(req: RAGSearchRequest, request: Request):
-    request.app.extra.get("logger", print)(f"Search Request from {request.client.host}: '{req.query}' (level={req.user_level}, model={req.model})")
-    return await search_documents(req)
+async def rag_search_endpoint(body: ExecuteBody):
+    from service.admin.manage_vator_DB import execute_search
+    return await execute_search(
+        question=body.question,
+        top_k=body.topK,
+        security_level=body.securityLevel,
+        source_filter=body.sourceFilter,
+        model_key=body.model,
+    )
 
 @router.get("/admin/vector/files", summary="벡터 DB에 저장된 파일 목록을 조회하거나, 파일 이름 또는 보안 레벨로 검색합니다. 파라미터가 없으면 전체 파일 목록을 반환합니다.")
 async def list_vector_files(limit: int = 1000, offset: int = 0):

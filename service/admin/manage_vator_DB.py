@@ -536,6 +536,16 @@ async def search_documents(req: RAGSearchRequest):
     return {"elapsed_sec": elapsed, "hits": hits, "prompt": prompt}
 
 
+async def execute_search(question: str, top_k: int = 5, security_level: int = 1, source_filter: list[str] | None = None, model_key: str | None = None):
+    req = RAGSearchRequest(query=question, top_k=top_k, user_level=security_level, model=model_key)
+    res = await search_documents(req)
+    if source_filter:
+        names = {Path(n).stem for n in source_filter}
+        filtered_hits = [h for h in res.get("hits", []) if Path(h["path"]).stem in names]
+        res["hits"] = filtered_hits
+    return res
+
+
 # -------------------------------------------------
 # 4) 컬렉션 삭제
 # -------------------------------------------------
