@@ -1,5 +1,5 @@
 import re, uuid
-from utils import get_db
+from utils.database import get_db
 
 def generate_unique_slug(name: str) -> str:
     """워크스페이스 이름에서 고유한 slug 생성"""
