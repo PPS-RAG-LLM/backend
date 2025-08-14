@@ -76,11 +76,34 @@ async def rag_ingest_endpoint(request: Request):
 
 @router.post("/admin/vector/upload", summary="하나 이상의 파일 또는 폴더 경로를 받아 벡터 DB에 저장합니다. 경로가 폴더이면 하위 파일들을 재귀적으로 처리하고, 중복된 파일은 최신 데이터로 갱신합니다.")
 async def rag_ingest_file_endpoint(req: SinglePDFIngestRequest, request: Request):
+    """workspace_id 가 제공되면 SQL(workspace_documents)에 기록됩니다."""
     request.app.extra.get("logger", print)(f"Single Ingest from {request.client.host}: {req.pdf_path} (model={req.model})")
     return await ingest_single_pdf(req)
 
 @router.post("/admin/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
 async def rag_search_endpoint(body: ExecuteBody):
+    from service.admin.manage_vator_DB import execute_search
+    return await execute_search(
+        question=body.question,
+        top_k=body.topK,
+        security_level=body.securityLevel,
+        source_filter=body.sourceFilter,
+        model_key=body.model,
+    )
+
+@router.post("/user/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
+async def user_rag_search_endpoint(body: ExecuteBody):
+    from service.admin.manage_vator_DB import execute_search
+    return await execute_search(
+        question=body.question,
+        top_k=body.topK,
+        security_level=body.securityLevel,
+        source_filter=body.sourceFilter,
+        model_key=body.model,
+    )
+
+@router.post("/user/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
+async def user_rag_search_endpoint(body: ExecuteBody):
     from service.admin.manage_vator_DB import execute_search
     return await execute_search(
         question=body.question,

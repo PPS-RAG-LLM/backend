@@ -308,4 +308,3 @@ CREATE TABLE IF NOT EXISTS "fine_tuned_models" (
   CONSTRAINT "fine_tuned_models_model_id_fkey" FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT "fine_tuned_models_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "fine_tune_jobs" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-

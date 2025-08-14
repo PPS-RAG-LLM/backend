@@ -58,6 +58,7 @@ class RAGSearchRequest(BaseModel):
 class SinglePDFIngestRequest(BaseModel):
     pdf_path: str
     model: str | None = "bge"  # 'bge' | 'qwen'
+    workspace_id: int | None = None
 
 
 # === Runtime-configurable Defaults ===
@@ -345,7 +346,9 @@ async def ingest_embeddings(model_key: str | None = None):
 # 2-1) 단일 PDF 인제스트
 # -------------------------------------------------
 async def ingest_single_pdf(req: SinglePDFIngestRequest):
-    import fitz  # type: ignore
+    import fitz  # pylint: disable=import-error
+    from repository.documents import insert_workspace_document
+    import uuid
 
     if META_JSON_PATH.exists():
         extraction_meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
@@ -405,16 +408,25 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     doc_id = meta_entry.get("doc_id")
     version = meta_entry.get("version", 0)
 
+    # If this is a user/workspace upload, allow duplicates by assigning a unique doc_id
+    if req.workspace_id is not None:
+        base_stem = Path(meta_key).stem
+        unique_suffix = uuid.uuid4().hex[:8]
+        doc_id = f"u{int(req.workspace_id)}__{base_stem}__{unique_suffix}"
+
+    # 임베더/클라
     tokenizer, model, device = _load_embedder(req.model or "bge")
     emb_dim = int(_embed_text(tokenizer, model, device, "test").shape[0])
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
+    # 구버전 삭제 (관리자/글로벌 문서에만 적용; 사용자 업로드는 고유 doc_id 이므로 스킵 안전)
     try:
         client.delete(COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {version}")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
+    # 청크 & 삽입
     MAX_TOKENS, OVERLAP = 512, 64
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
@@ -451,6 +463,26 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         client.insert(COLLECTION_NAME, rows)
         cnt += len(rows)
 
+    # Record into SQL if workspace_id provided
+    if req.workspace_id is not None:
+        try:
+            insert_workspace_document(
+                doc_id=str(doc_id),
+                filename=Path(meta_key).with_suffix(".pdf").name,
+                docpath=str(Path(meta_key).with_suffix(".pdf")),
+                workspace_id=int(req.workspace_id),
+                metadata={
+                    "securityLevel": int(sec_level),
+                    "model": (req.model or "bge"),
+                    "chunks": int(cnt),
+                    "isUserUpload": True,
+                    "baseDocId": Path(meta_key).stem,
+                },
+            )
+        except Exception:
+            pass
+
+    # 마무리: flush + 인덱스/로드 재보장
     try:
         client.flush(COLLECTION_NAME)
     except Exception:  # noqa: BLE001
@@ -615,9 +647,13 @@ async def delete_files_by_names(file_names: list[str]):
     if not file_names:
         return {"deleted": 0}
 
+    from repository.documents import delete_workspace_documents_by_filenames
+
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
-        return {"deleted": 0}
+        # Still try to delete in SQL
+        deleted_sql = delete_workspace_documents_by_filenames(file_names)
+        return {"deleted": 0, "deleted_sql": deleted_sql, "requested": len(file_names)}
 
     deleted_total = 0
     for name in file_names:
@@ -629,6 +665,7 @@ async def delete_files_by_names(file_names: list[str]):
             )
             deleted_total += 1
         except Exception:
-            # ignore and continue
             pass
-    return {"deleted": deleted_total, "requested": len(file_names)}
+
+    deleted_sql = delete_workspace_documents_by_filenames(file_names)
+    return {"deleted": deleted_total, "deleted_sql": deleted_sql, "requested": len(file_names)}
