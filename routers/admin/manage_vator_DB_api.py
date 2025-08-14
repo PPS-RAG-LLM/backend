@@ -77,8 +77,9 @@ async def rag_search_endpoint(req: RAGSearchRequest, request: Request):
     return await search_documents(req)
 
 @router.get("/admin/vector/files", summary="벡터 DB에 저장된 파일 목록을 조회하거나, 파일 이름 또는 보안 레벨로 검색합니다. 파라미터가 없으면 전체 파일 목록을 반환합니다.")
-async def list_vector_files():
-    return await list_indexed_files()
+async def list_vector_files(limit: int = 1000, offset: int = 0):
+    limit = max(1, min(limit, 16384))
+    return await list_indexed_files(limit=limit, offset=offset)
 
 @router.delete("/admin/vector/delete", summary= "파일 이름 목록을 받아 해당하는 파일들을 벡터 DB에서 삭제합니다.")
 async def delete_vector_files(body: DeleteFilesBody = Body(...)):

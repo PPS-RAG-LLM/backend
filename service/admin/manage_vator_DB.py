@@ -547,21 +547,20 @@ async def delete_db():
     return {"message": "삭제 완료(Milvus Lite)", "dropped_collections": cols}
 
 
-async def list_indexed_files():
-    """Return aggregated file entries from vector DB.
-    Aggregation key: path (txt). Derive fileName/filePath from path.
-    """
+async def list_indexed_files(limit: int = 16384, offset: int = 0):
+    """Return aggregated file entries. Supports pagination via limit/offset."""
+    limit = max(1, min(limit, 16384))
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
         return []
 
-    # Fetch up to N rows; for production consider pagination
     try:
         rows = client.query(
             collection_name=COLLECTION_NAME,
             filter="",
             output_fields=["path", "chunk_idx", "security_level"],
-            limit=100000,
+            limit=limit,
+            offset=offset,
         )
     except Exception:
         rows = []
