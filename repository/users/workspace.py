@@ -1,7 +1,6 @@
 from typing import Optional, Dict, Any
 import sqlite3
-from storage import get_db
-from utils import logger
+from utils import logger, get_db
 from errors import DatabaseError
 
 logger = logger(__name__)

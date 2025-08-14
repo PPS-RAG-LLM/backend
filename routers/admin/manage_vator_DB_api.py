@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Request, status, Body
 from pydantic import BaseModel, Field
+from typing import List, Optional
 
 from service.admin.manage_vator_DB import (
     PDFExtractRequest,
@@ -12,6 +13,8 @@ from service.admin.manage_vator_DB import (
     delete_db,
     set_vector_settings,
     get_vector_settings,
+    list_indexed_files,
+    delete_files_by_names,
 )
 
 router = APIRouter(
@@ -33,14 +36,36 @@ async def rag_extract_endpoint(req: PDFExtractRequest, request: Request):
 
 
 class VectorSettingsBody(BaseModel):
-    embeddingModel: str | None = Field(None, description="'bge' or 'qwen'")
-    searchType: str | None = Field(None, description="'hybrid' or 'bm25'")
+    embeddingModel: Optional[str] = Field(
+        None,
+        description="임베딩 모델 키",
+        examples=["bge", "qwen"],
+    )
+    searchType: Optional[str] = Field(
+        None,
+        description="검색 타입",
+        examples=["hybrid", "bm25"],
+    )
 
 
 @router.put("/admin/vector/settings", summary="벡터 설정(임베딩 모델/검색 타입) 변경")
 async def update_vector_settings(body: VectorSettingsBody):
     set_vector_settings(body.embeddingModel, body.searchType)
     return {"message": "updated", **get_vector_settings()}
+
+
+@router.get("/admin/vector/files", summary="벡터 DB에 저장된 파일 목록 반환")
+async def list_vector_files():
+    return await list_indexed_files()
+
+
+class DeleteFilesBody(BaseModel):
+    filesToDelete: List[str] = Field(..., description="삭제할 파일 이름 배열", examples=[["회사내규.pdf", "20240835_보고서.pdf"]])
+
+
+@router.delete("/admin/vector/delete", summary="파일 이름 목록을 받아 인덱스에서 삭제")
+async def delete_vector_files(body: DeleteFilesBody = Body(...)):
+    return await delete_files_by_names(body.filesToDelete)
 
 
 @router.post("/admin/vector/ingest-file", summary="단일 PDF만 벡터 DB에 반영")

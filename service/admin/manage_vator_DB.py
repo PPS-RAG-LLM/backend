@@ -7,6 +7,8 @@ import os
 import time
 from pathlib import Path
 from typing import List
+from datetime import datetime, timezone
+from collections import defaultdict
 
 import torch
 from pydantic import BaseModel
@@ -543,3 +545,81 @@ async def delete_db():
     for col in cols:
         client.drop_collection(col)
     return {"message": "삭제 완료(Milvus Lite)", "dropped_collections": cols}
+
+
+async def list_indexed_files():
+    """Return aggregated file entries from vector DB.
+    Aggregation key: path (txt). Derive fileName/filePath from path.
+    """
+    client = _client()
+    if COLLECTION_NAME not in client.list_collections():
+        return []
+
+    # Fetch up to N rows; for production consider pagination
+    try:
+        rows = client.query(
+            collection_name=COLLECTION_NAME,
+            filter="",
+            output_fields=["path", "chunk_idx", "security_level"],
+            limit=100000,
+        )
+    except Exception:
+        rows = []
+
+    # Group by path
+    grouped: dict[str, dict] = {}
+    counts: dict[str, int] = defaultdict(int)
+    levels: dict[str, int] = {}
+
+    for r in rows:
+        path = r.get("path") if isinstance(r, dict) else r["path"]  # type: ignore[index]
+        counts[path] += 1
+        if path not in levels:
+            levels[path] = int(r.get("security_level") if isinstance(r, dict) else r["security_level"])  # type: ignore[index]
+
+    items = []
+    for path, cnt in counts.items():
+        txt_rel = Path(path)
+        pdf_rel = txt_rel.with_suffix(".pdf")
+        file_name = pdf_rel.name
+        txt_abs = EXTRACTED_TEXT_DIR / txt_rel
+        try:
+            stat = txt_abs.stat()
+            size = stat.st_size
+            indexed_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except FileNotFoundError:
+            size = None
+            indexed_at = None
+        items.append({
+            "fileName": file_name,
+            "filePath": str(pdf_rel),
+            "chunkCount": int(cnt),
+            "indexedAt": indexed_at,
+            "fileSize": size,
+            "securityLevel": int(levels.get(path, 1)),
+        })
+    return items
+
+
+async def delete_files_by_names(file_names: list[str]):
+    """Delete all chunks whose doc_id matches any of the given file name stems."""
+    if not file_names:
+        return {"deleted": 0}
+
+    client = _client()
+    if COLLECTION_NAME not in client.list_collections():
+        return {"deleted": 0}
+
+    deleted_total = 0
+    for name in file_names:
+        stem = Path(name).stem
+        try:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                filter=f"doc_id == '{stem}'",
+            )
+            deleted_total += 1
+        except Exception:
+            # ignore and continue
+            pass
+    return {"deleted": deleted_total, "requested": len(file_names)}

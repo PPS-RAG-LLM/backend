@@ -13,7 +13,7 @@ build/
 .docs
 .cursor
 *.db
-backup/
+.backup
 user_data/
 .vscode/
 *.th

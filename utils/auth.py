@@ -1,20 +1,14 @@
-# pyright: reportUnusedImport=false
-from fastapi import Depends
+from enum import auto
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from config import config
-from errors import UnauthorizedError, ForbiddenError
-import jwt  
-
+import jwt
 security = HTTPBearer(auto_error=False)
 
 def get_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> int:
-	if creds is None:
-		raise UnauthorizedError("인증이 필요합니다")
-	secret = config.get("auth", {}).get("secret", "CHANGE_ME_SECRET")
-	alg = config.get("auth", {}).get("algorithm", "HS256")
-	try:
-		payload = jwt.decode(creds.credentials, secret, algorithms=[alg])
-		user_id = int(payload.get("sub"))
-		return user_id
-	except Exception:
-		raise ForbiddenError("유효하지 않은 토큰입니다")
+    if creds is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        payload = jwt.decode(creds.credentials, "CHANGE_ME_SECRET", algorithms=["HS256"])
+        return int(payload["sub"])
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid token")

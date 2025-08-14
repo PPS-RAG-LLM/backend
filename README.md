@@ -16,7 +16,6 @@ python main.py
 
 # ssh Port Forwarding
 ```
-
 # 기존 터미널 server 실행
 python main.py
 
