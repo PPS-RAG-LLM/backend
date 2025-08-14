@@ -5,7 +5,7 @@ from errors import DatabaseError
 
 logger = logger(__name__)
 
-
+### 
 def get_default_llm_model(category: str) -> Optional[Dict[str, str]]:
     conn = get_db()
     try:
@@ -71,6 +71,26 @@ def insert_workspace(
     finally:
         conn.close()
 
+def get_workspace_id_by_name(user_id: int, name: str) -> int:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id FROM workspaces WHERE name=?
+            """,
+            (name,),
+        )
+        row = cur.fetchone()
+        if row:
+            logger.debug(f"Workspace fetched: id={row['id']}")
+        else:
+            logger.warning(f"Workspace not found: name={name}")
+        return row["id"] if row else None
+    finally:
+        conn.close()
+
+### 
 
 def get_workspace_by_id(workspace_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db()
@@ -104,6 +124,7 @@ def get_workspace_by_id(workspace_id: int) -> Optional[Dict[str, Any]]:
 
 
 def link_workspace_to_user(user_id: int, workspace_id: int) -> None:
+    """유저가 워크스페이스 생성 시 : workspace_users 테이블에 유저와 워크스페이스 연결"""
     conn = get_db()
     try:
         cur = conn.cursor()

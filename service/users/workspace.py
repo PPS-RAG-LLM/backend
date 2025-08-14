@@ -16,6 +16,7 @@ from repository.users.workspace import (
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
 )
+from repository.users.thread import create_default_thread
 
 logger = logger(__name__)
 
@@ -40,7 +41,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     model = get_default_llm_model(category)
     if not model:
         raise InternalServerError("no default llm model for category")
-
+    
     system_prompt = get_default_system_prompt_content(category)
 
     provider                = model["provider"]
@@ -76,6 +77,12 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     )
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
+
+    if category =="qa":
+        thread_slug = generate_unique_slug(f"default-{name}")
+        thread_id = create_default_thread(user_id=user_id, name=name, thread_slug=thread_slug, workspace_id=ws_id)
+        logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
+
 
     ws = get_workspace_by_id(ws_id)
     if not ws:
