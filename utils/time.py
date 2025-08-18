@@ -1,7 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-def to_kst(dt_str: str) -> str:
-    # SQLite 기본 DATETIME("YYYY-MM-DD HH:MM:SS")를 UTC로 간주
-    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    return dt.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+
+def now_kst() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Seoul"))
+
+def now_kst_string() -> str:
+    """현재 한국시간을 SQLite용 문자열로 반환"""
+    return now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
+def expires_at_kst() -> str:
+    return (now_kst() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")

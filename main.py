@@ -16,6 +16,8 @@ from routers.users.workspace import router as workspace, router_singular as work
 from routers.admin.manage_vator_DB_api import router as vector_db_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
+from routers.sso import sso_router as sso_router
+from routers.mock_company import mock_company_router as mock_company_router
 app = FastAPI()
 
 ######################### Middleware ######################### 
@@ -54,6 +56,8 @@ app.add_exception_handler(Exception, general_exception_handler)
 app.include_router(workspace)
 app.include_router(workspace_singular)
 app.include_router(vector_db_router)
+app.include_router(sso_router)
+app.include_router(mock_company_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
 

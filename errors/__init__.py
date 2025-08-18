@@ -16,6 +16,8 @@ from .exceptions import (
     InvalidAPIKeyError,
     ModelNotSupportedError,
     DatabaseError,
+    SessionNotFoundError,
+    InvalidSessionError,
 )
 
 from .handlers import (
@@ -31,6 +33,8 @@ Forbidden = ForbiddenError
 NotFound = NotFoundError
 UnprocessableEntity = UnprocessableEntityError
 InternalServer = InternalServerError
+SessionNotFound = SessionNotFoundError
+InvalidSession = InvalidSessionError
 
 __all__ = [
     # 예외 클래스들
@@ -46,6 +50,8 @@ __all__ = [
     "InvalidAPIKeyError",
     "ModelNotSupportedError",
     "DatabaseError",
+    "SessionNotFoundError", "SessionNotFound",
+    "InvalidSessionError", "InvalidSession",
     # 핸들러들
     "base_api_exception_handler",
     "general_exception_handler", 

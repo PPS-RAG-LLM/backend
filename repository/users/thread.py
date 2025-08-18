@@ -1,7 +1,7 @@
 from utils import get_db, logger
 import sqlite3
 from errors import DatabaseError
-from utils import generate_unique_slug
+from utils import generate_unique_slug, now_kst_string
 from repository.users.workspace import get_workspace_id_by_name
 
 logger = logger(__name__)
@@ -11,16 +11,17 @@ def create_default_thread(user_id: int, name: str, thread_slug: str, workspace_i
     """워크스페이스의 기본 스레드를 생성합니다."""
     conn = get_db()
     try:
+        cur = conn.cursor()
         if not workspace_id:
             workspace_id = get_workspace_id_by_name(user_id, name)
-        conn.execute(
+        cur.execute(
             """
-            INSERT INTO workspace_threads (user_id, name, slug, workspace_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO workspace_threads (user_id, name, slug, workspace_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, name, thread_slug, workspace_id),
+            (user_id, name, thread_slug, workspace_id, now_kst_string(), now_kst_string()),
         )
-        thread_id = conn.lastrowid
+        thread_id = cur.lastrowid
         conn.commit()
         logger.info(f"Default thread created: id={thread_id}, workspace_id={workspace_id}")
         return thread_id

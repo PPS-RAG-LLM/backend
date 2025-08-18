@@ -22,12 +22,18 @@ class UnauthorizedError(BaseAPIException):
     def __init__(self, message: str = "인증이 필요합니다"):
         super().__init__(message, 401)
 
+class SessionNotFoundError(BaseAPIException):
+    """세션을 찾을 수 없음"""
+    def __init__(self, message: str):
+        super().__init__(message, 401)
+    
+class InvalidSessionError(BaseAPIException):
+    """잘못된 세션"""
 
 class ForbiddenError(BaseAPIException):
     """403 Forbidden - 권한 없음"""
     def __init__(self, message: str = "권한이 없습니다"):
         super().__init__(message, 403)
-
 
 class NotFoundError(BaseAPIException):
     """404 Not Found - 리소스를 찾을 수 없음"""
@@ -76,3 +82,5 @@ class DatabaseError(InternalServerError):
     """데이터베이스 오류"""
     def __init__(self, message: str = "데이터베이스 처리 중 오류가 발생했습니다"):
         super().__init__(f"데이터베이스 오류: {message}")
+
+

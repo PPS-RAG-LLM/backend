@@ -86,7 +86,7 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
     return logger
 
 # Convenience default logger
-app_logger = get_logger("CoreIQ")
+app_logger = get_logger("back")
 
 def logger(name: str):
     return app_logger.getChild(name)  # coreiq.<module path>
