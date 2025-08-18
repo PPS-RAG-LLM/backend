@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional
 from config import config
-from utils import generate_unique_slug, logger, to_kst
+from utils import generate_unique_slug, generate_thread_slug, logger
 from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
 import uuid
@@ -16,6 +16,7 @@ from repository.users.workspace import (
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
 )
+from repository.users.thread import create_default_thread
 
 logger = logger(__name__)
 
@@ -40,7 +41,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     model = get_default_llm_model(category)
     if not model:
         raise InternalServerError("no default llm model for category")
-
+    
     system_prompt = get_default_system_prompt_content(category)
 
     provider                = model["provider"]
@@ -77,6 +78,14 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
 
+    if category =="qa":
+        logger.debug(f"Creating default thread for qa workspace: name={name}")
+        thread_name = f"default-{name}"
+        thread_slug = generate_thread_slug(thread_name)
+        thread_id = create_default_thread(user_id=user_id, name=thread_name, thread_slug=thread_slug, workspace_id=ws_id)
+        logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
+
+
     ws = get_workspace_by_id(ws_id)
     if not ws:
         raise InternalServerError("workspace retrieval failed")
@@ -86,9 +95,9 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "category": ws["category"],
         "name": ws["name"],
         "slug": ws["slug"],
-        "createdAt": to_kst(ws["created_at"]),
+        "createdAt": ws["created_at"],
         "temperature": ws["temperature"],
-        "UpdatedAt": to_kst(ws["updated_at"]),
+        "UpdatedAt": ws["updated_at"],
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
     }
@@ -100,15 +109,16 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
     rows = get_workspaces_by_user(user_id)
     items = []
+
     for ws in rows:
         items.append({
             "id": ws["id"],
             "category": ws["category"],
             "name": ws["name"],
             "slug": ws["slug"],
-            "createdAt": to_kst(ws["created_at"]),
+            "createdAt": ws["created_at"],
             "temperature": ws["temperature"],
-            "UpdatedAt": to_kst(ws["updated_at"]),
+            "UpdatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
             "systemPrompt": ws["system_prompt"],
             "threads": [],
@@ -127,9 +137,9 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
         "name": ws["name"],
         "category": ws["category"],
         "slug": ws["slug"],
-        "createdAt": to_kst(ws["created_at"]),
+        "createdAt": ws["created_at"],
         "temperature": ws["temperature"],
-        "updatedAt": to_kst(ws["updated_at"]),
+        "updatedAt": ws["updated_at"],
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
         "documents": [],
@@ -163,9 +173,9 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
             "name": ws["name"],
             "category": ws["category"],
             "slug": ws["slug"],
-            "createdAt": to_kst(ws["created_at"]),
+            "createdAt": ws["created_at"],
             "temperature": ws["temperature"],
-            "updatedAt": to_kst(ws["updated_at"]),
+            "updatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
             "systemPrompt": ws["system_prompt"],
             "documents": [],
