@@ -27,7 +27,7 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
         session_id, user_info = create_session(company_user.username, company_user.password)
         # 2. 브라우저에 쿠키 설정
         response.set_cookie(
-            key     ="coreiq_session",
+            key     =server_conf.get("cookie_name").lower(),
             value   =session_id,
             max_age =server_conf.get("cookie_session_max_age"),    # 8 hours
             httponly=server_conf.get("cookie_httponly"),     
@@ -37,11 +37,11 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
         )
         logger.info(f"login success: {user_info['name']} (session: {session_id[:8]}...)")
         return {
-            "message": "login success", 
-            "user_id": user_info['user_id'],
-            "name": user_info['name'],
-            "department": user_info['department'],
-            "position": user_info['position'],
+            "message"       : "login success", 
+            "user_id"       : user_info['user_id'],
+            "name"          : user_info['name'],
+            "department"    : user_info['department'],
+            "position"      : user_info['position'],
             "security_level": user_info['security_level']
         }
     except (NotFoundError, UnauthorizedError) as e:

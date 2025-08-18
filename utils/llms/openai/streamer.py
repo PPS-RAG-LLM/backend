@@ -27,6 +27,8 @@ def stream_chat(messages, **gen_kwargs):
         if content:
             yield content
 
+
+
 if __name__ == "__main__":
     messages = [
         {"role": "system", "content": "You are a helpful assistant. Only Speak in Korean."},

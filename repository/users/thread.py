@@ -49,3 +49,22 @@ def get_thread_by_id(thread_id: int) -> dict:
         return dict(row) if row else None
     finally:
         conn.close()
+
+def get_thread_by_workspace_id(workspace_id: int) -> list[dict]:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, slug, user_id, workspace_id, created_at, updated_at FROM workspace_threads WHERE workspace_id=?
+            """,
+            (workspace_id,),
+        )   
+        rows = cur.fetchall()
+        if rows:
+            logger.debug(f"Threads fetched: workspace_id={workspace_id}")
+        else:
+            logger.warning(f"No threads found for workspace_id={workspace_id}")
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
