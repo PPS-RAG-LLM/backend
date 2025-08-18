@@ -13,10 +13,10 @@ mock_company_router = APIRouter(prefix="/mock-company", tags=["TEST"])
 
 # 해시된 비밀번호로 변경
 FAKE_COMPANY_EMPLOYEES = {
-    "jongwha123": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
+    "jonghwa123": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "iju1234": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "mingue123": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
-    "rlwjd123": {"password": bcrypt.hashpw("sec123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
+    "rlwjd123": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "ruah0807": {"password": bcrypt.hashpw("12345678".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "bum123": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")}
 }
@@ -60,7 +60,6 @@ def show_company_login():
     </body>
     </html>
     """
-
 @mock_company_router.post("/login")
 def company_login(username: str = Form(...), password: str = Form(...)):
     """가짜 회사 로그인 처리"""
@@ -68,8 +67,9 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     username = username.strip()
     password = password.strip()
     
-    logger.info(f"🔍 로그인 시도: username='{username}', password='{password}'")
-    
+    # 비밀번호 로그 제거: 비밀번호를 로그에 남기지 않도록 수정
+    logger.info(f"🔍 로그인 시도: username='{username}'")  # 비밀번호 제거
+
     # 1. 가짜 회사 인증 (간단히)
     employee = FAKE_COMPANY_EMPLOYEES.get(username)
     if not employee:
@@ -87,8 +87,11 @@ def company_login(username: str = Form(...), password: str = Form(...)):
         "password": password
     }
     
-    # 3. JavaScript로 SSO 호출
-    sso_data_json = json.dumps(sso_data)
+    # 3. 버튼으로 SSO 호출 UI를 반환 (자동 호출 대신 버튼 클릭으로 실행)
+    sso_data_js = {
+        "username": username,
+        "password": password
+    }
     
     return HTMLResponse(f"""
     <!DOCTYPE html>
@@ -96,56 +99,38 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     <head><title>로그인 처리중...</title></head>
     <body>
         <div style="text-align: center; margin-top: 50px;">
-            <h2>🔄 로그인 처리중...</h2>
-            <p>{username}님, 잠시만 기다려주세요.</p>
-            <div id="status">SSO 로그인 중...</div>
+            <h2>🔄 로그인 처리 준비 완료</h2>
+            <p>사용자 {username}님. 아래 버튼을 눌러 SSO 로그인을 실행하세요.</p>
+            <button id="ssoLoginBtn" style="padding:12px 20px; font-size:16px;">SSO 로그인 실행</button>
+            <div id="status" style="margin-top:20px;">대기 중</div>
         </div>
         
         <script>
         async function loginToSSO() {{
             const statusDiv = document.getElementById('status');
-            
+            statusDiv.textContent = 'SSO 서버에 연결 중...';
             try {{
-                statusDiv.textContent = 'SSO 서버에 연결 중...';
-                
-                const response = await fetch('/v1/sso/login', {{
+                const resp = await fetch('/v1/sso/login', {{
                     method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({sso_data_json}),
+                    body: JSON.stringify({sso_data_js}),
                     credentials: 'include'
                 }});
-                
-                if (response.ok) {{
+                if (resp.ok) {{
                     statusDiv.textContent = '로그인 성공! 워크스페이스로 이동 중...';
                     setTimeout(() => window.location.href = '/v1/workspaces', 1000);
                 }} else {{
-                    const error = await response.text();
+                    const error = await resp.text();
                     statusDiv.textContent = 'SSO 로그인 실패';
                     alert('SSO 로그인 실패: ' + error);
                 }}
-            }} catch (error) {{
+            }} catch (e) {{
                 statusDiv.textContent = '연결 실패';
-                alert('연결 실패: ' + error.message);
+                alert('연결 실패: ' + (e && e.message ? e.message : '오류'));
             }}
         }}
-        
-        window.onload = () => setTimeout(loginToSSO, 500);
+        document.getElementById('ssoLoginBtn').addEventListener('click', loginToSSO);
         </script>
     </body>
     </html>
     """)
-
-@mock_company_router.get("/employees")
-def list_employees():
-    """가짜 회사 직원 목록 (관리용)"""
-    return {
-        "employees": [
-            {
-                "employee_id": data["employee_id"],
-                "name": data["full_name"],
-                "department": data["dept_name"],
-                "position": data["job_title"]
-            }
-            for data in FAKE_COMPANY_EMPLOYEES.values()  # .values() 사용
-        ]
-    }

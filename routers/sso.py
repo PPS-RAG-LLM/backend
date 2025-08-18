@@ -25,7 +25,7 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
         session_id, user_info = create_session(company_user.username, company_user.password)
         # 2. 브라우저에 쿠키 설정
         response.set_cookie(
-            key="pps_session",
+            key="coreiq_session",
             value=session_id,
             max_age=8*60*60,  # 8시간
             httponly=True,
@@ -47,12 +47,12 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
 
 
 @sso_router.get("/session-info")
-def get_session_info(pps_session: str = Cookie(None)):
+def get_session_info(coreiq_session: str = Cookie(None)):
     """현재 세션 정보 확인"""
     from repository.users.session import get_session_from_db
-    if not pps_session :
+    if not coreiq_session :
         raise SessionNotFound("session not found")
-    session_data = get_session_from_db(pps_session)          # 세션 데이터 가져오기
+    session_data = get_session_from_db(coreiq_session)          # 세션 데이터 가져오기
     if not session_data:
         raise SessionNotFound("session not found or expired")
     return {
@@ -64,15 +64,15 @@ def get_session_info(pps_session: str = Cookie(None)):
     }
 
 @sso_router.post("/logout")
-def logout(response: Response, pps_session: str = Cookie(None)):
+def logout(response: Response, coreiq_session: str = Cookie(None)):
     """로그아웃"""
     from repository.users.session import delete_session_from_db
-    if pps_session:
-        deleted = delete_session_from_db(pps_session)
-        logger.info(f"logout deleted: session_id={pps_session}, deleted={deleted}")
+    if coreiq_session:
+        deleted = delete_session_from_db(coreiq_session)
+        logger.info(f"logout deleted: session_id={coreiq_session}, deleted={deleted}")
     else:
         logger.info("logout called without session_id in cookie")
-    response.delete_cookie("pps_session", path="/")
+    response.delete_cookie("coreiq_session", path="/")
     return {"message": "logout success"}
 
 @sso_router.get("/active-sessions")
