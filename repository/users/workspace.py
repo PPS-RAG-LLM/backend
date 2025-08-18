@@ -1,11 +1,11 @@
 from typing import Optional, Dict, Any
 import sqlite3
-from utils import logger, get_db
+from utils import logger, get_db, now_kst_string
 from errors import DatabaseError
 
 logger = logger(__name__)
 
-
+### 
 def get_default_llm_model(category: str) -> Optional[Dict[str, str]]:
     conn = get_db()
     try:
@@ -28,7 +28,6 @@ def get_default_llm_model(category: str) -> Optional[Dict[str, str]]:
         return model
     finally:
         conn.close()
-
 
 def insert_workspace(
     *,
@@ -54,11 +53,12 @@ def insert_workspace(
                 name, slug, category, temperature, chat_history, system_prompt,
                 similarity_threshold, provider, chat_model, top_n, chat_mode, query_refusal_response,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name, slug, category, temperature, chat_history, system_prompt,
                 similarity_threshold, provider, chat_model, top_n, chat_mode, query_refusal_response,
+                now_kst_string(), now_kst_string()
             ),
         )
         conn.commit()
@@ -71,7 +71,26 @@ def insert_workspace(
     finally:
         conn.close()
 
+def get_workspace_id_by_name(user_id: int, name: str) -> int:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id FROM workspaces WHERE name=?
+            """,
+            (name,),
+        )
+        row = cur.fetchone()
+        if row:
+            logger.debug(f"Workspace fetched: id={row['id']}")
+        else:
+            logger.warning(f"Workspace not found: name={name}")
+        return row["id"] if row else None
+    finally:
+        conn.close()
 
+### 
 def get_workspace_by_id(workspace_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db()
     try:
@@ -104,12 +123,13 @@ def get_workspace_by_id(workspace_id: int) -> Optional[Dict[str, Any]]:
 
 
 def link_workspace_to_user(user_id: int, workspace_id: int) -> None:
+    """유저가 워크스페이스 생성 시 : workspace_users 테이블에 유저와 워크스페이스 연결"""
     conn = get_db()
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR IGNORE INTO workspace_users (user_id, workspace_id) VALUES (?, ?)",
-            (user_id, workspace_id),
+            "INSERT OR IGNORE INTO workspace_users (user_id, workspace_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (user_id, workspace_id, now_kst_string(), now_kst_string()),
         )
         conn.commit()
         logger.debug(f"Workspace linked to user: user_id={user_id}, workspace_id={workspace_id}")
@@ -169,7 +189,7 @@ def get_workspaces_by_user(user_id: int) -> list[Dict[str, Any]]:
         )
         rows = rows.fetchall()
         if not rows:
-            return {"detail": "No workspaces found from this user"}
+            return []
         return rows
     finally:
         con.close()

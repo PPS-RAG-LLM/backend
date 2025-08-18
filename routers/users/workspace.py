@@ -11,8 +11,10 @@ from service.users.workspace import (
     upload_and_embed_document,
 )
 from typing import Dict, List, Any
-from utils import logger
 from errors import BadRequestError
+from utils import logger
+from utils.auth import get_user_id_from_cookie
+
 logger = logger(__name__)
 
 router = APIRouter(tags=["workspace"], prefix="/v1/workspaces")
@@ -38,12 +40,9 @@ class Workspace(BaseModel):
     temperature: float
     chatHistory: int
     systemPrompt: str
-    
-    
 class NewWorkspaceResponse(BaseModel):
     workspace: Workspace
     message: str
-
 class WorkspaceListItem(BaseModel):
     id: int
     category: str
@@ -55,7 +54,6 @@ class WorkspaceListItem(BaseModel):
     chatHistory: int
     systemPrompt: str
     threads: List[Any] = []
-
 class WorkspaceListResponse(BaseModel):
     workspaces: List[WorkspaceListItem]
 
@@ -71,24 +69,22 @@ class WorkspaceDetailResponse(BaseModel):
     systemPrompt: Optional[str] = None
     documents: List[Any] = []
     threads: List[Any] = []
-
 class WorkspaceUpdateBody(BaseModel):
     name: Optional[str] = None
     temperature: Optional[float] = None
     chatHistory: Optional[int] = None
     systemPrompt: Optional[str] = None
-
 class WorkspaceUpdateResponse(BaseModel):
     workspace: WorkspaceDetailResponse
     message: Optional[str] = None
 
 
 @router.get("", response_model = WorkspaceListResponse)
-def list_all_workspaces():
-# def list_all_workspaces(user_id: int = Depends(get_user)):
-    user_id = 1
+# def list_all_workspaces():
+def list_all_workspaces(user_id: int = Depends(get_user_id_from_cookie)):
+    """로그인한 사용자의 워크스페이스 목록 조회"""
     try:
-        items = list_workspaces(user_id)
+        items = list_workspaces(user_id)  # 쿠키에서 자동으로 가져온 user_id 사용
         return WorkspaceListResponse(workspaces=items)
     except Exception as e:
         logger.error({"list_workspaces_failed": str(e)})

@@ -16,7 +16,36 @@ from routers.users.workspace import router as workspace, router_singular as work
 from routers.admin.manage_vator_DB_api import router as vector_db_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
-app = FastAPI()
+from routers.sso import sso_router as sso_router
+from routers.mock_company import mock_company_router as mock_company_router
+from utils import logger
+from contextlib import asynccontextmanager
+import asyncio
+logger = logger(__name__)
+
+######################### Session Cleaner #########################
+
+@asynccontextmanager
+async def lifspan(app):
+    """주기적으로 만료된 세션 정리"""
+    from repository.users.session import cleanup_expired_sessions
+    async def _periodic_db_session_cleanup():
+        while True:
+            try:
+                cleanup_expired_sessions()
+            except Exception as e:
+                logger.error(f"session cleaner error: {e}")
+            await asyncio.sleep(3000) # 3000초마다 정리
+    logger.info("lifspan start")
+    app.state.session_cleanup_task = asyncio.create_task(_periodic_db_session_cleanup())
+    yield
+    app.state.session_cleanup_task.cancel()
+    try:
+        await app.state.session_cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(lifespan=lifspan)
 
 ######################### Middleware ######################### 
 
@@ -48,14 +77,18 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 
+
 ######################### Router ######################### 
 
 # 라우터 등록
 app.include_router(workspace)
 app.include_router(workspace_singular)
 app.include_router(vector_db_router)
+app.include_router(sso_router)
+app.include_router(mock_company_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
+
 
 @app.get("/")
 def read_root():
