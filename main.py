@@ -14,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from routers.users.workspace import router as workspace, router_singular as workspace_singular
 from routers.admin.manage_vator_DB_api import router as vector_db_router
+from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
 app = FastAPI()
@@ -54,6 +55,7 @@ app.add_exception_handler(Exception, general_exception_handler)
 app.include_router(workspace)
 app.include_router(workspace_singular)
 app.include_router(vector_db_router)
+app.include_router(admin_llm_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
 

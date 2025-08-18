@@ -80,7 +80,7 @@ async def rag_ingest_file_endpoint(req: SinglePDFIngestRequest, request: Request
     request.app.extra.get("logger", print)(f"Single Ingest from {request.client.host}: {req.pdf_path} (model={req.model})")
     return await ingest_single_pdf(req)
 
-@router.post("/admin/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
+@router.post("/admin/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환(관리자 용)")
 async def rag_search_endpoint(body: ExecuteBody):
     from service.admin.manage_vator_DB import execute_search
     return await execute_search(
