@@ -1,4 +1,4 @@
-from repository.users.session import create_new_session
+from repository.users.session import create_new_session, get_session_from_db, delete_sessions_by_user_id
 from repository.users.user import get_user_by_username
 from errors import SessionNotFound, NotFoundError, UnauthorizedError
 import hashlib
@@ -12,16 +12,17 @@ def create_session(username: str, password: str) -> tuple[str, dict]:
     # 1. 사용자 조회
     user = get_user_by_username(username)
     if not user:
-        raise NotFoundError("등록되지 않은 사용자입니다")
+        raise NotFoundError("user not found")
 
     # 2. 비밀번호 검증
     db_hash = user["password"]
     input_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    
     if db_hash != input_hash:
-        raise UnauthorizedError("잘못된 비밀번호입니다")
-    
-    logger.info(f"✅ SHA256 검증 성공: {user['name']}")
+        raise UnauthorizedError("wrong password")
+    logger.info(f"hashed password(SHA256) verified: {user['name']}")
+
+    # 이전 세션 삭제
+    delete_sessions_by_user_id(user['id'])
 
     # 3. 세션 생성 및 저장
     session_id = create_new_session(user['id'])
@@ -35,5 +36,5 @@ def create_session(username: str, password: str) -> tuple[str, dict]:
         'position': user['position'],
         'security_level': user['security_level']
     }
-    
     return session_id, user_info
+
