@@ -78,6 +78,7 @@ class WorkspaceUpdateResponse(BaseModel):
     workspace: WorkspaceDetailResponse
     message: Optional[str] = None
 
+from utils.auth import get_user_id_from_cookie
 
 @router.get("", response_model = WorkspaceListResponse)
 # def list_all_workspaces():

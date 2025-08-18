@@ -68,7 +68,7 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     password = password.strip()
     
     # 비밀번호 로그 제거: 비밀번호를 로그에 남기지 않도록 수정
-    logger.info(f"🔍 로그인 시도: username='{username}'")  # 비밀번호 제거
+    logger.info(f"🔍 로그인 시도: username='{username}', password='[REDACTED]'")
 
     # 1. 가짜 회사 인증 (간단히)
     employee = FAKE_COMPANY_EMPLOYEES.get(username)

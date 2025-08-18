@@ -1,12 +1,21 @@
 server:
   host: 0.0.0.0
   port: 3005
+
+  # CORS middleware 설정
   cors_origins:
     - "http://localhost:3006"
   trusted_hosts:
     - "*"
   force_https: false
   gzip_min_size: 1000
+
+  # 쿠키 보안 설정
+  cookie_session_max_age: 8*60*60     # 8 hours
+  cookie_httponly: true               # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
+  cookie_secure: true                 # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
+  cookie_samesite: 'lax'              # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어 
+                                      # 필요 시 "strict" 또는 "none"
 
 database:
   db_path: storage/pps_rag.db

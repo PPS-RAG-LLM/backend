@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from errors import SessionNotFound, NotFoundError, UnauthorizedError
 from service.users.session import create_session
 from utils import logger
+from config import config
 
 logger = logger(__name__)
 
@@ -21,16 +22,18 @@ class CompanyUserInfo(BaseModel):
 def sso_login(company_user: CompanyUserInfo, response: Response):
     """회사에서 넘어온 ID/PW로 로그인 및 세션 생성"""
     try:
+        server_conf = config.get("server")
         # 1. 로그인 처리 및 세션 생성
         session_id, user_info = create_session(company_user.username, company_user.password)
         # 2. 브라우저에 쿠키 설정
         response.set_cookie(
-            key="coreiq_session",
-            value=session_id,
-            max_age=8*60*60,  # 8시간
-            httponly=True,
-            samesite="lax",
-            path="/"
+            key     ="coreiq_session",
+            value   =session_id,
+            max_age =server_conf.get("cookie_session_max_age"),    # 8 hours
+            httponly=server_conf.get("cookie_httponly"),     
+            samesite=server_conf.get("cookie_samesite"),     
+            secure  =server_conf.get("cookie_secure"),
+            path    ="/"
         )
         logger.info(f"login success: {user_info['name']} (session: {session_id[:8]}...)")
         return {
