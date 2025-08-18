@@ -16,7 +16,7 @@ from repository.users.workspace import (
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
 )
-from repository.users.thread import create_default_thread
+from repository.users.thread import create_default_thread, get_thread_by_workspace_id
 
 logger = logger(__name__)
 
@@ -80,8 +80,9 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 
     if category =="qa":
         logger.debug(f"Creating default thread for qa workspace: name={name}")
-        thread_name = f"default-{name}"
+        thread_name = f"thread-{name}"
         thread_slug = generate_thread_slug(thread_name)
+        logger.info(f"thread_name: {thread_name}, thread_slug: {thread_slug}")
         thread_id = create_default_thread(user_id=user_id, name=thread_name, thread_slug=thread_slug, workspace_id=ws_id)
         logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
 
@@ -109,8 +110,11 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
     rows = get_workspaces_by_user(user_id)
     items = []
-
     for ws in rows:
+        if ws["category"]=="qa":
+            threads = get_thread_by_workspace_id(ws["id"])
+        else:
+            threads = []
         items.append({
             "id": ws["id"],
             "category": ws["category"],
@@ -121,7 +125,15 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
             "UpdatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
             "systemPrompt": ws["system_prompt"],
-            "threads": [],
+            "threads": [
+                {
+                    "id": thread["id"],
+                    "name": thread["name"],
+                    "thread_slug": thread["slug"],
+                    "createdAt": thread["created_at"],
+                    "UpdatedAt": thread["updated_at"],
+                } for thread in threads
+            ],
         })
     logger.debug({"workspaces_count": len(items), "user_id": user_id})
     return items

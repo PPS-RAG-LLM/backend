@@ -37,9 +37,11 @@ def generate_thread_slug(name: str) -> str:
     """워크스페이스 이름에서 고유한 스레드 slug 생성"""
     logger.info(f"Generating unique thread slug for: {name}")
     slug = re_slug(name)
+    logger.info(f"slug: {slug}")
     # 한글이나 특수문자로 인해 빈 slug가 되는 경우
     if not slug or len(slug) < 2:
-        slug = f"thread-{str(uuid.uuid4())[:8]}"
+        slug = str(uuid.uuid4())
+        return slug
     # workspace_threads 테이블에서 중복 체크
     conn = get_db()
     cursor = conn.cursor()

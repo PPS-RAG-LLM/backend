@@ -210,7 +210,13 @@ def get_workspace_by_slug_for_user(user_id: int, slug: str) -> Optional[Dict[str
               w.updated_at,
               w.temperature,
               w.chat_history,
-              w.system_prompt
+              w.system_prompt,
+              w.similarity_threshold,
+              w.provider,
+              w.chat_model,
+              w.top_n,
+              w.chat_mode,
+              w.query_refusal_response
             FROM workspaces AS w
             INNER JOIN workspace_users AS wu ON wu.workspace_id = w.id
             WHERE w.slug = ? AND wu.user_id = ?

@@ -11,6 +11,7 @@ server:
   gzip_min_size: 1000
 
   # 쿠키 보안 설정
+  cookie_name: "coreiq_session"
   cookie_session_max_age: 8*60*60     # 8 hours
   cookie_httponly: true               # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
   cookie_secure: true                 # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
@@ -20,6 +21,7 @@ server:
 database:
   db_path: storage/pps_rag.db
   schema_path: storage/schema.sql
+
 
 provider:
   openai:
@@ -43,3 +45,24 @@ workspace:
   top_n : 4
   similarity_threshold: 0.25
   temperature: 0.7
+
+
+# 모델 별칭 및 레지스트리 설정
+
+
+registry:
+  openai:
+    gpt-4o-mini:
+      api_model: "gpt-4o-mini"
+      params: {}
+    
+  huggingface:
+    qwen-2.5-7b-instruct:
+      family: "qwen"
+      local_path: "/home/work/CoreIQ/gpu_use/KT_sever/local_Qwen2.5-7B-Instruct"
+      params: {}
+    qwen-2.5-vl-7b-instruct:
+      family: "qwen-vl"
+      local_path: "/home/work/CoreIQ/gpu_use/KT_sever/local_Qwen2.5-VL-7B-Instruct"
+      params: {}
+  
