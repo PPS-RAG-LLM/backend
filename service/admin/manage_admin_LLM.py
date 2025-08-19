@@ -52,6 +52,29 @@ class CompareModelsBody(BaseModel):
     promptId: Optional[int] = None
     prompt: Optional[str] = None
 
+# === NEW: model download / train / infer request bodies ===
+
+class DownloadModelBody(BaseModel):
+    repo: str = Field(..., description="HuggingFace repo id, e.g. Qwen/Qwen2.5-7B-Instruct-1M")
+    name: str = Field(..., description="Local folder name to store under STORAGE_ROOT")
+
+
+class TrainModelBody(BaseModel):
+    csv: str = Field(..., description="Path to training csv file")
+    base_name: str = Field(..., description="Base model folder name under STORAGE_ROOT")
+    ft_name: str = Field(..., description="Fine-tuned model folder name under STORAGE_ROOT")
+    epochs: int = 3
+    batch_size: int = 4
+    lr: float = 2e-4
+
+
+class InferBody(BaseModel):
+    modelName: str = Field(..., description="Model folder name under STORAGE_ROOT or repo id")
+    context: str
+    question: str
+    max_tokens: int = 512
+    temperature: float = 0.7
+
 
 # ===== DB Helpers =====
 def _connect() -> sqlite3.Connection:
@@ -294,6 +317,67 @@ def _simple_generate(prompt_text: str, model_name_or_path: str, max_tokens: int 
     )
     gen = out[0][inputs.input_ids.shape[1]:]
     return tok.decode(gen, skip_special_tokens=True)
+
+# ================================================================
+# External script helpers (download / training)
+# ================================================================
+
+_DOWNLOAD_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/download_qwen_model.py"
+_TRAIN_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/train_qwen_rag.py"
+
+
+def _run_command(cmd: list[str]) -> Tuple[int, str]:
+    """Run a shell command and capture (returncode, stdout+stderr)."""
+    import subprocess, shlex
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out, _ = proc.communicate()
+    return proc.returncode, out
+
+
+# ===== Public service functions =====
+
+def download_model(body: DownloadModelBody) -> Dict[str, Any]:
+    cmd = ["python", _DOWNLOAD_SCRIPT, "--repo", body.repo, "--name", body.name]
+    code, out = _run_command(cmd)
+    if code != 0:
+        return {"success": False, "message": "download failed", "log": out}
+    return {"success": True, "message": "download completed", "log": out}
+
+
+def train_model(body: TrainModelBody) -> Dict[str, Any]:
+    output_dir = os.path.join(STORAGE_ROOT, body.ft_name)
+    cmd = [
+        "python", _TRAIN_SCRIPT,
+        "--csv", body.csv,
+        "--base_name", body.base_name,
+        "--ft_name", body.ft_name,
+        "--epochs", str(body.epochs),
+        "--batch_size", str(body.batch_size),
+        "--lr", str(body.lr),
+    ]
+    # 비동기로 실행 – 파이썬 백그라운드 프로세스 & job record 추가
+    import subprocess, json as _jsonlib
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    # fine_tune_jobs row 생성
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("""
+      INSERT INTO fine_tune_jobs(provider_job_id, dataset_id, hyperparameters, status, started_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (f"pid:{proc.pid}", None, _json(body.dict()), "running"))
+    job_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return {"success": True, "jobId": job_id, "pid": proc.pid}
+
+
+def infer_local(body: InferBody) -> Dict[str, Any]:
+    prompt = f"{body.context.strip()}\n위 내용을 참고하여 응답해 주세요\nQuestion: {body.question.strip()}"
+    answer = _simple_generate(prompt, body.modelName, body.max_tokens, body.temperature)
+    return {"success": True, "answer": answer}
 
 
 # ===== Service functions (구현) =====

@@ -18,9 +18,31 @@ from service.admin.manage_admin_LLM import (
     update_prompt,
     delete_prompt,
     test_prompt,
+    DownloadModelBody,
+    TrainModelBody,
+    InferBody,
+    download_model,
+    train_model,
+    infer_local,
 )
 
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM"], responses={200: {"description": "Success"}})
+
+# === New routes ===
+
+@router.post("/model/download")
+def download_model_route(body: DownloadModelBody):
+    return download_model(body)
+
+
+@router.post("/model/train")
+def train_model_route(body: TrainModelBody):
+    return train_model(body)
+
+
+@router.post("/infer")
+def infer_route(body: InferBody):
+    return infer_local(body)
 
 @router.post("/settings")
 def set_settings(body: TopKSettingsBody):
