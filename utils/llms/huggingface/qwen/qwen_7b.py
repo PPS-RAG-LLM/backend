@@ -5,12 +5,15 @@ from threading import Thread
 from config import config
 import time 
 from utils import logger
+from functools import lru_cache
 
 logger = logger(__name__)
 
+@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_qwen_instruct_7b(model_dir): 
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, device_map="auto")
+    model.eval()
     return model, tokenizer
 
 
