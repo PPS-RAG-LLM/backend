@@ -2,6 +2,9 @@ from typing import Dict, Any, Generator, List
 from errors import NotFoundError, BadRequestError
 from utils.llms.registry import LLM
 from repository.users.workspace import get_workspace_by_slug_for_user
+from utils import logger
+
+logger = logger(__name__)
 
 def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, Any]]:
     system_prompt = ws.get("system_prompt")
@@ -11,7 +14,7 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
 
     msgs: List[Dict[str, Any]] = []
     if system_prompt:
-        msgs.append({"role": "system", "content": system_prompt})
+        msgs.append({"role": "system", "content": system_prompt + ". 반드시 한국어로 대답하세요."})
 
     if provider == "openai" and attachments:
         parts = [{"type": "text", "text": content}]
@@ -22,16 +25,21 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
         msgs.append({"role": "user", "content": parts})
     else:
         msgs.append({"role": "user", "content": content})
+
+    logger.info(f"msgs: {msgs}")
     return msgs
 
 def stream_chat_for_workspace(user_id: int, slug: str, body: Dict[str, Any]) -> Generator[str, None, None]:
     """
     """
     ws = get_workspace_by_slug_for_user(user_id, slug)
+    # logger.info(f"ws: {ws}")
     if not ws:
         raise NotFoundError("워크스페이스를 찾을 수 없습니다")
 
     mode = (body.get("mode") or ws.get("chat_mode") or "chat").lower()
+    logger.info(f"mode: {mode}")
+    
     if mode not in ("chat", "query"):
         raise BadRequestError("mode must be 'chat' or 'query'")
 
@@ -42,9 +50,9 @@ def stream_chat_for_workspace(user_id: int, slug: str, body: Dict[str, Any]) -> 
             yield ws.get("query_refusal_response") or "There is no information about this topic."
             return
 
-    runner = LLM.from_workspace(ws)  # provider/model 라우팅
-    messages = _build_messages(ws, body)
-    temperature = ws.get("temperature") or 0.7
+    runner = LLM.from_workspace(ws)         # provider/model 라우팅
+    messages = _build_messages(ws, body)    # 시스템 프롬프트 주입
+    temperature = ws.get("temperature")
 
     for chunk in runner.stream(messages, temperature=temperature):
         yield chunk

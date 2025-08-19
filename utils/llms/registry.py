@@ -1,4 +1,7 @@
 from typing import Callable, Dict, Generator, List, Protocol
+from utils import logger
+
+logger = logger(__name__)
 
 class Streamer(Protocol):
     def stream(self, messages : List[dict], **kwargs) -> Generator[str, None, None] : ...
@@ -19,7 +22,7 @@ def _ensure_adapters_loaded():
     if _INITIALIZED:
         return
     from utils.llms.adapters import openai as _openai_adapter
-    from utils.llms.adapters import qwen as _qwen_adapter
+    from utils.llms.adapters import huggingface as _hf_adapter
     _INITIALIZED = True
 
 def resolve(provider : str, model_key: str) -> Streamer:
@@ -32,4 +35,5 @@ def resolve(provider : str, model_key: str) -> Streamer:
 class LLM:
     @staticmethod
     def from_workspace(ws: dict) -> Streamer:
+        logger.info(f"ws: {ws}")
         return resolve(ws["provider"], ws["chat_model"])
