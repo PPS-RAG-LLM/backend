@@ -23,3 +23,21 @@ python main.py
 ssh -L 3005:localhost:3005 bai-vscode
 ```
 
+```
+python3 -m pip install pymilvus==2.6.0b0
+pip install "pymilvus[model]"
+pip install pymilvus
+pip install \
+    fastapi \
+    streamlit \
+    pymupdf \
+    frontend \
+    sentence-transformers \
+    pandas \
+    pyarrow \
+    dill \
+    aiohttp \
+    numpy \
+    accelerate \
+    --upgrade --force-reinstall
+```

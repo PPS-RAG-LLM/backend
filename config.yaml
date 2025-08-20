@@ -9,7 +9,7 @@ server:
   gzip_min_size: 1000
 
 database:
-  db_path: storage/pps_rag.db
+  path: storage/pps_rag.db
   schema_path: storage/schema.sql
 
 provider:
