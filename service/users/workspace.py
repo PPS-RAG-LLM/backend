@@ -12,7 +12,6 @@ from repository.users.workspace import (
     link_workspace_to_user,
     get_default_system_prompt_content,
     get_workspaces_by_user,
-    get_workspace_by_slug_for_user,
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
     get_workspace_by_workspace_id,
@@ -20,7 +19,7 @@ from repository.users.workspace import (
 )
 from repository.users.workspace_thread import (
     create_default_thread, 
-    get_thread_by_workspace_id,
+    get_threads_by_workspace_id,
 )
 
 logger = logger(__name__)
@@ -117,7 +116,7 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
     items = []
     for ws in rows:
         if ws["category"]=="qa":
-            threads = get_thread_by_workspace_id(ws["id"])
+            threads = get_threads_by_workspace_id(ws["id"])
         else:
             threads = []
         items.append({
@@ -146,9 +145,13 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
 ### 워크스페이스 상세 조회
 
 def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
-    ws = get_workspace_by_slug_for_user(user_id, slug)
+    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    if not workspace_id:
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    ws = get_workspace_by_workspace_id(user_id, workspace_id)
     if not ws:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    threads = get_threads_by_workspace_id(workspace_id)
     return {
         "id": ws["id"],
         "name": ws["name"],
@@ -160,7 +163,15 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
         "documents": [],
-        "threads": [],
+        "threads": [
+            {
+                "id": thread["id"],
+                "name": thread["name"],
+                "thread_slug": thread["slug"],
+                "createdAt": thread["created_at"],
+                "UpdatedAt": thread["updated_at"],
+            } for thread in threads
+        ],
     }
 
 def delete_workspace(user_id: int, slug: str) -> None:
@@ -183,7 +194,7 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
 
     workspace_id = get_workspace_id_by_slug_for_user(slug) # 워크스페이스 아이디 조회
     update_workspace_by_slug_for_user(user_id, slug, updates) # 워크스페이스 업데이트
-    ws = get_workspace_by_workspace_id(workspace_id) # 워크스페이스 상세 조회
+    ws = get_workspace_by_workspace_id(user_id, workspace_id) # 워크스페이스 상세 조회
 
     if ws is None:
         raise NotFoundError(f"Workspace not found for slug '{slug}' or update failed")

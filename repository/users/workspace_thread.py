@@ -50,13 +50,15 @@ def get_thread_by_id(thread_id: int) -> dict:
     finally:
         conn.close()
 
-def get_thread_by_workspace_id(workspace_id: int) -> list[dict]:
+def get_threads_by_workspace_id(workspace_id: int) -> list[dict]:
     conn = get_db()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, name, slug, user_id, workspace_id, created_at, updated_at FROM workspace_threads WHERE workspace_id=?
+            SELECT id, name, slug, user_id, workspace_id, created_at, updated_at 
+            FROM workspace_threads 
+            WHERE workspace_id=?
             """,
             (workspace_id,),
         )   

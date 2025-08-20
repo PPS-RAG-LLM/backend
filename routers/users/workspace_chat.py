@@ -33,6 +33,7 @@ def stream_chat_endpoint(
         gen = stream_chat_for_workspace(
             user_id=user_id, 
             slug=slug, 
+            category=category,
             body=body.model_dump(exclude_unset=True)
             )
         return StreamingResponse(to_see(gen), media_type="text/event-stream")
@@ -51,6 +52,7 @@ def stream_chat_qa_endpoint(
         user_id=user_id, 
         slug=slug, 
         thread_slug=thread_slug, 
+        category=category,
         body=body.model_dump(exclude_unset=True)
         )
     return StreamingResponse(to_see(gen), media_type="text/event-stream")
