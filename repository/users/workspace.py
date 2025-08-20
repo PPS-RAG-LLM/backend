@@ -195,7 +195,7 @@ def get_workspaces_by_user(user_id: int) -> list[Dict[str, Any]]:
         con.close()
 
 
-def get_workspace_by_slug_for_user(user_id: int, slug: str) -> Optional[Dict[str, Any]]:
+def get_workspace_by_workspace_id(user_id: int, workspace_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db()
     try:
         cur = conn.cursor()
@@ -219,21 +219,11 @@ def get_workspace_by_slug_for_user(user_id: int, slug: str) -> Optional[Dict[str
               w.query_refusal_response
             FROM workspaces AS w
             INNER JOIN workspace_users AS wu ON wu.workspace_id = w.id
-            WHERE w.slug = ? AND wu.user_id = ?
+            WHERE w.id = ? AND wu.user_id = ?
             LIMIT 1
             """,
-            (slug, user_id),
+            (workspace_id, user_id),
         )
-        row = cur.fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-def get_workspace_by_workspace_id(workspace_id: int) -> Optional[Dict[str, Any]]:
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))
         row = cur.fetchone()
         return dict(row) if row else None
     finally:

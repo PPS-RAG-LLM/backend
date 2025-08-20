@@ -35,5 +35,6 @@ def resolve(provider : str, model_key: str) -> Streamer:
 class LLM:
     @staticmethod
     def from_workspace(ws: dict) -> Streamer:
-        logger.info(f"ws: {ws}")
+        # logger.info(f"ws: {ws}")
         return resolve(ws["provider"], ws["chat_model"])
+        
