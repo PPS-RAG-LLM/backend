@@ -15,8 +15,13 @@ from repository.users.workspace import (
     get_workspace_by_slug_for_user,
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
+    get_workspace_by_workspace_id,
+    get_workspace_id_by_slug_for_user
 )
-from repository.users.thread import create_default_thread, get_thread_by_workspace_id
+from repository.users.workspace_thread import (
+    create_default_thread, 
+    get_thread_by_workspace_id,
+)
 
 logger = logger(__name__)
 
@@ -161,7 +166,8 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
 def delete_workspace(user_id: int, slug: str) -> None:
     deleted = delete_workspace_by_slug_for_user(user_id, slug)
     if not deleted:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+        logger.error(f"delete workspace failed: user_id={user_id}, slug={slug}")
+        raise NotFoundError("삭제 실패")
     return None
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -169,19 +175,21 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
     allowed_keys = {"name", "temperature", "chatHistory", "systemPrompt"}
     updates = {k: v for k, v in payload.items() if k in allowed_keys}
     if not updates:
-        raise BadRequestError("업데이트할 필드가 없습니다")
+        return None
 
-    # 이름 변경 시 slug도 자동 갱신
-    if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
-        updates["slug"] = generate_unique_slug(updates["name"]) 
+    # # 이름 변경 시 slug도 자동 갱신
+    # if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
+    #     updates["slug"] = generate_unique_slug(updates["name"]) 
 
-    ws = update_workspace_by_slug_for_user(user_id, slug, updates)
-    if not ws:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+    workspace_id = get_workspace_id_by_slug_for_user(slug) # 워크스페이스 아이디 조회
+    update_workspace_by_slug_for_user(user_id, slug, updates) # 워크스페이스 업데이트
+    ws = get_workspace_by_workspace_id(workspace_id) # 워크스페이스 상세 조회
 
+    if ws is None:
+        raise NotFoundError(f"Workspace not found for slug '{slug}' or update failed")
     return {
         "workspace": {
-            "id": ws["id"],
+            "id": ws["id"] if isinstance(ws, dict) else getattr(ws, "id", None),
             "name": ws["name"],
             "category": ws["category"],
             "slug": ws["slug"],

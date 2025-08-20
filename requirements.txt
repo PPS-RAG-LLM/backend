@@ -70,6 +70,7 @@ protobuf==5.27.2
 
 python-multipart==0.0.20
 bcrypt==4.3.0
+tiktoken
 
 fastapi
 streamlit

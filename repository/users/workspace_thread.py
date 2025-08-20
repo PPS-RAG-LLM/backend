@@ -68,3 +68,13 @@ def get_thread_by_workspace_id(workspace_id: int) -> list[dict]:
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+def get_thread_id_by_slug_for_user(user_id: int, thread_slug: str) -> int:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM workspace_threads WHERE user_id=? AND slug=?", (user_id, thread_slug))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()

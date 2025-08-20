@@ -2,6 +2,7 @@ from typing import Dict, Any, Generator, List
 from errors import NotFoundError, BadRequestError
 from utils.llms.registry import LLM
 from repository.users.workspace import get_workspace_by_slug_for_user
+from repository.users.workspace_thread import get_thread_id_by_slug_for_user
 from utils import logger
 
 logger = logger(__name__)
@@ -29,9 +30,21 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
     logger.info(f"msgs: {msgs}")
     return msgs
 
-def stream_chat_for_workspace(user_id: int, slug: str, body: Dict[str, Any]) -> Generator[str, None, None]:
-    """
-    """
+def stream_chat_for_workspace(
+    user_id: int, 
+    slug: str, 
+    body: Dict[str, Any], 
+    thread_slug: str=None
+) -> Generator[str, None, None]:
+    """"""
+    if thread_slug:
+        thread_id = get_thread_id_by_slug_for_user(user_id, thread_slug)
+        logger.info(f"thread_id: {thread_id}")
+        if not thread_id:
+            raise NotFoundError("채팅 스레드를 찾을 수 없습니다")
+    else:
+        thread_id = None
+
     ws = get_workspace_by_slug_for_user(user_id, slug)
     # logger.info(f"ws: {ws}")
     if not ws:
@@ -44,11 +57,6 @@ def stream_chat_for_workspace(user_id: int, slug: str, body: Dict[str, Any]) -> 
         raise BadRequestError("mode must be 'chat' or 'query'")
 
     # TODO: 실제 벡터 검색 결과 유무 판단 및 컨텍스트 주입
-    if mode == "query":
-        has_context = False
-        if not has_context:
-            yield ws.get("query_refusal_response") or "There is no information about this topic."
-            return
 
     runner = LLM.from_workspace(ws)         # provider/model 라우팅
     messages = _build_messages(ws, body)    # 시스템 프롬프트 주입
