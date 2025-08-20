@@ -229,6 +229,16 @@ def get_workspace_by_slug_for_user(user_id: int, slug: str) -> Optional[Dict[str
     finally:
         conn.close()
 
+def get_workspace_by_workspace_id(workspace_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
 
 def delete_workspace_by_slug_for_user(user_id: int, slug: str) -> bool:
     con = get_db()
@@ -251,6 +261,17 @@ def delete_workspace_by_slug_for_user(user_id: int, slug: str) -> bool:
     finally:
         con.close()
 
+def get_workspace_id_by_slug_for_user(slug: str) -> Optional[int]:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM workspaces WHERE slug = ? ", (slug,))
+        row = cur.fetchone()
+        workspace_id = row["id"] if row else None
+        logger.info(f"workspace_id: {workspace_id}")
+        return workspace_id
+    finally:
+        conn.close()
 
 def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """선택적 필드만 업데이트하고, 갱신된 행을 반환한다."""
@@ -268,12 +289,11 @@ def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str
         if key in updates:
             set_parts.append(f"{col} = ?")
             params.append(updates[key])
-    # 업데이트할 필드가 없으면 조기 종료
-    if not set_parts:
-        return None
 
     # updated_at은 항상 갱신
-    set_clause = ", ".join(set_parts + ["updated_at = datetime('now')"])
+    set_clause = ", ".join(set_parts + ["updated_at = ?"])
+    updated_at_value = now_kst_string()
+    logger.info(f"updated_at_value: {updated_at_value}")
 
     con = get_db()
     try:
@@ -289,34 +309,14 @@ def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str
                 WHERE w.slug = ? AND wu.user_id = ?
             )
         """
-        cur.execute(sql, (*params, slug, user_id))
+        cur.execute(sql, (*params, updated_at_value, slug, user_id))
         con.commit()
+        logger.info(f"updated workspace.")
         if cur.rowcount == 0:
-            return None
-
-        # 갱신된 행 재조회
-        cur = con.cursor()
-        cur.execute(
-            """
-            SELECT
-              w.id,
-              w.name,
-              w.slug,
-              w.category,
-              w.created_at,
-              w.updated_at,
-              w.temperature,
-              w.chat_history,
-              w.system_prompt
-            FROM workspaces AS w
-            WHERE w.slug = ?
-            LIMIT 1
-            """,
-            (slug,)
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
+            logger.error(f"workspace update failed: {cur.rowcount}")
+            raise DatabaseError(f"workspace update failed: {cur.rowcount}")
     except sqlite3.IntegrityError as exc:
+        logger.error(f"workspace update failed: {exc}")
         raise DatabaseError(f"workspace update failed: {exc}") from exc
     finally:
         con.close()

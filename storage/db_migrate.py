@@ -145,5 +145,5 @@ if __name__ == "__main__":
 >>> python storage/db_migrate.py recreate
 
 # 특정 dump 파일로 복원
->>> python storage/db_migrate.py restore --dump /home/work/CoreIQ-RA/.backend/storage/backup/pps_rag_data_YYYY-MM-DD_HHMMSS.sql
+>>> python storage/db_migrate.py restore --dump /home/work/CoreIQ/Ruah/backend/storage/.backup/pps_rag_data_YYYY-MM-DD_HHMMSS.sql
 """

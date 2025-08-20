@@ -84,7 +84,7 @@ def list_all_workspaces():
 # def list_all_workspaces(user_id: int = Depends(get_user_id_from_cookie)):
     """로그인한 사용자의 워크스페이스 목록 조회"""
     try:
-        user_id = 6
+        user_id = 3
         logger.info(f"list_all_workspaces: {user_id}")
         items = list_workspaces(user_id)  # 쿠키에서 자동으로 가져온 user_id 사용
         return WorkspaceListResponse(workspaces=items)
@@ -99,7 +99,7 @@ def create_new_workspace(
     category: str = Query(..., description="qa | doc_gen | summary"),
     body: NewWorkspaceBody = ...,
 ):
-    user_id = 6
+    user_id = 3
     logger.debug({"category": category, "body": body.model_dump(exclude_unset=True)})
     try:
         result = create_workspace_for_user(user_id, category, body.model_dump(exclude_unset=True))
@@ -112,91 +112,21 @@ def create_new_workspace(
 ### 워크스페이스 상세 조회
 @router_singular.get("/{slug}", response_model=WorkspaceDetailResponse, summary="워크스페이스 상세 조회")
 def get_workspace_by_slug(slug: str):
-    user_id = 6
+    user_id = 3
     item = get_workspace_detail(user_id, slug)
     return item
 
 #### 워크스페이스 삭제
 @router_singular.delete("/{slug}", summary="워크스페이스 삭제")
 def delete_workspace(slug: str):
-    user_id = 6
+    user_id = 3
     delete_workspace_service(user_id, slug)
     return {"message": "Workspace deleted"}
 
 #### 워크스페이스 업데이트
 @router_singular.post("/{slug}/update", response_model=WorkspaceUpdateResponse, summary="워크스페이스 업데이트")
 def update_workspace(slug: str, body: WorkspaceUpdateBody):
-    user_id = 6
+    user_id = 3
     result = update_workspace_service(user_id, slug, body.model_dump(exclude_unset=True))
     return result
 
-
-#### 채팅
-from starlette.responses import StreamingResponse
-
-class Attachment(BaseModel):
-    name: str           # 파일명
-    mime: str           # image/png, image/jpeg, application/pdf, etc.
-    contentString: str  # data:image/png;base64,...
-class StreamChatRequest(BaseModel):
-    message: str
-    mode: Optional[str] = Field(None, pattern="^(chat|query)$")
-    sessionId: Optional[str] = None
-    attachments: Optional[List[Attachment]] = []
-    reset: Optional[bool] = False
-    
-@router_singular.post("/{slug}/stream-chat", summary="워크스페이스에서 스트리밍 채팅 실행")
-def stream_chat_endpoint(slug : str , body: StreamChatRequest):
-    user_id = 6
-    from service.users.chat import stream_chat_for_workspace
-    import time
-    def to_see(gen):
-        buf = []
-        last_flush = time.monotonic()
-        for chunk in gen:
-            if not chunk:
-                continue
-            logger.debug(f"[raw_chunk] {repr(chunk)}")
-            if not buf:
-                chunk = chunk.lstrip()
-            buf.append(chunk)
-            text = "".join(buf)
-            if len(text) >= 32 or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？")) or time.monotonic() - last_flush > 0.2:
-                logger.info(f"[flush] {repr(text)}")
-                yield f"data: {text}\n\n"
-                buf.clear()
-                last_flush = time.monotonic()
-        if buf:
-            text = "".join(buf)
-            logger.info(f"[flush-end] {repr(text)}")
-            yield f"data: {text}\n\n"
-    gen = stream_chat_for_workspace(user_id, slug, body.model_dump(exclude_unset=True))
-    return StreamingResponse(to_see(gen), media_type="text/event-stream")
-
-
-# qa를 제외한 문서요약, 생성만 처리 가능함
-    # if category == "gen_doc" or category == "summary":
-    #     def to_see(gen):
-    #         buf = []
-    #         last_flush = time.monotonic()
-    #         for chunk in gen:
-    #             if not chunk:
-    #                 continue
-    #             logger.debug(f"[raw_chunk] {repr(chunk)}")
-    #             if not buf:
-    #                 chunk = chunk.lstrip()
-    #             buf.append(chunk)
-    #             text = "".join(buf)
-    #             if len(text) >= 32 or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？")) or time.monotonic() - last_flush > 0.2:
-    #                 logger.info(f"[flush] {repr(text)}")
-    #                 yield f"data: {text}\n\n"
-    #                 buf.clear()
-    #                 last_flush = time.monotonic()
-    #         if buf:
-    #             text = "".join(buf)
-    #             logger.info(f"[flush-end] {repr(text)}")
-    #             yield f"data: {text}\n\n"
-    #     gen = stream_chat_for_workspace(user_id, slug, body.model_dump(exclude_unset=True))
-    #     return StreamingResponse(to_see(gen), media_type="text/event-stream")
-    # else:
-    #     raise BadRequestError("qa category should be used in another endpoint > '/v1/workspace/{slug}/thread/{thread_slug}/stream-chat'")
