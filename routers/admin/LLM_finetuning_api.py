@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 import asyncio
+import json
 
 from service.admin.LLM_finetuning import (
     FineTuneRequest,
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], resp
 
 @router.post("/fine-tuning", summary="파인튜닝 설정 및 실행")
 def launch_fine_tuning(category: str = Query(..., description="qa | doc_gen | summary"), body: FineTuneRequest = ...):
+    # Let service raise structured exceptions; middleware will format the response.
     return start_fine_tuning(category, body)
 
 
@@ -48,7 +50,7 @@ def stream_fine_tuning(jobId: str):
                 last_len = len(lines)
             # status
             st = get_fine_tuning_status("qa", jobId)  # category는 상태만 위해 의미 없음
-            yield f"event: status\ndata: {st}\n\n"
+            yield f"event: status\ndata: {json.dumps(st, ensure_ascii=False)}\n\n"
             if st.get("status") in ("succeeded", "failed"):
                 break
             await asyncio.sleep(1)

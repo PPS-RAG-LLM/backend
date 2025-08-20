@@ -6,13 +6,27 @@ import os
 import threading
 import time
 import uuid
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from utils.database import get_db
+from utils import get_db, logger
+from errors.exceptions import BadRequestError, InternalServerError
+logger = logger(__name__)
+
+try:
+    from transformers import TrainerCallback  # type: ignore
+except Exception:  # transformers may be absent during static analysis
+    class TrainerCallback:  # type: ignore
+        pass
+
+# ===== Progress interval (seconds) =====
+FT_PROGRESS_INTERVAL_SEC = int(os.getenv("FT_PROGRESS_INTERVAL_SEC", "2"))
+# ===== Heartbeat timeout (seconds) for liveness detection =====
+FT_HEARTBEAT_TIMEOUT_SEC = int(os.getenv("FT_HEARTBEAT_TIMEOUT_SEC", "60"))
 
 # ===== Paths =====
 BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))  # backend/
@@ -60,6 +74,7 @@ class FineTuneRequest(BaseModel):
     learningRate: float = 2e-4
     overfittingPrevention: bool = True
     trainSetFile: str
+    gradientAccumulationSteps: int = 8
     tuningType: Optional[str] = Field(
         default="QLORA",
         description="파인튜닝 방식: LORA | QLORA | FULL",
@@ -84,7 +99,7 @@ def _ensure_output_dir(model_name: str) -> str:
     cfg_path = os.path.join(out_dir, "config.json")
     if not os.path.isfile(cfg_path):
         with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"created_at": datetime.utcnow().isoformat()}, f, ensure_ascii=False)
+            json.dump({"created_at": datetime.now().isoformat()}, f, ensure_ascii=False)
     return out_dir
 
 def _ensure_lora_marker(out_dir: str, tuning_type: str):
@@ -98,6 +113,18 @@ def _append_log(log_path: str, line: str):
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line.rstrip("\n") + "\n")
+    except Exception:
+        pass
+
+# ----- Error helper -----
+def _write_error(out_dir: str, message: str):
+    """Write error message to a dedicated error.txt inside output dir."""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        err_path = os.path.join(out_dir, "error.txt")
+        with open(err_path, "a", encoding="utf-8") as f:
+            ts = datetime.now().isoformat()
+            f.write(f"[{ts}] {message}\n")
     except Exception:
         pass
 
@@ -164,6 +191,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "trainSetFile": train_path,
         "reserveDate": reserve_now,
         "category": category,
+        "gradientAccumulationSteps": req.gradientAccumulationSteps,
     }
     try:
         cur.execute("""
@@ -178,23 +206,54 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
     conn.commit()
     return int(cur.lastrowid)
 
-def _update_job_status(conn, job_id: str, status: str, progress: int | None = None, rough: int | None = None):
-    cur = conn.cursor()
-    cur.execute("SELECT metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
-    row = cur.fetchone()
-    metrics = {}
-    if row and row["metrics"]:
+def _update_job_status(conn, job_id: str, status: str, progress: int | None = None, rough: int | None = None, extras: dict | None = None, _retries: int = 3):
+    """
+    Update job status and optional metrics. Progress percentage is intentionally ignored (not persisted).
+    """
+    for attempt in range(_retries):
         try:
-            metrics = json.loads(row["metrics"]) or {}
-        except Exception:
+            cur = conn.cursor()
+            cur.execute("SELECT metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
+            row = cur.fetchone()
             metrics = {}
-    if progress is not None:
-        metrics["learningProgress"] = progress
-    if rough is not None:
-        metrics["roughScore"] = rough
-    cur.execute("UPDATE fine_tune_jobs SET status=?, metrics=? WHERE provider_job_id=?",
-                (status, json.dumps(metrics, ensure_ascii=False), job_id))
-    conn.commit()
+            if row and row["metrics"]:
+                try:
+                    metrics = json.loads(row["metrics"]) or {}
+                except Exception:
+                    metrics = {}
+            # Intentionally do not persist progress percentage
+            if rough is not None:
+                metrics["roughScore"] = rough
+            if extras:
+                try:
+                    metrics.update(extras)
+                except Exception:
+                    pass
+            # Update heartbeat timestamp for liveness detection
+            try:
+                metrics["heartbeatAt"] = datetime.now().isoformat()
+            except Exception:
+                pass
+            cur.execute(
+                "UPDATE fine_tune_jobs SET status=?, metrics=? WHERE provider_job_id=?",
+                (status, json.dumps(metrics, ensure_ascii=False), job_id),
+            )
+            conn.commit()
+            try:
+                # Additional: persist status change to train.log for easier tracing
+                out_dir = _resolve_out_dir_by_job(conn, job_id)
+                if out_dir:
+                    log_path = os.path.join(out_dir, "train.log")
+                    msg = f"status={status} progress={progress if progress is not None else '-'} rough={rough if rough is not None else '-'} extras={extras or {}}"
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] {msg}")
+            except Exception:
+                pass
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < _retries - 1:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
 
 def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str):
     cur = conn.cursor()
@@ -227,24 +286,31 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
 
 def _resolve_out_dir_by_job(conn, job_id: str) -> Optional[str]:
     cur = conn.cursor()
-    cur.execute("SELECT hyperparameters, metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
+    # First try portable path: metrics only
+    cur.execute("SELECT metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
     row = cur.fetchone()
-    if not row:
-        return None
     save_name = None
-    if row["hyperparameters"]:
-        try:
-            hp = json.loads(row["hyperparameters"]) or {}
-            save_name = hp.get("saveModelName")
-        except Exception:
-            save_name = None
-    if not save_name and row["metrics"]:
+    if row and row["metrics"]:
         try:
             mt = json.loads(row["metrics"]) or {}
             hp = mt.get("hyperparameters") or {}
             save_name = hp.get("saveModelName")
         except Exception:
             save_name = None
+    # If still missing, try optional hyperparameters column
+    if not save_name:
+        try:
+            cur.execute("SELECT hyperparameters FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
+            r2 = cur.fetchone()
+            if r2 and r2["hyperparameters"]:
+                try:
+                    hp = json.loads(r2["hyperparameters"]) or {}
+                    save_name = hp.get("saveModelName")
+                except Exception:
+                    save_name = None
+        except Exception:
+            # column may not exist in this DB
+            pass
     if not save_name:
         return None
     return os.path.join(STORAGE_MODEL_ROOT, save_name)
@@ -269,28 +335,41 @@ def get_fine_tuning_logs(job_id: str, tail: int = 200) -> Dict[str, Any]:
 def _simulate_training(job: FineTuneJob, save_name_with_suffix: str):
     conn = get_db()
     try:
-        _update_job_status(conn, job.job_id, "running", progress=1, rough=0)
+        _update_job_status(conn, job.job_id, "running")
         out_dir = _ensure_output_dir(save_name_with_suffix)
         ttype = (job.request.get("tuningType") or "QLORA").upper()
         if ttype in ("LORA", "QLORA"):
             _ensure_lora_marker(out_dir, ttype)
         log_path = os.path.join(out_dir, "train.log")
-        _append_log(log_path, f"[{datetime.utcnow().isoformat()}] job {job.job_id} started (SIMULATED)")
+        # fresh log
+        try:
+            with open(log_path, "w", encoding="utf-8") as _tmp:
+                _tmp.write("")
+        except Exception:
+            pass
+        # console log
+        logger.info(
+            f"Fine-tuning started (SIM) jobId={job.job_id} category={job.category} save={save_name_with_suffix}"
+        )
+        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} started (SIMULATED)")
         for p in range(2, 101):
             time.sleep(0.1)
-            _update_job_status(conn, job.job_id, "running", progress=p)
             if p % 5 == 0:
-                _append_log(log_path, f"[{datetime.utcnow().isoformat()}] progress {p}%")
+                _append_log(log_path, f"[{datetime.now().isoformat()}] progress {p}%")
         _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, ttype)
-        _append_log(log_path, f"[{datetime.utcnow().isoformat()}] job {job.job_id} succeeded")
+        logger.info(
+            f"Fine-tuning succeeded (SIM) jobId={job.job_id} save={save_name_with_suffix} type={ttype}"
+        )
+        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} succeeded")
     except Exception:
+        logger.error(f"Fine-tuning failed (SIM) jobId={job.job_id}")
         cur = conn.cursor()
         cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
         conn.commit()
         try:
             out_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
             log_path = os.path.join(out_dir, "train.log")
-            _append_log(log_path, f"[{datetime.utcnow().isoformat()}] job {job.job_id} failed")
+            _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} failed")
         except Exception:
             pass
     finally:
@@ -306,14 +385,25 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
     """
     conn = get_db()
     try:
-        _update_job_status(conn, job.job_id, "running", progress=1, rough=0)
+        _update_job_status(conn, job.job_id, "running")
 
         out_dir = _ensure_output_dir(save_name_with_suffix)
         tuning_type = (job.request.get("tuningType") or "QLORA").upper()
         if tuning_type in ("LORA", "QLORA"):
             _ensure_lora_marker(out_dir, tuning_type)
         log_path = os.path.join(out_dir, "train.log")
-        _append_log(log_path, f"[{datetime.utcnow().isoformat()}] job {job.job_id} started (INLINE)")
+        # Truncate old log to avoid confusion with previous runs having same save name
+        try:
+            with open(log_path, "w", encoding="utf-8") as _tmp:
+                _tmp.write("")
+        except Exception:
+            pass
+        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} started (INLINE)")
+        # console log
+        logger.info(
+            f"Fine-tuning started jobId={job.job_id} type={tuning_type} base={job.request.get('baseModelName')} "
+            f"save={save_name_with_suffix} data={job.request.get('trainSetFile')}"
+        )
 
         # imports
         try:
@@ -325,13 +415,17 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 TrainingArguments,
                 Trainer,
                 BitsAndBytesConfig,
+                TrainerCallback,
             )
-            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
         except Exception as e:
-            _append_log(log_path, f"[{datetime.utcnow().isoformat()}] import error: {e}")
-            cur = conn.cursor()
-            cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-            conn.commit()
+            _append_log(log_path, f"[{datetime.now().isoformat()}] import error: {e}")
+            try:
+                _update_job_status(conn, job.job_id, "failed", extras={"error": f"import error: {e}"})
+            except Exception:
+                cur = conn.cursor()
+                cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
+                conn.commit()
+            logger.error(f"Fine-tuning failed jobId={job.job_id} error=import error: {e}")
             return
 
         # ===== Build dataset from CSV =====
@@ -357,10 +451,14 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 enc = chardet.detect(raw).get("encoding") or "utf-8"
                 df = pd.read_csv(csv_path, encoding=enc, dtype=str, on_bad_lines="skip").fillna("")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.utcnow().isoformat()}] csv load failed: {e}")
-                cur = conn.cursor()
-                cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-                conn.commit()
+                _append_log(log_path, f"[{datetime.now().isoformat()}] csv load failed: {e}")
+                try:
+                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"csv load failed: {e}"})
+                except Exception:
+                    cur = conn.cursor()
+                    cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
+                    conn.commit()
+                logger.error(f"Fine-tuning failed jobId={job.job_id} error=csv load failed: {e}")
                 return
 
         conversations = []
@@ -371,6 +469,28 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     {"from": "assistant", "value": row.get("Answer", "")},
                 ]
             })
+
+        # ===== Deterministic train/test split (random_state=42) =====
+        total_examples = len(conversations)
+        if total_examples >= 10:
+            eval_size = max(1, int(round(total_examples * 0.1)))
+        elif total_examples >= 2:
+            eval_size = 1
+        else:
+            eval_size = 0
+
+        if eval_size > 0:
+            # shuffle deterministically
+            import random as _py_random
+            indices = list(range(total_examples))
+            rng = _py_random.Random(42)
+            rng.shuffle(indices)
+            eval_indices = set(indices[:eval_size])
+            train_conversations = [conversations[i] for i in indices[eval_size:]]
+            eval_conversations = [conversations[i] for i in indices[:eval_size]]
+        else:
+            train_conversations = conversations
+            eval_conversations = []
 
         class RagDataset(torch.utils.data.Dataset):
             def __init__(self, data, tokenizer, max_len=4096):
@@ -406,9 +526,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         base_folder = _resolve_model_dir(job.request.get("baseModelName"))
         if not _has_model_signature(base_folder):
             _append_log(log_path, f"[{datetime.now().isoformat()}] base model not found: {base_folder}")
-            cur = conn.cursor()
-            cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-            conn.commit()
+            try:
+                _update_job_status(conn, job.job_id, "failed", extras={"error": f"base model not found: {base_folder}"})
+            except Exception:
+                cur = conn.cursor()
+                cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
+                conn.commit()
+            logger.error(f"Fine-tuning failed jobId={job.job_id} error=base model not found: {base_folder}")
             return
         model_path = base_folder
         output_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
@@ -436,6 +560,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         elif tuning_type == "LORA":
             # LoRA (no 4-bit)
+            try:
+                from peft import LoraConfig, get_peft_model  # type: ignore
+            except Exception as e:
+                _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for LORA: {e}")
+                _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
+                logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
+                return
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
             if tokenizer.pad_token_id is None:
                 if getattr(tokenizer, "eos_token_id", None) is not None:
@@ -473,6 +604,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         else:
             # QLORA: 4-bit + LoRA
+            try:
+                from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
+            except Exception as e:
+                _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for QLORA: {e}")
+                _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
+                logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
+                return
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
@@ -516,53 +654,132 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # ===== Train =====
         max_len = job.request.get("max_len", 4096)
-        train_dataset = RagDataset(conversations, tokenizer, max_len=max_len)
+        train_dataset = RagDataset(train_conversations, tokenizer, max_len=max_len)
+        eval_dataset = RagDataset(eval_conversations, tokenizer, max_len=max_len) if len(eval_conversations) > 0 else None
 
-        from transformers import TrainingArguments, Trainer
-        training_args = TrainingArguments(
+        # ===== Simple ROUGE-1 helper =====
+        def _rouge1_f1(reference: str, candidate: str) -> float:
+            ref_words = reference.split()
+            cand_words = candidate.split()
+            if not ref_words or not cand_words:
+                return 0.0
+            matches = sum(1 for w in cand_words if w in ref_words)
+            precision = matches / len(cand_words) if cand_words else 0.0
+            recall = matches / len(ref_words) if ref_words else 0.0
+            if precision + recall == 0:
+                return 0.0
+            return 2 * (precision * recall) / (precision + recall)
+
+        import math
+
+        # Build kwargs dict first to allow graceful fallback when certain versions
+        # of transformers don't support a particular parameter (e.g. evaluation_strategy).
+        _ta_kwargs = dict(
             output_dir=output_dir,
             num_train_epochs=job.request.get("epochs", 3),
             per_device_train_batch_size=job.request.get("batchSize", 1),
-            gradient_accumulation_steps=8,
+            gradient_accumulation_steps=job.request.get("gradientAccumulationSteps", 8),
             learning_rate=job.request.get("learningRate", 2e-4),
             bf16=True,
             logging_steps=10,
             save_steps=500,
             save_total_limit=2,
-            evaluation_strategy="no",
             report_to="none",
             optim="paged_adamw_8bit",
+            seed=42,
+            data_seed=42,
         )
+        # Conditionally include evaluation_strategy only if the current transformers version supports it
+        from inspect import signature as _sig
+        if "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters:
+            _ta_kwargs["evaluation_strategy"] = "epoch" if eval_dataset is not None else "no"
 
-        class LogCallback:
+        training_args = TrainingArguments(**_ta_kwargs)
+
+        class LogCallback(TrainerCallback):  # type: ignore[misc]
             def on_log(self, args, state, control, logs=None, **kwargs):
                 if logs and "loss" in logs:
-                    _append_log(log_path, f"[{datetime.utcnow().isoformat()}] step={state.global_step} loss={logs['loss']}")
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            tokenizer=tokenizer,
-            callbacks=[LogCallback()],
-        )
+        # === Periodic progress callback (interval-based) ===
+        # Remove periodic DB progress updates entirely
 
-        trainer.train()
+        def _build_trainer()->Trainer:
+            return Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                tokenizer=tokenizer,
+                callbacks=[LogCallback()],
+            )
+
+        trainer=_build_trainer()
+
+        try:
+            trainer.train()
+        except RuntimeError as re:
+            if "out of memory" in str(re).lower() and training_args.per_device_train_batch_size>1:
+                new_bs=max(1,training_args.per_device_train_batch_size//2)
+                _append_log(log_path,f"[{datetime.now().isoformat()}] OOM detected, retrying with batch_size={new_bs}")
+                training_args.per_device_train_batch_size=new_bs
+                trainer=_build_trainer()
+                trainer.train()
+            else:
+                raise
+
+        # Compute final ROUGE-1 on full eval set if available
+        final_rouge = None
+        if eval_dataset is not None and len(eval_dataset) > 0:
+            model.eval()
+            preds = []
+            refs = []
+            for item in eval_dataset:
+                inp_ids = item["input_ids"].unsqueeze(0).to(model.device)
+                try:
+                    out_ids = model.generate(inp_ids, max_new_tokens=128, do_sample=False)[0]
+                except Exception:
+                    continue
+                preds.append(tokenizer.decode(out_ids, skip_special_tokens=True))
+                ref_ids = item["labels"]
+                ref_ids = torch.where(ref_ids == -100, torch.tensor(tokenizer.pad_token_id), ref_ids)
+                refs.append(tokenizer.decode(ref_ids, skip_special_tokens=True))
+            scores = [_rouge1_f1(r, p) for r, p in zip(refs, preds)]
+            if scores:
+                final_rouge = sum(scores) / len(scores)
+
+        _update_job_status(conn, job.job_id, "running", rough=int((final_rouge or 0)*100), extras={"rouge1F1": final_rouge})
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
         _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, tuning_type)
-        _append_log(log_path, f"[{datetime.utcnow().isoformat()}] job {job.job_id} succeeded")
+        logger.info(
+            f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}"
+        )
+        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} succeeded")
 
     except Exception as e:
+        logger.error(f"Fine-tuning failed jobId={job.job_id} error={e}")
+        # Log error to file
         try:
             _append_log(os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix, "train.log"),
-                        f"[{datetime.utcnow().isoformat()}] error: {e}")
+                        f"[{datetime.now().isoformat()}] error: {e}")
         except Exception:
             pass
-        cur = conn.cursor()
-        cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-        conn.commit()
+
+        # Persist failure status & error message to DB (fresh connection to avoid thread issues)
+        c = get_db()
+        try:
+            _update_job_status(c, job.job_id, "failed", progress=0, extras={"error": str(e)})
+        finally:
+            c.close()
+        # Ensure outer scope conn marks failure too (best effort)
+        try:
+            cur = conn.cursor()
+            cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
+            conn.commit()
+        except Exception:
+            pass
     finally:
         conn.close()
 
@@ -571,7 +788,7 @@ def _log_to_save_name(save_name_with_suffix: str, message: str):
     try:
         out_dir = _ensure_output_dir(save_name_with_suffix)
         log_path = os.path.join(out_dir, "train.log")
-        _append_log(log_path, f"[{datetime.utcnow().isoformat()}] {message}")
+        _append_log(log_path, f"[{datetime.now().isoformat()}] {message}")
     except Exception:
         pass
 
@@ -582,8 +799,10 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
 
     base_dir = _resolve_model_dir(body.baseModelName)
     if not _has_model_signature(base_dir):
-        _log_to_save_name(save_name_with_suffix, f"base model not found: {base_dir}")
-        return {"error": "base model name ERR"}
+        msg = f"base model not found: {base_dir}"
+        logger.error(msg)
+        _log_to_save_name(save_name_with_suffix, msg)
+        raise BadRequestError(msg)
 
     job_id = f"ft-job-{uuid.uuid4().hex[:12]}"
 
@@ -594,11 +813,12 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
         _insert_job(conn, category, body, job_id, save_name_with_suffix, dataset_id)
     except Exception as e:
         _log_to_save_name(save_name_with_suffix, f"db insert failed: {e}")
+        logger.error(f"fine-tuning init failed: {e}")
         try:
             conn.close()
         except Exception:
             pass
-        return {"error": "fine-tuning init failed"}
+        raise InternalServerError(f"fine-tuning init failed: {e}")
     finally:
         try:
             conn.close()
@@ -609,6 +829,10 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     # FT_USE_SIM=0 -> 실제 학습
     use_sim = os.getenv("FT_USE_SIM", "0") != "0"
     target = _simulate_training if use_sim else _run_training_inline
+    logger.info(
+        f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} "
+        f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
+    )
     t = threading.Thread(target=target, args=(job, save_name_with_suffix), daemon=True)
     t.start()
 
@@ -628,11 +852,52 @@ def get_fine_tuning_status(category: str, job_id: str) -> Dict[str, Any]:
                 metrics = json.loads(row["metrics"]) or {}
             except Exception:
                 metrics = {}
+        # Liveness: if status is running but heartbeat is stale, flip to failed
+        try:
+            if row["status"] == "running":
+                hb = metrics.get("heartbeatAt")
+                if hb:
+                    from datetime import datetime, timezone
+                    from dateutil import parser as dtparser  # type: ignore
+                    last = dtparser.parse(hb)
+                    now = datetime.now(last.tzinfo or timezone.utc)
+                    if (now - last).total_seconds() > FT_HEARTBEAT_TIMEOUT_SEC:
+                        c2 = get_db()
+                        try:
+                            _update_job_status(c2, job_id, "failed", extras={"error": "stale heartbeat"})
+                        finally:
+                            c2.close()
+                        row_status = "failed"
+                    else:
+                        row_status = row["status"]
+                else:
+                    row_status = row["status"]
+            else:
+                row_status = row["status"]
+        except Exception:
+            row_status = row["status"]
+
         return {
             "jobId": row["provider_job_id"],
-            "status": row["status"],
+            "status": row_status,
             "learningProgress": int(metrics.get("learningProgress", 0)),
             "roughScore": int(metrics.get("roughScore", 0)),
+            "error": metrics.get("error"),
+            "rouge1F1": metrics.get("rouge1F1"),
         }
+    finally:
+        conn.close()
+
+# ===== Admin util: wipe fine-tune related tables =====
+def reset_fine_tune_tables():
+    """Dangerous: delete all fine-tune jobs and model records (use for dev reset)"""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM fine_tuned_models")
+        cur.execute("DELETE FROM fine_tune_jobs")
+        cur.execute("DELETE FROM fine_tune_datasets")
+        cur.execute("DELETE FROM llm_models")
+        conn.commit()
     finally:
         conn.close()
