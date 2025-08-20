@@ -674,6 +674,11 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # Build kwargs dict first to allow graceful fallback when certain versions
         # of transformers don't support a particular parameter (e.g. evaluation_strategy).
+        # Optimizer: avoid bitsandbytes for FULL/LORA by default; keep for QLORA.
+        optim_name = os.getenv(
+            "FT_OPTIM",
+            ("adamw_torch" if tuning_type in ("FULL", "LORA") else "paged_adamw_8bit"),
+        )
         _ta_kwargs = dict(
             output_dir=output_dir,
             num_train_epochs=job.request.get("epochs", 3),
@@ -685,7 +690,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             save_steps=500,
             save_total_limit=2,
             report_to="none",
-            optim="paged_adamw_8bit",
+            optim=optim_name,
             seed=42,
             data_seed=42,
         )
