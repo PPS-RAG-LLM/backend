@@ -18,8 +18,7 @@ class _Wrap:
 
 @register("huggingface")
 def hf_factory(model_key: str) -> Streamer:
-    from utils.llms.huggingface.qwen import qwen_7b, qwen_vl_7b
-    from utils.llms.huggingface.openai import gpt_oss_20b   
+    from utils.llms.huggingface import qwen_7b, qwen_vl_7b, gpt_oss_20b
     # 데이터베이스에서 모델 정보 조회
     logger.info(f"hf_factory: {model_key}")
     model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
@@ -46,7 +45,7 @@ class OpenAIStreamer:
 	def __init__(self, model: str):
 		self.model = model
 	def stream(self, messages, **kw):
-        from utils.llms.openai.streamer import stream_chat as openai_stream
+		from utils.llms.openai.streamer import stream_chat as openai_stream
 		return openai_stream(messages, model=self.model, **kw)
 
 @register("openai")
