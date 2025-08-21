@@ -7,11 +7,11 @@ from datetime import datetime
 from pathlib import Path
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]  # .../backend
+ROOT = Path(__file__).resolve().parents[1]  # .../backend
 sys.path.insert(0, str(ROOT))
 from config import config
 
-BACKUP_DIR = ROOT / "storage" / "backup"
+BACKUP_DIR = ROOT / "storage" / ".backup"
 
 
 def ensure_backup_dir():
@@ -136,14 +136,14 @@ if __name__ == "__main__":
 # 
 """
 # 전체 수행(백업 → 재생성 → 복원):
->>> python storage/backup/db_migrate.py full
+>>> python storage/db_migrate.py full
 
 # 백업만 수행:
->>> python storage/backup/db_migrate.py backup
+>>> python storage/db_migrate.py backup
 
 # 스키마로 새 DB만 재생성
->>> python storage/backup/db_migrate.py recreate
+>>> python storage/db_migrate.py recreate
 
 # 특정 dump 파일로 복원
->>> python storage/backup/db_migrate.py restore --dump /home/work/CoreIQ/backend/storage/backup/pps_rag_data_YYYY-MM-DD_HHMMSS.sql
+>>> python storage/db_migrate.py restore --dump /home/work/CoreIQ/Ruah/backend/storage/.backup/pps_rag_data_YYYY-MM-DD_HHMMSS.sql
 """

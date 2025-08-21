@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional
 from config import config
-from utils import generate_unique_slug, logger, to_kst
+from utils import generate_unique_slug, generate_thread_slug, logger
 from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
 import uuid
@@ -12,9 +12,14 @@ from repository.users.workspace import (
     link_workspace_to_user,
     get_default_system_prompt_content,
     get_workspaces_by_user,
-    get_workspace_by_slug_for_user,
     delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
+    get_workspace_by_workspace_id,
+    get_workspace_id_by_slug_for_user
+)
+from repository.users.workspace_thread import (
+    create_default_thread, 
+    get_threads_by_workspace_id,
 )
 
 logger = logger(__name__)
@@ -40,7 +45,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     model = get_default_llm_model(category)
     if not model:
         raise InternalServerError("no default llm model for category")
-
+    
     system_prompt = get_default_system_prompt_content(category)
 
     provider                = model["provider"]
@@ -77,6 +82,15 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
 
+    if category =="qa":
+        logger.debug(f"Creating default thread for qa workspace: name={name}")
+        thread_name = f"thread-{name}"
+        thread_slug = generate_thread_slug(thread_name)
+        logger.info(f"thread_name: {thread_name}, thread_slug: {thread_slug}")
+        thread_id = create_default_thread(user_id=user_id, name=thread_name, thread_slug=thread_slug, workspace_id=ws_id)
+        logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
+
+
     ws = get_workspace_by_id(ws_id)
     if not ws:
         raise InternalServerError("workspace retrieval failed")
@@ -86,9 +100,9 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "category": ws["category"],
         "name": ws["name"],
         "slug": ws["slug"],
-        "createdAt": to_kst(ws["created_at"]),
+        "createdAt": ws["created_at"],
         "temperature": ws["temperature"],
-        "UpdatedAt": to_kst(ws["updated_at"]),
+        "UpdatedAt": ws["updated_at"],
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
     }
@@ -101,17 +115,29 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
     rows = get_workspaces_by_user(user_id)
     items = []
     for ws in rows:
+        if ws["category"]=="qa":
+            threads = get_threads_by_workspace_id(ws["id"])
+        else:
+            threads = []
         items.append({
             "id": ws["id"],
             "category": ws["category"],
             "name": ws["name"],
             "slug": ws["slug"],
-            "createdAt": to_kst(ws["created_at"]),
+            "createdAt": ws["created_at"],
             "temperature": ws["temperature"],
-            "UpdatedAt": to_kst(ws["updated_at"]),
+            "UpdatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
             "systemPrompt": ws["system_prompt"],
-            "threads": [],
+            "threads": [
+                {
+                    "id": thread["id"],
+                    "name": thread["name"],
+                    "thread_slug": thread["slug"],
+                    "createdAt": thread["created_at"],
+                    "UpdatedAt": thread["updated_at"],
+                } for thread in threads
+            ],
         })
     logger.debug({"workspaces_count": len(items), "user_id": user_id})
     return items
@@ -119,27 +145,40 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
 ### 워크스페이스 상세 조회
 
 def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
-    ws = get_workspace_by_slug_for_user(user_id, slug)
+    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    if not workspace_id:
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    ws = get_workspace_by_workspace_id(user_id, workspace_id)
     if not ws:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    threads = get_threads_by_workspace_id(workspace_id)
     return {
         "id": ws["id"],
         "name": ws["name"],
         "category": ws["category"],
         "slug": ws["slug"],
-        "createdAt": to_kst(ws["created_at"]),
+        "createdAt": ws["created_at"],
         "temperature": ws["temperature"],
-        "updatedAt": to_kst(ws["updated_at"]),
+        "updatedAt": ws["updated_at"],
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
         "documents": [],
-        "threads": [],
+        "threads": [
+            {
+                "id": thread["id"],
+                "name": thread["name"],
+                "thread_slug": thread["slug"],
+                "createdAt": thread["created_at"],
+                "UpdatedAt": thread["updated_at"],
+            } for thread in threads
+        ],
     }
 
 def delete_workspace(user_id: int, slug: str) -> None:
     deleted = delete_workspace_by_slug_for_user(user_id, slug)
     if not deleted:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+        logger.error(f"delete workspace failed: user_id={user_id}, slug={slug}")
+        raise NotFoundError("삭제 실패")
     return None
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -147,25 +186,27 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
     allowed_keys = {"name", "temperature", "chatHistory", "systemPrompt"}
     updates = {k: v for k, v in payload.items() if k in allowed_keys}
     if not updates:
-        raise BadRequestError("업데이트할 필드가 없습니다")
+        return None
 
-    # 이름 변경 시 slug도 자동 갱신
-    if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
-        updates["slug"] = generate_unique_slug(updates["name"]) 
+    # # 이름 변경 시 slug도 자동 갱신
+    # if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
+    #     updates["slug"] = generate_unique_slug(updates["name"]) 
 
-    ws = update_workspace_by_slug_for_user(user_id, slug, updates)
-    if not ws:
-        raise NotFoundError("요청한 리소스를 찾을 수 없습니다")
+    workspace_id = get_workspace_id_by_slug_for_user(slug) # 워크스페이스 아이디 조회
+    update_workspace_by_slug_for_user(user_id, slug, updates) # 워크스페이스 업데이트
+    ws = get_workspace_by_workspace_id(user_id, workspace_id) # 워크스페이스 상세 조회
 
+    if ws is None:
+        raise NotFoundError(f"Workspace not found for slug '{slug}' or update failed")
     return {
         "workspace": {
-            "id": ws["id"],
+            "id": ws["id"] if isinstance(ws, dict) else getattr(ws, "id", None),
             "name": ws["name"],
             "category": ws["category"],
             "slug": ws["slug"],
-            "createdAt": to_kst(ws["created_at"]),
+            "createdAt": ws["created_at"],
             "temperature": ws["temperature"],
-            "updatedAt": to_kst(ws["updated_at"]),
+            "updatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
             "systemPrompt": ws["system_prompt"],
             "documents": [],
