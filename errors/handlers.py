@@ -1,6 +1,6 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from .exceptions import BaseAPIException, ForbiddenError, InternalServerError
+from .exceptions import BaseAPIException, ForbiddenError, InternalServerError, NotFoundError
 import traceback
 from utils import logger
 
@@ -38,7 +38,14 @@ async def base_api_exception_handler(request: Request, exc: Exception):
         status_code=exc.status_code,
         content={"detail": exc.message}
     )
-
+    
+async def not_found_error_handler(request: Request, exc: NotFoundError):
+    logger.info(f"Handling NotFoundError: {exc.message}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "error": exc.message},
+    )
+    
 async def general_exception_handler(request: Request, exc: Exception):
     """일반 예외 핸들러"""
     logger.error(f"Unexpected error: {str(exc)}")

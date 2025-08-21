@@ -12,13 +12,21 @@ CREATE TABLE IF NOT EXISTS "users" (
   "bio"           TEXT DEFAULT '',
   "daily_message_limit" INTEGER,
   "suspended"           INTEGER NOT NULL DEFAULT 0 CHECK ("suspended" IN (0,1)),
-  "security_number"     INTEGER NOT NULL DEFAULT 3 CHECK ("security_number" IN (1,2,3)),
+  "security_level"     INTEGER NOT NULL DEFAULT 3 CHECK ("security_level" IN (1,2,3)),
   "created_at"          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at"          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "expires_at"          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "users_username_key" ON "users"("username");
 
+
+CREATE TABLE IF NOT EXISTS "user_sessions" (
+  "session_id" TEXT PRIMARY KEY,
+  "user_id" INTEGER NOT NULL,
+  "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "expires_at" DATETIME NOT NULL,
+  CONSTRAINT "user_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS "workspace_documents" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

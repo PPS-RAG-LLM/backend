@@ -1,18 +1,18 @@
-import os
-from openai import OpenAI
-from dotenv import load_dotenv
-from config import config
-
-load_dotenv()
-
-client = OpenAI(api_key=config["provider"]["openai"]["api_key"])
+def _init_client():
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    from config import config
+    load_dotenv()
+    client = OpenAI(api_key=config["provider"]["openai"]["api_key"])
+    return client, config["default"]
 
 def stream_chat(messages, **gen_kwargs):
     """OpenAI 채팅 스트리밍
     - model: 호출자가 지정한 모델명(예: gpt-4o-mini)
     - gen_kwargs: max_tokens, temperature, top_p, timeout 등
     """
-    conf = config["default"]
+    client, conf = _init_client()
+
     response = client.chat.completions.create(
         model       = gen_kwargs.get("model"),
         messages    = messages,
