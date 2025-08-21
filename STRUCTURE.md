@@ -79,3 +79,7 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 기능별 코드 분리로 협업/유지보수 용이
 테스트 코드(tests/)로 안정성 확보
 환경설정 분리(config.py)
+
+
+
+
