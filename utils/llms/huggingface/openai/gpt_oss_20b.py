@@ -3,48 +3,78 @@ from transformers.generation.streamers import TextIteratorStreamer
 from transformers.generation.configuration_utils import GenerationConfig
 from threading import Thread  
 from config import config
-import time 
+import time, torch
+from utils import logger
+from functools import lru_cache
+from typing import List, Dict, Any, Generator
 
+logger = logger(__name__)
+
+@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_gpt_oss_20b(model_dir): 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir,
+        trust_remote_code = True,   # 모델 코드 신뢰
+        use_fast=False,             # 빠른 토크나이저 사용 여부
+        padding_side = "left"       # 패딩 위치
+        )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, 
+        device_map="auto",          # 모델 분산 처리
+        torch_dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
+        trust_remote_code=True,     # 모델 코드 신뢰
+        low_cpu_mem_usage=True      # 메모리 효율성
+        )
+    model.eval()
     return model, tokenizer
 
 
-def stream_chat(messages, model_path, **gen_kwargs):  
+def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
+    model_dir = gen_kwargs.get("model_path")
+    if not model_dir:
+        raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
-    model, tokenizer = load_gpt_oss_20b(model_path)
-    text = build_qwen_prompt(messages)
+    model, tokenizer = load_gpt_oss_20b(model_dir)
+    # 1. Harmony chat template 자동 적용
+    #    - add_generation_prompt=True: assistant 응답 시작에 맞춰 템플릿 완성
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize= True,
+        add_generation_prompt=True,
+        return_tensors= "pt"
+    ).to(model.device)
 
-    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-    model_inputs = tokenizer(text, return_tensors="pt", )
-    for k, v in model_inputs.items():
-        model_inputs[k] = v.to(model.device)
-    
-    conf = config["registry"]["gpt-oss-20b"]
-        
-    generation_args = {
-        "max_new_tokens": gen_kwargs.get("max_new_tokens", conf["max_new_tokens"]),
-        "temperature": gen_kwargs.get("temperature", conf["temperature"]),
-        "top_p": gen_kwargs.get("top_p", conf["top_p"]),
-        "repetition_penalty": gen_kwargs.get("repetition_penalty", conf["repetition_penalty"]),
-        "no_repeat_ngram_size": gen_kwargs.get("no_repeat_ngram_size", conf["no_repeat_ngram_size"]),
-        "early_stopping": gen_kwargs.get("early_stopping", conf["early_stopping"]),
-        "streamer": streamer,
-        **model_inputs
-    }
-    thread = Thread(
-        target=model.generate,
-        kwargs=generation_args,
+    # 2. 공식 권장 샘플링값 반영
+    defaults        = config.get("default") 
+    streamer        = TextIteratorStreamer(        # github: gpt_oss 스트리머 설정
+        tokenizer, 
+        skip_prompt=True, 
+        skip_special_tokens=True, 
     )
+    generation_args = {
+        "input_ids": input_ids,
+        "temperature": gen_kwargs.get("temperature"),
+        "max_new_tokens": defaults.get("max_tokens"),
+        "top_p": gen_kwargs.get("top_p"),
+        "do_sample": True,
+        "repetition_penalty": defaults.get("repetition_penalty"),
+        "no_repeat_ngram_size": defaults.get("no_repeat_ngram_size"),
+        "eos_token_id": tokenizer.eos_token_id,
+        "pad_token_id": tokenizer.pad_token_id,
+        "use_cache": True,
+        "streamer": streamer,
+    }
+    thread = Thread(target=model.generate, kwargs=generation_args)
     thread.start()
-    acc_text = ""               # Accumulate and yield text tokens as they are generated
+    #3. 스트리망 토큰 yield
     for text_token in streamer:
-        time.sleep(0.0001)      # Simulate real-time output with a short delay
-        yield  text_token       # Yield the accumulated text
+        if text_token:
+            yield text_token
     thread.join()
-
-
 
 def build_qwen_prompt(messages):
     prompt = ""
