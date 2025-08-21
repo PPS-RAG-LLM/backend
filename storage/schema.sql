@@ -219,11 +219,24 @@ END;
 
 CREATE TABLE IF NOT EXISTS "prompt_mapping" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  "template_id" INTEGER,
-  "variable_id" INTEGER,
+  "template_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계)
+  "variable_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계)
   "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- 외래키 제약조건 추가
+  CONSTRAINT "prompt_mapping_template_id_fkey" 
+    FOREIGN KEY ("template_id") 
+    REFERENCES "system_prompt_template" ("id") 
+    ON DELETE CASCADE ON UPDATE CASCADE,  -- 템플릿 삭제 시 매핑도 삭제
+  CONSTRAINT "prompt_mapping_variable_id_fkey" 
+    FOREIGN KEY ("variable_id") 
+    REFERENCES "system_prompt_variables" ("id") 
+    ON DELETE CASCADE ON UPDATE CASCADE,  -- 변수 삭제 시 매핑도 삭제
+  -- 동일한 템플릿-변수 조합 중복 방지
+  UNIQUE("template_id", "variable_id")
 );
+
+
 
 CREATE TABLE IF NOT EXISTS "llm_models" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

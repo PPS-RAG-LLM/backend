@@ -23,3 +23,11 @@ python main.py
 ssh -L 3005:localhost:3005 bai-vscode
 ```
 
+
+
+# ERD 생성
+```
+pip install eralchemy
+pip install SQLAlchemy
+eralchemy -i sqlite:///my_old_sqlite.db -o my_new_er_diagram.pdf
+```
