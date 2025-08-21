@@ -6,6 +6,8 @@ from errors import (
     base_api_exception_handler,
     general_exception_handler,
     validation_exception_handler,
+    NotFoundError,
+    not_found_error_handler,
 )
 from utils import ProcessTimeMiddleware
 from starlette.middleware.cors import CORSMiddleware
@@ -76,7 +78,7 @@ app.add_middleware(ProcessTimeMiddleware)
 app.add_exception_handler(BaseAPIException, base_api_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
-
+app.add_exception_handler(NotFoundError, not_found_error_handler)
 
 
 ######################### Router ######################### 

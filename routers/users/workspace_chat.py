@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from fastapi import APIRouter,Path,Query,Body
 from starlette.responses import StreamingResponse
-from service.users.chat import stream_chat_for_workspace
+from service.users.chat import stream_chat_for_workspace, preflight_stream_chat_for_workspace
 from utils import logger
 from errors import BadRequestError
 import time
@@ -30,6 +30,14 @@ def stream_chat_endpoint(
     ):
     user_id = 3
     if category in ["doc_gen", "summary"]:
+        # 스트리밍 시작 전에 모든 검증 수행 -> 예외는 여기서 FastAPI 핸들러로 감
+        preflight_stream_chat_for_workspace(
+            user_id=user_id,
+            slug=slug,
+            category=category,
+            body=body.model_dump(exclude_unset=True),
+            thread_slug=None,
+        )
         gen = stream_chat_for_workspace(
             user_id=user_id, 
             slug=slug, 
@@ -48,6 +56,14 @@ def stream_chat_qa_endpoint(
     body    : StreamChatRequest = Body(...,description="채팅 요청 본문")
     ):
     user_id = 3
+    # 스트리밍 시작 전에 검증
+    preflight_stream_chat_for_workspace(
+        user_id=user_id,
+        slug=slug,
+        category=category,
+        body=body.model_dump(exclude_unset=True),
+        thread_slug=thread_slug,
+    )
     gen = stream_chat_for_workspace(
         user_id=user_id, 
         slug=slug, 
