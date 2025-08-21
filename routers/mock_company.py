@@ -6,6 +6,7 @@ import requests, json, bcrypt
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from utils import logger
+from errors import UnauthorizedError
 
 logger = logger(__name__)
 
@@ -73,11 +74,11 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     # 1. 가짜 회사 인증 (간단히)
     employee = FAKE_COMPANY_EMPLOYEES.get(username)
     if not employee:
-        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다")
+        raise UnauthorizedError("사용자를 찾을 수 없습니다")
     # bcrypt로 비밀번호 검증
     hashed_password = employee["password"].encode("utf-8")
     if not bcrypt.checkpw(password.encode("utf-8"), hashed_password):
-        raise HTTPException(status_code=401, detail="잘못된 비밀번호입니다")
+        raise UnauthorizedError("잘못된 비밀번호입니다")
     
     logger.info(f"✅ 회사 인증 성공: {username}")
     

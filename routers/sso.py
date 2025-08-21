@@ -1,5 +1,5 @@
 # routers/sso.py (완전 버전)
-from fastapi import APIRouter, HTTPException, Response, Cookie, Depends
+from fastapi import APIRouter, Response, Cookie
 from pydantic import BaseModel
 from utils import get_db, now_kst, now_kst_string
 import secrets, hashlib

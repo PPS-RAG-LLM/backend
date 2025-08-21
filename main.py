@@ -21,16 +21,18 @@ from routers.admin.manage_vator_DB_api import router as vector_db_router
 # from src.routes.document import router as document_router
 from routers.sso import sso_router as sso_router
 from routers.mock_company import mock_company_router as mock_company_router
-from utils import logger
+from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
 logger = logger(__name__)
+
 
 ######################### Session Cleaner #########################
 
 @asynccontextmanager
 async def lifspan(app):
     """주기적으로 만료된 세션 정리"""
+    init_db() # 스키마 1회 초기화, 이미 있으면 즉시 스킵
     from repository.users.session import cleanup_expired_sessions
     async def _periodic_db_session_cleanup():
         while True:

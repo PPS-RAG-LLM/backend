@@ -21,7 +21,7 @@ def timestamp() -> str:
 	return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
 def get_db_paths() -> tuple[Path, Path]:
-	db_path = (ROOT / config["database"]["db_path"]).resolve()
+	db_path = (ROOT / config["database"]["path"]).resolve()
 	schema_path = (ROOT / config["database"]["schema_path"]).resolve()
 	return db_path, schema_path
 

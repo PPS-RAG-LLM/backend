@@ -11,13 +11,9 @@ from .exceptions import (
     NotFoundError,
     UnprocessableEntityError,
     InternalServerError,
-    WorkspaceNotFoundError,
-    WorkspaceAlreadyExistsError,
-    InvalidAPIKeyError,
-    ModelNotSupportedError,
     DatabaseError,
     SessionNotFoundError,
-    InvalidSessionError,
+    NotImplementedAPIError
 )
 
 from .handlers import (
@@ -32,27 +28,21 @@ BadRequest = BadRequestError
 Unauthorized = UnauthorizedError
 Forbidden = ForbiddenError
 NotFound = NotFoundError
-UnprocessableEntity = UnprocessableEntityError
 InternalServer = InternalServerError
 SessionNotFound = SessionNotFoundError
-InvalidSession = InvalidSessionError
+NotImplementedAPI = NotImplementedAPIError
 
 __all__ = [
     # 예외 클래스들
     "BaseAPIException",
     "BadRequestError", "BadRequest",
-    "UnauthorizedError", "Unauthorized", 
     "ForbiddenError", "Forbidden",
     "NotFoundError", "NotFound",
-    "UnprocessableEntityError", "UnprocessableEntity",
     "InternalServerError", "InternalServer",
-    "WorkspaceNotFoundError",
-    "WorkspaceAlreadyExistsError", 
-    "InvalidAPIKeyError",
-    "ModelNotSupportedError",
     "DatabaseError",
+    "UnauthorizedError", "Unauthorized", 
     "SessionNotFoundError", "SessionNotFound",
-    "InvalidSessionError", "InvalidSession",
+    "NotImplementedAPIError", "NotImplementedAPI",
     # 핸들러들
     "base_api_exception_handler",
     "general_exception_handler", 
