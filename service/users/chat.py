@@ -9,7 +9,6 @@ from repository.users.workspace_chat import (
     insert_chat_history,
 )
 from utils import logger
-import json
 
 logger = logger(__name__)
 
@@ -33,8 +32,47 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
     else:
         msgs.append({"role": "user", "content": content})
 
-    # logger.info(f"msgs: {msgs}")
+    logger.info(f"msgs: {msgs}")
     return msgs
+
+def preflight_stream_chat_for_workspace(
+    user_id: int,
+    slug: str,
+    category: str,
+    body: Dict[str, Any],
+    thread_slug: str | None = None,
+) -> Dict[str, Any]:
+    """
+    스트리밍 시작 전 모든 유효성 검사를 수행하고 필요 리소스를 준비한다.
+    예외는 여기서 발생시켜 StreamingResponse 시작 전 FastAPI 핸들러로 전달되게 한다.
+    """
+    # 카테고리 검증(옵션)
+    if category not in ("qa", "doc_gen", "summary"):
+        raise BadRequestError("category must be one of: qa, doc_gen, summary")
+    workspace_id = get_workspace_id_by_slug_for_user(slug)
+
+    if not workspace_id:
+        raise NotFoundError("워크스페이스를 찾을 수 없습니다")
+
+    ws = get_workspace_by_workspace_id(user_id, workspace_id)
+    if not ws:
+        raise NotFoundError("워크스페이스를 찾을 수 없습니다")
+
+    if category == "qa":
+        if not thread_slug:
+            raise BadRequestError("qa 카테고리는 thread_slug가 필요합니다")
+        thread_id = get_thread_id_by_slug_for_user(user_id, thread_slug)
+        if not thread_id:
+            raise NotFoundError("채팅 스레드를 찾을 수 없습니다")
+    else:
+        thread_id = None
+
+    # 모드 검증
+    mode = (body.get("mode") or ws.get("chat_mode") or "chat").lower()
+    if mode not in ("chat", "query"):
+        raise BadRequestError("mode must be 'chat' or 'query'")
+
+    return {"ws": ws, "workspace_id": workspace_id, "thread_id": thread_id, "mode": mode}
 
 def stream_chat_for_workspace(
     user_id: int, 
@@ -43,72 +81,32 @@ def stream_chat_for_workspace(
     body: Dict[str, Any], 
     thread_slug: str=None
 ) -> Generator[str, None, None]:
-    """"""
-    if thread_slug:
-        thread_id = get_thread_id_by_slug_for_user(user_id, thread_slug)
-        workspace_id = get_workspace_id_by_slug_for_user(slug)
-        logger.info(f"thread_id: {thread_id}")
-        if not thread_id:
-            raise NotFoundError("채팅 스레드를 찾을 수 없습니다")
-    else:
-        thread_id = None
-        workspace_id = get_workspace_id_by_slug_for_user(slug)
+    """
+    주: 이 함수는 스트리밍만 담당한다고 가정. 검증/조회 예외는 preflight에서 끝낸다.
+    """
+    # 프리플라이트 결과를 재활용하려면 엔드포인트에서 전달받아도 되고,
+    # 간단히 여기서 한 번 더 호출해도 됨(중복 조회 허용 시).
+    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body, thread_slug)
+    ws = pre["ws"]
+    thread_id = pre["thread_id"]
 
-    ws = get_workspace_by_workspace_id(user_id, workspace_id)
-    messages = []
+    # QA일 때만 history 포함
+    messages: List[Dict[str, Any]] = []
     if category == "qa":
         limit = ws["chat_history"]
-        if limit > 0:
+        
+        if limit > 0 and thread_id is not None:
             chat_history = get_chat_history_by_thread_id(user_id, thread_id, limit)
-            for chat in chat_history:
+            for chat in chat_history[::-1]:  # 오래된 것부터 추가
                 messages.append({"role": "user", "content": chat["prompt"]})
                 messages.append({"role": "assistant", "content": chat["response"]})
 
-
-    if not ws:
-        raise NotFoundError("워크스페이스를 찾을 수 없습니다")
-
-    mode = (body.get("mode") or ws.get("chat_mode") or "chat").lower()
-    logger.info(f"mode: {mode}")
-    
-    if mode not in ("chat", "query"):
-        raise BadRequestError("mode must be 'chat' or 'query'")
-
-    # TODO: 실제 벡터 검색 결과 유무 판단 및 컨텍스트 주입
-
-    runner = LLM.from_workspace(ws)             # provider/model 라우팅
-    messages.extend(_build_messages(ws, body))  # 시스템 프롬프트 주입
+    runner = LLM.from_workspace(ws)
+    messages.extend(_build_messages(ws, body))
     temperature = ws.get("temperature")
 
-    logger.info(f"==========messages: \n{messages}")
+    logger.info(f"\n\nmessages: \n\n{messages}\n\n")
+    logger.info(f"temperature: {temperature}\n\n")
 
-    # 4. LLM 호출 및 응답 스트리밍
-    response_text = ""
     for chunk in runner.stream(messages, temperature=temperature):
-        response_text += chunk
         yield chunk
-
-    # 5. 응답 저장
-    response_json = {
-        "text": response_text,
-        "sources": [],
-        "type": "chat",
-        "attachments": [],
-        "metrics": {
-            "completion_tokens": 11,  # 예시 값
-            "prompt_tokens": 5782,    # 예시 값
-            "total_tokens": 5793,     # 예시 값
-            "outputTps": 56.12,       # 예시 값
-            "duration": 0.196         # 예시 값
-        }
-    }
-
-    insert_chat_history(
-        user_id = user_id,
-        category=category,
-        workspace_id=workspace_id,
-        prompt=body["message"],
-        response=json.dumps(response_json, ensure_ascii=False),
-        thread_id=thread_id,
-    )
-    

@@ -24,6 +24,7 @@ from .handlers import (
     base_api_exception_handler,
     general_exception_handler,
     validation_exception_handler,
+    not_found_error_handler,
 )
 
 # 자주 사용되는 예외들을 쉽게 접근할 수 있도록 별칭 제공
@@ -56,4 +57,5 @@ __all__ = [
     "base_api_exception_handler",
     "general_exception_handler", 
     "validation_exception_handler",
+    "not_found_error_handler",
 ]
