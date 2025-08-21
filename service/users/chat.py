@@ -9,7 +9,7 @@ from repository.users.workspace_chat import (
     insert_chat_history,
 )
 from utils import logger
-
+import json, time
 logger = logger(__name__)
 
 def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -94,12 +94,17 @@ def stream_chat_for_workspace(
     messages: List[Dict[str, Any]] = []
     if category == "qa":
         limit = ws["chat_history"]
-        
         if limit > 0 and thread_id is not None:
             chat_history = get_chat_history_by_thread_id(user_id, thread_id, limit)
             for chat in chat_history[::-1]:  # 오래된 것부터 추가
                 messages.append({"role": "user", "content": chat["prompt"]})
-                messages.append({"role": "assistant", "content": chat["response"]})
+                # response는 문자열 -> text만 추출
+                assistant_text = chat["response"]
+                try:
+                    assistant_text = json.loads(assistant_text).get("text", assistant_text)
+                except Exception:
+                    pass
+                messages.append({"role": "assistant", "content": assistant_text})
 
     runner = LLM.from_workspace(ws)
     messages.extend(_build_messages(ws, body))
@@ -108,5 +113,32 @@ def stream_chat_for_workspace(
     logger.info(f"\n\nmessages: \n\n{messages}\n\n")
     logger.info(f"temperature: {temperature}\n\n")
 
+    acc_text = []
+    t0 = time.perf_counter()
     for chunk in runner.stream(messages, temperature=temperature):
-        yield chunk
+        if chunk:
+            acc_text.append(chunk)
+            yield chunk
+    duration = max(time.perf_counter() - t0, 0.0)
+    # 스트리밍 완료 후 저장
+    response_json = {
+        "text": "".join(acc_text),
+        "sources": [],                          # TODO: 소스 추가
+        "type": "chat",
+        "attachments": body.get("attachments") or [], # TODO: 첨부파일 추가
+        "metrics": {
+            "completion_tokens": 0,             # TODO: 토큰 카운트 추가
+            "prompt_tokens": 0,                 # TODO: 토큰 카운트 추가
+            "total_tokens": 0,                  # TODO: 토큰 카운트 추가
+            "outputTps": 0.0 if duration == 0 else len("".join(acc_text)) / max(duration, 1e-6),
+            "duration": round(duration, 3),
+        },
+    }
+    insert_chat_history(
+        user_id=user_id,
+        category=category,
+        workspace_id=ws["id"],
+        prompt=body["message"],
+        response=json.dumps(response_json, ensure_ascii=False),
+        thread_id=thread_id,
+    )

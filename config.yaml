@@ -19,7 +19,7 @@ server:
                                       # 필요 시 "strict" 또는 "none"
 
 database:
-  db_path: storage/pps_rag.db
+  path: storage/pps_rag.db
   schema_path: storage/schema.sql
 
 
@@ -47,21 +47,4 @@ workspace:
   temperature: 0.7
 
 
-# 모델  레지스트리 설정
-registry:
-  openai:
-    gpt-4o-mini:
-      api_model: "gpt-4o-mini"
-    
-  huggingface:
-    qwen-2.5-7b-instruct:
-      family: "qwen"
-      local_path: "/home/work/CoreIQ/gpu_use/KT_sever/local_Qwen2.5-7B-Instruct"
-    qwen-2.5-vl-7b-instruct:
-      family: "qwen-vl"
-      local_path: "/home/work/CoreIQ/gpu_use/KT_sever/local_Qwen2.5-VL-7B-Instruct"
-    gpt_oss_20b:
-      family: "openai"
-      local_path: "/home/work/CoreIQ/gpu_use/KT_sever/local_gpt_oss_20b/"
-      
-  
+

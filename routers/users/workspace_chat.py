@@ -74,34 +74,6 @@ def stream_chat_qa_endpoint(
     return StreamingResponse(to_see(gen), media_type="text/event-stream")
 
 
-# qa를 제외한 문서요약, 생성만 처리 가능함
-    # if category == "gen_doc" or category == "summary":
-    #     def to_see(gen):
-    #         buf = []
-    #         last_flush = time.monotonic()
-    #         for chunk in gen:
-    #             if not chunk:
-    #                 continue
-    #             logger.debug(f"[raw_chunk] {repr(chunk)}")
-    #             if not buf:
-    #                 chunk = chunk.lstrip()
-    #             buf.append(chunk)
-    #             text = "".join(buf)
-    #             if len(text) >= 32 or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？")) or time.monotonic() - last_flush > 0.2:
-    #                 logger.info(f"[flush] {repr(text)}")
-    #                 yield f"data: {text}\n\n"
-    #                 buf.clear()
-    #                 last_flush = time.monotonic()
-    #         if buf:
-    #             text = "".join(buf)
-    #             logger.info(f"[flush-end] {repr(text)}")
-    #             yield f"data: {text}\n\n"
-    #     gen = stream_chat_for_workspace(user_id, slug, body.model_dump(exclude_unset=True))
-    #     return StreamingResponse(to_see(gen), media_type="text/event-stream")
-    # else:
-    #     raise BadRequestError("qa category should be used in another endpoint > '/v1/workspace/{slug}/thread/{thread_slug}/stream-chat'")
-
-
 def to_see(gen):
     buf = []
     last_flush = time.monotonic()
