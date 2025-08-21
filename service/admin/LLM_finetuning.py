@@ -33,6 +33,16 @@ BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve(
 STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
+# ---- Portable path helper ----
+def _to_rel(p: str) -> str:
+    """Return `p` as a path **relative** to the backend root so DB records do
+    not depend on absolute host paths (useful inside Docker). If conversion
+    fails, the original path is returned unchanged."""
+    try:
+        return os.path.relpath(p, BASE_BACKEND)
+    except Exception:
+        return p
+
 # ===== Helpers: path resolve =====
 def _resolve_model_dir(name_or_path: str) -> str:
     if os.path.isabs(name_or_path):
@@ -98,23 +108,30 @@ def _ensure_output_dir(model_name: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(out_dir, "config.json")
     if not os.path.isfile(cfg_path):
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump({"created_at": datetime.now().isoformat()}, f, ensure_ascii=False)
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"created_at": datetime.now().isoformat()}, f, ensure_ascii=False)
+        except Exception:
+            logger.exception(f"failed to write config.json inside {out_dir}")
     return out_dir
 
 def _ensure_lora_marker(out_dir: str, tuning_type: str):
     if tuning_type.upper() in ("LORA", "QLORA"):
         marker = os.path.join(out_dir, "adapter_config.json")
         if not os.path.isfile(marker):
-            with open(marker, "w", encoding="utf-8") as f:
-                json.dump({"peft_type": "LORA", "tuning": tuning_type.upper()}, f, ensure_ascii=False)
+            try:
+                with open(marker, "w", encoding="utf-8") as f:
+                    json.dump({"peft_type": "LORA", "tuning": tuning_type.upper()}, f, ensure_ascii=False)
+            except Exception:
+                logger.exception(f"failed to create LoRA marker {marker}")
 
 def _append_log(log_path: str, line: str):
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line.rstrip("\n") + "\n")
     except Exception:
-        pass
+        # Log but do not interrupt main flow
+        logger.exception(f"failed to append log to {log_path}")
 
 # ----- Error helper -----
 def _write_error(out_dir: str, message: str):
@@ -126,7 +143,7 @@ def _write_error(out_dir: str, message: str):
             ts = datetime.now().isoformat()
             f.write(f"[{ts}] {message}\n")
     except Exception:
-        pass
+        logger.exception(f"failed to write error file under {out_dir}")
 
 # ===== List train dirs =====
 def list_train_data_dirs() -> Dict[str, Any]:
@@ -157,8 +174,9 @@ def list_train_data_dirs() -> Dict[str, Any]:
 
 # ===== DB ops =====
 def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
+    rel_path = _to_rel(path)
     cur = conn.cursor()
-    cur.execute("SELECT id FROM fine_tune_datasets WHERE path=?", (path,))
+    cur.execute("SELECT id FROM fine_tune_datasets WHERE path=?", (rel_path,))
     row = cur.fetchone()
     if row:
         return int(row["id"])
@@ -166,12 +184,12 @@ def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
         cur.execute("""
             INSERT INTO fine_tune_datasets(name, category, path, record_count)
             VALUES(?, ?, ?, NULL)
-        """, (os.path.basename(path), category, path))
+        """, (os.path.basename(path), category, rel_path))
     except Exception:
         cur.execute("""
             INSERT INTO fine_tune_datasets(name, path, record_count)
             VALUES(?, ?, NULL)
-        """, (os.path.basename(path), path))
+        """, (os.path.basename(path), rel_path))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -179,6 +197,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
     cur = conn.cursor()
     reserve_now = _now_local_str()
     train_path = _resolve_train_path(req.trainSetFile)
+    train_rel_path = _to_rel(train_path)
     hyper = {
         "systemPrompt": req.systemPrompt,
         "batchSize": req.batchSize,
@@ -188,7 +207,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "tuningType": (req.tuningType or "QLORA").upper(),
         "baseModelName": req.baseModelName,
         "saveModelName": save_name_with_suffix,
-        "trainSetFile": train_path,
+        "trainSetFile": train_rel_path,
         "reserveDate": reserve_now,
         "category": category,
         "gradientAccumulationSteps": req.gradientAccumulationSteps,
@@ -255,7 +274,23 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 continue
             raise
 
-def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str):
+def _has_column(conn, table: str, column: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    return column in cols
+
+def _ensure_ftm_rouge_column(conn):
+    try:
+        if not _has_column(conn, "fine_tuned_models", "rouge1_f1"):
+            cur = conn.cursor()
+            cur.execute("ALTER TABLE fine_tuned_models ADD COLUMN rouge1_f1 FLOAT")
+            conn.commit()
+    except Exception:
+        # ignore if cannot add (older sqlite)
+        pass
+
+def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str, final_rouge: Optional[float] = None):
     cur = conn.cursor()
     cur.execute("UPDATE fine_tune_jobs SET status=?, finished_at=CURRENT_TIMESTAMP WHERE provider_job_id=?",
                 ("succeeded", job_id))
@@ -269,19 +304,32 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         cur.execute("""
             INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active)
             VALUES(?,?,?,?,?,?,1)
-        """, ("hf", model_name, 0, os.path.join(STORAGE_MODEL_ROOT, model_name), category, mdl_type))
+        """, ("hf", model_name, 0, _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name)), category, mdl_type))
         model_id = int(cur.lastrowid)
+    # set trained_at now
+    try:
+        cur.execute("UPDATE llm_models SET trained_at=CURRENT_TIMESTAMP WHERE id=?", (model_id,))
+    except Exception:
+        pass
 
     # fine_tuned_models
     cur.execute("SELECT id FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
     job_row = cur.fetchone()
     if job_row:
         ft_job_pk = int(job_row["id"])
-        lora_path = os.path.join(STORAGE_MODEL_ROOT, model_name) if tuning_type.upper() in ("LORA", "QLORA") else None
-        cur.execute("""
-            INSERT INTO fine_tuned_models(model_id, job_id, provider_model_id, lora_weights_path, type, is_active)
-            VALUES(?, ?, ?, ?, ?, 1)
-        """, (model_id, ft_job_pk, model_name, lora_path, ("lora" if lora_path else "full")))
+        lora_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name)) if tuning_type.upper() in ("LORA", "QLORA") else None
+        # ensure rouge column if available
+        _ensure_ftm_rouge_column(conn)
+        if _has_column(conn, "fine_tuned_models", "rouge1_f1"):
+            cur.execute("""
+                INSERT INTO fine_tuned_models(model_id, job_id, provider_model_id, lora_weights_path, type, is_active, rouge1_f1)
+                VALUES(?, ?, ?, ?, ?, 1, ?)
+            """, (model_id, ft_job_pk, model_name, lora_path, ("lora" if lora_path else "full"), (final_rouge if final_rouge is not None else None)))
+        else:
+            cur.execute("""
+                INSERT INTO fine_tuned_models(model_id, job_id, provider_model_id, lora_weights_path, type, is_active)
+                VALUES(?, ?, ?, ?, ?, 1)
+            """, (model_id, ft_job_pk, model_name, lora_path, ("lora" if lora_path else "full")))
     conn.commit()
 
 def _resolve_out_dir_by_job(conn, job_id: str) -> Optional[str]:
@@ -758,6 +806,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         tokenizer.save_pretrained(output_dir)
 
         _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, tuning_type)
+        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, tuning_type, final_rouge)
         logger.info(
             f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}"
         )

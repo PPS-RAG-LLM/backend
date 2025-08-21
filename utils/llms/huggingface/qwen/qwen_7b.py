@@ -4,17 +4,27 @@ from transformers.generation.configuration_utils import GenerationConfig
 from threading import Thread  
 from config import config
 import time 
+from utils import logger
+from functools import lru_cache
 
+logger = logger(__name__)
+
+@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_qwen_instruct_7b(model_dir): 
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, device_map="auto")
+    model.eval()
     return model, tokenizer
 
 
 def stream_chat(messages, **gen_kwargs):  
+    logger.info(f"stream_chat: {gen_kwargs}")
 
-    conf = config["qwen"]
-    model, tokenizer = load_qwen_instruct_7b(conf["model_path"])
+    model_dir = gen_kwargs.get("model_path")
+    if not model_dir:
+        raise ValueError("누락된 파라미터: config.yaml의 model_path")
+
+    model, tokenizer = load_qwen_instruct_7b(model_dir)
     text = build_qwen_prompt(messages)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -22,14 +32,16 @@ def stream_chat(messages, **gen_kwargs):
     for k, v in model_inputs.items():
         model_inputs[k] = v.to(model.device)
         
+    defaults = config.get("default", {}) or {}
+
     generation_args = {
-        "max_new_tokens": gen_kwargs.get("max_new_tokens", conf["max_new_tokens"]),
-        "temperature": gen_kwargs.get("temperature", conf["temperature"]),
-        "top_p": gen_kwargs.get("top_p", conf["top_p"]),
-        "repetition_penalty": gen_kwargs.get("repetition_penalty", conf["repetition_penalty"]),
-        "no_repeat_ngram_size": gen_kwargs.get("no_repeat_ngram_size", conf["no_repeat_ngram_size"]),
-        "early_stopping": gen_kwargs.get("early_stopping", conf["early_stopping"]),
-        "streamer": streamer,
+        "temperature"           : gen_kwargs.get("temperature"),
+        "max_new_tokens"        : defaults.get("max_tokens"),
+        "top_p"                 : defaults.get("top_p"),
+        "repetition_penalty"    : defaults.get("repetition_penalty"),
+        "no_repeat_ngram_size"  : defaults.get("no_repeat_ngram_size"),
+        "early_stopping"        : defaults.get("early_stopping"),
+        "streamer"              : streamer,
         **model_inputs
     }
     thread = Thread(

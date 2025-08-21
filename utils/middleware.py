@@ -9,7 +9,7 @@ SLOW_MS = 1000  # 1초 이상만 INFO
 
 class ProcessTimeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        logger.info("="*22 +" START " + "="*22)
+        logger.info("\n")
         logger.info("------------ request path: {}".format(request.url.path))
         
         start_time = time.time()
@@ -25,11 +25,12 @@ class ProcessTimeMiddleware(BaseHTTPMiddleware):
         #     logger.debug(f"process time: {ms:.1f}ms")
         
         # 개발중에만 사용하는 로그
+                # 개발중에만 사용하는 로그
         process_time = time.time() - start_time
-        response.headers["X-process-Time"] = str(process_time)
-        logger.info("------------ process time: {}ms".format(process_time))
-
-        logger.info("="*23 + " END " + "="*23 + "\n")
+        process_time_ms = process_time * 1000
+        response.headers["X-process-Time"] = f"{process_time_ms:.1f}ms"
+        logger.info("------------ process time: {:.1f}ms".format(process_time_ms))
+        logger.info("\n")
 
         return response
 
