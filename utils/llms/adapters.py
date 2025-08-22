@@ -30,9 +30,9 @@ def hf_factory(model_key: str) -> Streamer:
     logger.info(f"hf_factory: {model_key}, {local_path}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성
-    if model_key == "qwen-7b":
+    if model_key == "qwen2.5-7b-instruct":
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
-    if model_key == "qwen-vl-7b":
+    if model_key == "qwen2.5-vl-7b-instruct":
         return _Wrap(lambda messages, **kw: qwen_vl_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("gpt_oss"):
         return _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=local_path, **kw))

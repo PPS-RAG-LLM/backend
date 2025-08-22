@@ -17,7 +17,7 @@ def main() -> None:
     # Workspace dummy – matches llm_models row
     ws = {
         "provider": "huggingface",
-        "chat_model": "qwen-7b",  # change if your DB row uses different key
+        "chat_model": "Qwen2.5-7B-Instruct-1M",  # change if your DB row uses different key
     }
 
     streamer = LLM.from_workspace(ws)

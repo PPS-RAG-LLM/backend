@@ -148,29 +148,130 @@ def _write_error(out_dir: str, message: str):
 # ===== List train dirs =====
 def list_train_data_dirs() -> Dict[str, Any]:
     items = []
-    if not os.path.isdir(TRAIN_DATA_ROOT):
-        return {"root": TRAIN_DATA_ROOT, "dirs": items}
-    for entry in os.scandir(TRAIN_DATA_ROOT):
-        if not entry.is_dir():
-            continue
+    root_path = TRAIN_DATA_ROOT
+    if not os.path.isdir(root_path):
         try:
-            mtime = datetime.utcfromtimestamp(entry.stat().st_mtime).isoformat()
-        except Exception:
-            mtime = None
-        file_count = 0
-        try:
-            for _, _, files in os.walk(entry.path):
-                file_count += len(files)
+            logger.warning(f"train data root not found: {root_path}")
         except Exception:
             pass
-        items.append({
-            "name": entry.name,
-            "path": os.path.join(TRAIN_DATA_ROOT, entry.name),
-            "fileCount": file_count,
-            "modifiedAt": mtime,
-        })
+        return {"root": _to_rel(root_path), "dirs": items}
+
+    # Persist discovered train data directories into DB with relative paths
+    conn = get_db()
+    try:
+        try:
+            for entry in os.scandir(root_path):
+                if not entry.is_dir():
+                    continue
+                try:
+                    mtime = datetime.utcfromtimestamp(entry.stat().st_mtime).isoformat()
+                except Exception:
+                    logger.exception(f"failed to stat dir: {entry.path}")
+                    mtime = None
+
+                file_count = 0
+                try:
+                    for _, _, files in os.walk(entry.path):
+                        file_count += len(files)
+                except Exception:
+                    logger.exception(f"failed to walk dir: {entry.path}")
+
+                # Only consider directories that actually contain files
+                if file_count <= 0:
+                    try:
+                        logger.info(f"skip empty train dir: {entry.path}")
+                    except Exception:
+                        pass
+                    continue
+
+                abs_dir_path = os.path.join(root_path, entry.name)
+                rel_dir_path = _to_rel(abs_dir_path)
+
+                # Insert if not exists
+                try:
+                    dataset_id = _insert_dataset_if_needed(conn, abs_dir_path, "unknown")
+                    # Best-effort update of record_count, if column exists
+                    try:
+                        cur = conn.cursor()
+                        if _has_column(conn, "fine_tune_datasets", "record_count"):
+                            cur.execute(
+                                "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (file_count, dataset_id),
+                            )
+                            conn.commit()
+                    except Exception:
+                        logger.exception("failed to update record_count for dataset_id=%s", dataset_id)
+                except Exception as e:
+                    logger.error(f"failed to upsert train dataset for {abs_dir_path}: {e}")
+
+                items.append({
+                    "name": entry.name,
+                    "path": rel_dir_path,
+                    "fileCount": file_count,
+                    "modifiedAt": mtime,
+                })
+        except Exception:
+            logger.exception(f"failed to scan train data root: {root_path}")
+
+        # Fallback: if no items discovered via filesystem, read last known datasets from DB
+        if len(items) == 0:
+            try:
+                cur = conn.cursor()
+                rel_root = _to_rel(root_path)
+                like_prefix = rel_root if rel_root.endswith(os.sep) else rel_root + os.sep
+                cur.execute(
+                    "SELECT name, path, record_count, updated_at, created_at FROM fine_tune_datasets WHERE path LIKE ?",
+                    (like_prefix + '%',),
+                )
+                rows = cur.fetchall() or []
+                for r in rows:
+                    name_val = r[0] if isinstance(r, tuple) else r["name"]
+                    rel_path_val = r[1] if isinstance(r, tuple) else r["path"]
+                    db_count_val = (r[2] if isinstance(r, tuple) else r.get("record_count") if isinstance(r, dict) else None) or 0
+                    modified_val = (r[3] if isinstance(r, tuple) else r.get("updated_at") if isinstance(r, dict) else None) or (r[4] if isinstance(r, tuple) else r.get("created_at") if isinstance(r, dict) else None)
+
+                    # Recompute file count from filesystem for accuracy
+                    recomputed_count = db_count_val
+                    try:
+                        abs_dir = rel_path_val if os.path.isabs(rel_path_val) else os.path.join(str(BASE_BACKEND), rel_path_val)
+                        if os.path.isdir(abs_dir):
+                            cnt = 0
+                            for _, _, files in os.walk(abs_dir):
+                                cnt += len(files)
+                            recomputed_count = cnt
+                            # Update DB with fresh count if column exists
+                            try:
+                                if _has_column(conn, "fine_tune_datasets", "record_count"):
+                                    cur.execute(
+                                        "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE name=? AND path=?",
+                                        (recomputed_count, name_val, rel_path_val),
+                                    )
+                                    conn.commit()
+                            except Exception:
+                                logger.exception("failed to refresh record_count from fallback for path=%s", rel_path_val)
+                        else:
+                            logger.info(f"fallback path not found: {abs_dir}")
+                    except Exception:
+                        logger.exception("failed to recompute file count for fallback path=%s", rel_path_val)
+
+                    items.append({
+                        "name": name_val,
+                        "path": rel_path_val,
+                        "fileCount": int(recomputed_count or 0),
+                        "modifiedAt": modified_val,
+                    })
+                if len(items) == 0:
+                    logger.info("no train dirs found in filesystem or database")
+            except Exception:
+                logger.exception("failed to read train datasets from DB for fallback")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.exception("failed to close DB connection in list_train_data_dirs")
+
     items.sort(key=lambda x: (x["modifiedAt"] or ""), reverse=True)
-    return {"root": TRAIN_DATA_ROOT, "dirs": items}
+    return {"root": _to_rel(root_path), "dirs": items}
 
 # ===== DB ops =====
 def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
@@ -228,18 +329,26 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
 def _update_job_status(conn, job_id: str, status: str, progress: int | None = None, rough: int | None = None, extras: dict | None = None, _retries: int = 3):
     """
     Update job status and optional metrics. Progress percentage is intentionally ignored (not persisted).
+    - If the fine_tune_jobs.metrics column doesn't exist, fall back to updating only status.
     """
     for attempt in range(_retries):
         try:
             cur = conn.cursor()
-            cur.execute("SELECT metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
-            row = cur.fetchone()
+            has_metrics_col = _has_column(conn, "fine_tune_jobs", "metrics")
+
             metrics = {}
-            if row and row["metrics"]:
+            if has_metrics_col:
                 try:
-                    metrics = json.loads(row["metrics"]) or {}
+                    cur.execute("SELECT metrics FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
+                    row = cur.fetchone()
+                    if row and row["metrics"]:
+                        try:
+                            metrics = json.loads(row["metrics"]) or {}
+                        except Exception:
+                            metrics = {}
                 except Exception:
                     metrics = {}
+
             # Intentionally do not persist progress percentage
             if rough is not None:
                 metrics["roughScore"] = rough
@@ -253,10 +362,17 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 metrics["heartbeatAt"] = datetime.now().isoformat()
             except Exception:
                 pass
-            cur.execute(
-                "UPDATE fine_tune_jobs SET status=?, metrics=? WHERE provider_job_id=?",
-                (status, json.dumps(metrics, ensure_ascii=False), job_id),
-            )
+
+            if has_metrics_col:
+                cur.execute(
+                    "UPDATE fine_tune_jobs SET status=?, metrics=? WHERE provider_job_id=?",
+                    (status, json.dumps(metrics, ensure_ascii=False), job_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?",
+                    (status, job_id),
+                )
             conn.commit()
             try:
                 # Additional: persist status change to train.log for easier tracing
@@ -272,6 +388,10 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
             if "locked" in str(e).lower() and attempt < _retries - 1:
                 time.sleep(0.2 * (attempt + 1))
                 continue
+            try:
+                logger.error(f"update_job_status operational error: {e}")
+            except Exception:
+                pass
             raise
 
 def _has_column(conn, table: str, column: str) -> bool:
