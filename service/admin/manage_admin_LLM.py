@@ -5,6 +5,8 @@ import json
 import os
 import sqlite3
 import time
+import gc
+import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -256,42 +258,123 @@ def _set_active_model_for_category(category: str, model_name: str):
 # 가벼운 로컬 추론 실행(테스트용). transformers 미설치 환경을 고려해 예외처리.
 _MODEL_CACHE: Dict[str, Any] = {}  # name -> (tokenizer, model)
 
+
+class _ModelManager:
+    """
+    Thread-safe in-memory model manager to load/unload models on demand.
+    Keeps a process-wide cache of tokenizer/model pairs keyed by resolved path.
+    """
+
+    def __init__(self):
+        import threading
+        self._lock = threading.RLock()
+        self._cache: Dict[str, Tuple[Any, Any]] = {}
+        self._logger = logging.getLogger(__name__)
+
+    def _resolve_candidate(self, name_or_path: str) -> str:
+        # Prefer local storage folder under STORAGE_ROOT if it looks like a model dir
+        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
+        try:
+            if os.path.isfile(os.path.join(fs_path, "config.json")):
+                return fs_path
+        except Exception:
+            # best-effort only
+            self._logger.exception("failed while resolving model candidate path")
+        return name_or_path
+
+    def is_loaded(self, name_or_path: str) -> bool:
+        key = self._resolve_candidate(name_or_path)
+        with self._lock:
+            return key in self._cache
+
+    def load(self, name_or_path: str) -> Tuple[Any, Any]:
+        key = self._resolve_candidate(name_or_path)
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig  # type: ignore
+                import torch  # type: ignore
+
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                )
+                tok = AutoTokenizer.from_pretrained(key, trust_remote_code=True)
+                if tok.pad_token_id is None:
+                    if getattr(tok, "eos_token_id", None) is not None:
+                        tok.pad_token_id = tok.eos_token_id
+                    else:
+                        tok.add_special_tokens({"pad_token": "<|pad|>"})
+                        tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
+                mdl = AutoModelForCausalLM.from_pretrained(
+                    key,
+                    trust_remote_code=True,
+                    device_map="auto",
+                    quantization_config=bnb_config,
+                )
+                self._cache[key] = (tok, mdl)
+                return tok, mdl
+            except Exception:
+                # Log and re-raise to let caller decide fallback
+                try:
+                    self._logger.exception("failed to load model: %s", key)
+                except Exception:
+                    pass
+                raise
+
+    def unload(self, name_or_path: str) -> bool:
+        key = self._resolve_candidate(name_or_path)
+        with self._lock:
+            pair = self._cache.pop(key, None)
+        if pair is None:
+            return False
+        # Best-effort GPU/CPU memory cleanup
+        try:
+            _, mdl = pair
+            try:
+                del mdl
+            except Exception:
+                pass
+            try:
+                import torch  # type: ignore
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+            except Exception:
+                logging.getLogger(__name__).exception("torch cuda cleanup failed")
+            try:
+                gc.collect()
+            except Exception:
+                logging.getLogger(__name__).exception("gc collect failed during unload")
+        except Exception:
+            logging.getLogger(__name__).exception("failed during model unload cleanup")
+        return True
+
+    def list_loaded(self) -> List[str]:
+        with self._lock:
+            return list(self._cache.keys())
+
+
+_MODEL_MANAGER = _ModelManager()
+
 def _load_local_model(model_name_or_path: str):
     try:
-        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-        import torch
-
-        # 모델 경로 해석
-        candidate = model_name_or_path
-        fs_path = os.path.join(STORAGE_ROOT, model_name_or_path)
-        if os.path.isfile(os.path.join(fs_path, "config.json")):
-            candidate = fs_path
-
-        if candidate in _MODEL_CACHE:
-            return _MODEL_CACHE[candidate]
-
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
-        tok = AutoTokenizer.from_pretrained(candidate, trust_remote_code=True)
-        if tok.pad_token_id is None:
-            if getattr(tok, "eos_token_id", None) is not None:
-                tok.pad_token_id = tok.eos_token_id
-            else:
-                tok.add_special_tokens({"pad_token": "<|pad|>"})
-                tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
-        mdl = AutoModelForCausalLM.from_pretrained(
-            candidate,
-            trust_remote_code=True,
-            device_map="auto",
-            quantization_config=bnb_config,
-        )
-        _MODEL_CACHE[candidate] = (tok, mdl)
-        return tok, mdl
-    except Exception as e:
+        # Prefer manager cache
+        key = _MODEL_MANAGER._resolve_candidate(model_name_or_path)
+        if key in _MODEL_CACHE:
+            return _MODEL_CACHE[key]
+        try:
+            tok, mdl = _MODEL_MANAGER.load(model_name_or_path)
+            _MODEL_CACHE[key] = (tok, mdl)
+            return tok, mdl
+        except Exception:
+            logging.getLogger(__name__).exception("_load_local_model failed via manager")
+            return None
+    except Exception:
+        logging.getLogger(__name__).exception("_load_local_model unexpected failure")
         return None
 
 
@@ -416,14 +499,57 @@ def load_or_unload_model(category: str, model_name: str) -> Dict[str, Any]:
     """
     카테고리별 '활성 모델'을 지정/해제. 실제 메모리 언로드는 이 계층에서 강제하지 않고,
     추론 계층에서 필요 시 lazy-load 하도록 설계.
+    여기에 실제 메모리 로드/언로드 동작을 추가한다.
     """
-    row = _lookup_model_by_name(model_name)
-    # DB에 없더라도 활성모델로 지정 가능(로컬 경로만 있는 경우) – UI 유연성 확보
-    _set_active_model_for_category(category, model_name)
-    message = "모델 로드/언로드 완료"
-    if row is None:
-        message += " (주의: DB에 모델 메타가 없어 로컬 경로 기준으로 활성 설정)"
-    return {"success": True, "message": message, "category": category, "modelName": model_name}
+    logger = logging.getLogger(__name__)
+    try:
+        row = _lookup_model_by_name(model_name)
+
+        # Determine action: toggle – if loaded, unload; otherwise load
+        is_loaded = _MODEL_MANAGER.is_loaded(model_name)
+        performed = "unloaded" if is_loaded else "loaded"
+
+        if is_loaded:
+            _MODEL_MANAGER.unload(model_name)
+            # If unloading the currently active model for this category, clear it
+            active_name = _active_model_name_for_category(category)
+            if active_name == model_name:
+                _set_cache(ACTIVE_MODEL_CACHE_KEY_PREFIX + category, _json({"modelName": None}), "llm_admin")
+        else:
+            try:
+                _MODEL_MANAGER.load(model_name)
+            except Exception:
+                logger.exception("failed to load model during toggle: %s", model_name)
+                return {"success": False, "message": f"모델 로드 실패: {model_name}", "category": category, "modelName": model_name}
+            _set_active_model_for_category(category, model_name)
+
+        message = f"모델 {performed} 완료"
+        if row is None:
+            message += " (주의: DB에 모델 메타가 없어 로컬 경로 기준 처리)"
+        return {"success": True, "message": message, "category": category, "modelName": model_name, "loaded": (performed == "loaded")}
+    except Exception:
+        logger.exception("unexpected error in load_or_unload_model")
+        return {"success": False, "message": "예상치 못한 오류로 작업에 실패했습니다.", "category": category, "modelName": model_name}
+
+
+def unload_model(model_name: str) -> Dict[str, Any]:
+    """Explicitly unload a model from memory (does not change active cache unless it matches)."""
+    logger = logging.getLogger(__name__)
+    try:
+        was_loaded = _MODEL_MANAGER.is_loaded(model_name)
+        ok = _MODEL_MANAGER.unload(model_name)
+        return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
+    except Exception:
+        logger.exception("failed to unload model: %s", model_name)
+        return {"success": False, "message": "언로드 실패", "modelName": model_name}
+
+
+def list_loaded_models() -> Dict[str, Any]:
+    try:
+        return {"loaded": _MODEL_MANAGER.list_loaded()}
+    except Exception:
+        logging.getLogger(__name__).exception("failed to list loaded models")
+        return {"loaded": []}
 
 
 def compare_models(payload: CompareModelsBody) -> Dict[str, Any]:
