@@ -2,6 +2,8 @@
 # utils/llms/adapters/qwen.py
 from config import config
 from utils.llms.registry import register, Streamer
+import os
+from pathlib import Path
 
 from repository.users.llm_models import get_llm_model_by_provider_and_name
 from utils import logger
@@ -26,8 +28,23 @@ def hf_factory(model_key: str) -> Streamer:
     if not model_info:
         raise NotFoundError(f"지원하지 않는 HF 모델: {model_key}")
 
-    local_path = model_info.get("model_path")
-    logger.info(f"hf_factory: {model_key}, {local_path}")
+    # 오프라인 환경을 위해 DB의 model_path가 없으면 storage/model/<name>로 해석
+    try:
+        backend_root = Path(__file__).resolve().parents[3]  # .../backend
+        storage_model_root = os.path.join(str(backend_root), "storage", "model")
+    except Exception:
+        # 최악의 경우 현재 위치 기준 상대 경로 시도
+        storage_model_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "model"))
+
+    name = model_info.get("name") or model_key
+    # DB의 model_path 우선, 없으면 storage/model/<name>
+    local_path = model_info.get("model_path") or os.path.join(storage_model_root, name)
+    # 상대 경로면 storage/model 하위로 보정
+    if local_path and not os.path.isabs(local_path):
+        cand = os.path.join(storage_model_root, local_path)
+        if os.path.isfile(os.path.join(cand, "config.json")):
+            local_path = cand
+    logger.info(f"hf_factory resolved path: {local_path}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성
     if model_key == "qwen2.5-7b-instruct":

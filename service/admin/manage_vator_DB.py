@@ -34,7 +34,7 @@ resource_dir = Path(os.getenv("RESOURCE_DIR", BASE_DIR / "resources")).resolve()
 
 EXTRACTED_TEXT_DIR = resource_dir / "extracted_texts"
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
-
+ 
 BGE_MODEL_DIR = (resource_dir / "model" / "embedding_bge_m3").resolve()
 QWEN_MODEL_DIR = (resource_dir / "model" / "embedding_qwen3_4b").resolve()
 

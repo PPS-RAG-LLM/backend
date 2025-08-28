@@ -285,4 +285,28 @@ Table fine_tuned_models {
 
 
 
+// =============================================================
+// Base 모델 관리 (단일 이름 + 태그 기반 카테고리 매핑)
+// =============================================================
+// insert-base API는 아래 테이블에만 기록합니다.
+// tags에 'all'이 있으면 qa/doc_gen/summary 전 카테고리에 노출되고,
+// 아니면 포함된 태그(예: ['qa','summary'])에만 노출됩니다.
+Table llm_model_base {
+  id          integer   [pk, not null, increment]
+  provider    text      [not null]
+  name        text      [unique, not null]    // 베이스 모델 표시 이름(단일)
+  model_path  text      [not null]            // 로컬 경로 (storage/model/..)
+  tags        text      [not null]            // JSON 배열: ["all"] | ["qa","doc_gen",...]
+  created_at  datetime  [not null, default: `CURRENT_TIMESTAMP`]
+}
+
+// 런타임 로드 상태(참고용). 카테고리별 로드 여부를 기록/조회할 때 사용 가능.
+Table llm_model_runtime {
+  id         integer   [pk, not null, increment]
+  name       text      [not null]             // llm_model_base.name 또는 파인튜닝 모델명
+  category   text                              // qa | doc_gen | summary (nullable 허용)
+  is_loaded  boolean   [not null, default: false]
+  updated_at datetime  [not null, default: `CURRENT_TIMESTAMP`]
+}
+
 ```
