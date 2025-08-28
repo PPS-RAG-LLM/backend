@@ -30,6 +30,9 @@ FT_HEARTBEAT_TIMEOUT_SEC = int(os.getenv("FT_HEARTBEAT_TIMEOUT_SEC", "60"))
 
 # ===== Paths =====
 BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))  # backend/
+# Force DB to pps_rag.db across the process (can be overridden by env before start)
+import os as _os
+_os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
 STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
@@ -45,8 +48,32 @@ def _to_rel(p: str) -> str:
 
 # ===== Helpers: path resolve =====
 def _resolve_model_dir(name_or_path: str) -> str:
+    """Resolve a local model directory for finetuning.
+    Priority: DB.llm_models.model_path (by exact name, then base-name) → STORAGE_MODEL_ROOT/name.
+    """
     if os.path.isabs(name_or_path):
         return name_or_path
+    # 1) Try DB lookup (huggingface/hf providers)
+    try:
+        from repository.users.llm_models import get_llm_model_by_provider_and_name as _get
+        def _strip_cat(n: str) -> str:
+            for suf in ("-qa", "-doc_gen", "-summary"):
+                if n.endswith(suf):
+                    return n[: -len(suf)]
+            return n
+        for key in (name_or_path, _strip_cat(name_or_path)):
+            for prov in ("huggingface", "hf"):
+                row = _get(prov, key)
+                if row and row.get("model_path"):
+                    p = row["model_path"]
+                    if os.path.isabs(p):
+                        return p
+                    cand = os.path.join(STORAGE_MODEL_ROOT, p)
+                    if os.path.isdir(cand):
+                        return cand
+    except Exception:
+        pass
+    # 2) Fallback to storage root
     return os.path.join(STORAGE_MODEL_ROOT, name_or_path)
 
 def _has_model_signature(dir_path: str) -> bool:
@@ -968,7 +995,8 @@ def _log_to_save_name(save_name_with_suffix: str, message: str):
 
 def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     suffix = (body.tuningType or "QLORA").upper()
-    save_name_with_suffix = f"{body.saveModelName}-{suffix}"
+    # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
+    save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"
     _ensure_output_dir(save_name_with_suffix)
 
     base_dir = _resolve_model_dir(body.baseModelName)

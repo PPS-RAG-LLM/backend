@@ -7,6 +7,7 @@ import sqlite3
 import time
 import gc
 import logging
+import importlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -16,7 +17,9 @@ from pydantic import BaseModel, Field
 _DEFAULT_TOPK: int = 5
 
 # ===== Constants =====
-DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/coreiq.sqlite3")
+# Force DB to pps_rag.db by default (can be overridden via COREIQ_DB)
+os.environ.setdefault("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
+DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
 STORAGE_ROOT = "/home/work/CoreIQ/backend/storage/model"  # train_qwen_rag.py 와 동일
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
 RAG_TOPK_CACHE_KEY = "rag_topk"
@@ -77,6 +80,12 @@ class InferBody(BaseModel):
     max_tokens: int = 512
     temperature: float = 0.7
 
+
+class InsertBaseModelBody(BaseModel):
+    name: str = Field(..., description="베이스 모델 표시 이름 (DB에는 base로 단일 저장)")
+    model_path: Optional[str] = Field(None, description="(옵션) 모델 로컬 경로. 미지정 시 STORAGE_ROOT/name 가정")
+    provider: str = Field("huggingface", description="모델 제공자: huggingface | openai 등")
+    tags: Optional[List[str]] = Field(default_factory=lambda: ["all"], description="적용 카테고리 태그: all | qa | doc_gen | summary")
 
 # ===== DB Helpers =====
 def _connect() -> sqlite3.Connection:
@@ -167,6 +176,29 @@ def _init_db():
     )
     """)
 
+    # llm_model_base: 베이스 모델 메타 (카테고리 태그 포함 – JSON 배열: ["all"] 또는 ["qa","doc_gen"]) 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS llm_model_base(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      name TEXT UNIQUE NOT NULL,
+      model_path TEXT NOT NULL,
+      tags TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # llm_model_runtime: 로드 상태(참고용) – 카테고리별 활성 및 로드 여부 저장
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS llm_model_runtime(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      category TEXT,
+      is_loaded BOOLEAN NOT NULL DEFAULT 0,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -190,6 +222,12 @@ def _get_cache(name: str) -> Optional[str]:
     row = cur.fetchone()
     conn.close()
     return row["data"] if row else None
+def _norm_category(category: str) -> str:
+    try:
+        return (category or "").strip()
+    except Exception:
+        return category
+
 
 
 def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional[int] = None):
@@ -205,30 +243,10 @@ def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional
 
 def _ensure_models_from_fs(category: str) -> None:
     """
-    STORAGE_ROOT 아래 로컬 디렉터리(학습 산출물 등)에서 config.json이 있는 모델 폴더를 llm_models에 동기화.
-    category는 admin UI 구분용이며, 로컬 폴더명에 카테고리가 명시되지 않았다면 기존 category로 등록.
+    STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qa|doc_gen|summary)과 충돌을 피하기 위해
+    여기서는 DB에 쓰지 않는다. 베이스 모델 등록은 insert-base API로만 수행한다.
     """
-    if not os.path.isdir(STORAGE_ROOT):
-        return
-    conn = _connect()
-    cur = conn.cursor()
-
-    for name in os.listdir(STORAGE_ROOT):
-        model_dir = os.path.join(STORAGE_ROOT, name)
-        if not os.path.isdir(model_dir):
-            continue
-        cfg = os.path.join(model_dir, "config.json")
-        if os.path.isfile(cfg):
-            # DB에 없으면 등록
-            cur.execute("SELECT id FROM llm_models WHERE name=?", (name,))
-            row = cur.fetchone()
-            if not row:
-                cur.execute("""
-                    INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, ("hf", name, 0, model_dir, category, "base", 1))
-    conn.commit()
-    conn.close()
+    return
 
 
 def _lookup_model_by_name(model_name: str) -> Optional[sqlite3.Row]:
@@ -360,6 +378,64 @@ class _ModelManager:
 
 _MODEL_MANAGER = _ModelManager()
 
+# Adapter preload tracking (for correct toggle/unload)
+_ADAPTER_LOADED: set[str] = set()
+
+def _resolve_model_fs_path(name_or_path: str) -> str:
+    try:
+        if os.path.isabs(name_or_path):
+            return name_or_path
+        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
+        if os.path.isfile(os.path.join(fs_path, "config.json")):
+            return fs_path
+    except Exception:
+        logging.getLogger(__name__).exception("failed to resolve model fs path")
+    return name_or_path
+
+def _is_model_loaded(model_name: str) -> bool:
+    try:
+        # Direct name
+        if _MODEL_MANAGER.is_loaded(model_name):
+            return True
+        # Resolve by DB/storage (so category-suffixed names map to the same folder)
+        candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+        if _MODEL_MANAGER.is_loaded(candidate):
+            return True
+        base = os.path.basename(candidate)
+        return (candidate in _ADAPTER_LOADED) or (base in _ADAPTER_LOADED)
+    except Exception:
+        logging.getLogger(__name__).exception("_is_model_loaded failure")
+        return False
+
+def _clear_local_cache_entries(model_name: str) -> None:
+    """Best-effort local caches and GPU memory cleanup. Never raises."""
+    try:
+        _MODEL_CACHE.pop(model_name, None)
+    except Exception:
+        pass
+    try:
+        resolved = _resolve_model_fs_path(model_name)
+        _MODEL_CACHE.pop(resolved, None)
+    except Exception:
+        pass
+    try:
+        import torch  # type: ignore
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        try:
+            logging.getLogger(__name__).exception("torch cuda cleanup failed in _clear_local_cache_entries")
+        except Exception:
+            pass
+    try:
+        gc.collect()
+    except Exception:
+        try:
+            logging.getLogger(__name__).exception("gc collect failed in _clear_local_cache_entries")
+        except Exception:
+            pass
+
 def _load_local_model(model_name_or_path: str):
     try:
         # Prefer manager cache
@@ -401,6 +477,153 @@ def _simple_generate(prompt_text: str, model_name_or_path: str, max_tokens: int 
     gen = out[0][inputs.input_ids.shape[1]:]
     return tok.decode(gen, skip_special_tokens=True)
 
+
+# ================================================================
+# Adapter-based preload/unload (qwen, oss via utils.llms)
+# ================================================================
+
+def _db_get_model_path(model_name: str) -> Optional[str]:
+    """Lookup model_path from repository DB for known providers."""
+    try:
+        # Delay import to avoid circulars in some contexts
+        from repository.users.llm_models import get_llm_model_by_provider_and_name as _get
+    except Exception:
+        logging.getLogger(__name__).exception("failed to import llm_models repository")
+        return None
+    # Try common provider keys
+    for prov in ("huggingface", "hf"):
+        try:
+            row = _get(prov, model_name)
+            if row and row.get("model_path"):
+                return row["model_path"]
+        except Exception:
+            # repository.get_db may use a different DB – ignore failures per provider
+            continue
+    return None
+
+
+def _strip_category_suffix(name: str) -> str:
+    for suf in ("-qa", "-doc_gen", "-summary"):
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return name
+
+
+def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
+    """Resolve a usable local model directory for a given logical name.
+    Priority: DB.model_path of name → DB.model_path of base-name(카테고리 접미어 제거)
+             → STORAGE_ROOT/name → STORAGE_ROOT/base-name
+    Returns absolute-like path or None.
+    """
+    # 1) exact name in DB
+    p = _db_get_model_path(model_name)
+    if p and os.path.isfile(os.path.join(p, "config.json")):
+        return p
+    # 2) base-name in DB
+    base = _strip_category_suffix(model_name)
+    if base != model_name:
+        p2 = _db_get_model_path(base)
+        if p2 and os.path.isfile(os.path.join(p2, "config.json")):
+            return p2
+    # 3) STORAGE_ROOT/name
+    cand = os.path.join(STORAGE_ROOT, model_name)
+    if os.path.isfile(os.path.join(cand, "config.json")):
+        return cand
+    # 4) STORAGE_ROOT/base-name
+    cand2 = os.path.join(STORAGE_ROOT, base)
+    if os.path.isfile(os.path.join(cand2, "config.json")):
+        return cand2
+    return None
+
+
+def _preload_via_adapters(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    model_path = _db_get_model_path(model_name)
+    if not model_path:
+        # Fallback to STORAGE_ROOT if present
+        cand = os.path.join(STORAGE_ROOT, model_name)
+        if os.path.isfile(os.path.join(cand, "config.json")):
+            model_path = cand
+        else:
+            logging.getLogger(__name__).warning("model path not found for %s", model_name)
+            return False
+
+    try:
+        if name.startswith("gpt_oss"):
+            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
+            loader = getattr(mod, "load_gpt_oss_20b", None)
+            if callable(loader):
+                loader(model_path)  # lru_cache will retain
+                try:
+                    _ADAPTER_LOADED.add(model_path)
+                    _ADAPTER_LOADED.add(os.path.basename(model_path))
+                except Exception:
+                    pass
+                return True
+            return False
+        if "qwen" in name:
+            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
+            loader = getattr(mod, "load_qwen_instruct_7b", None)
+            if callable(loader):
+                loader(model_path)  # lru_cache will retain
+                try:
+                    _ADAPTER_LOADED.add(model_path)
+                    _ADAPTER_LOADED.add(os.path.basename(model_path))
+                except Exception:
+                    pass
+                return True
+            return False
+    except Exception:
+        logging.getLogger(__name__).exception("adapter preload failed for %s", model_name)
+        return False
+    return False
+
+
+def _unload_via_adapters(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    ok = False
+    try:
+        if name.startswith("gpt_oss"):
+            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
+            loader = getattr(mod, "load_gpt_oss_20b", None)
+            if hasattr(loader, "cache_clear"):
+                try:
+                    loader.cache_clear()  # type: ignore[attr-defined]
+                    ok = True
+                except Exception:
+                    pass
+        if "qwen" in name:
+            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
+            loader = getattr(mod, "load_qwen_instruct_7b", None)
+            if hasattr(loader, "cache_clear"):
+                try:
+                    loader.cache_clear()  # type: ignore[attr-defined]
+                    ok = True
+                except Exception:
+                    pass
+    except Exception:
+        logging.getLogger(__name__).exception("adapter unload failed for %s", model_name)
+    # remove tracking
+    try:
+        resolved = _resolve_model_fs_path(model_name)
+        _ADAPTER_LOADED.discard(resolved)
+        _ADAPTER_LOADED.discard(os.path.basename(resolved))
+    except Exception:
+        pass
+    # Best-effort GPU/CPU cleanup
+    try:
+        import torch  # type: ignore
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        logging.getLogger(__name__).exception("torch cuda cleanup failed after adapter unload")
+    try:
+        gc.collect()
+    except Exception:
+        logging.getLogger(__name__).exception("gc collect failed after adapter unload")
+    return ok
+
 # ================================================================
 # External script helpers (download / training)
 # ================================================================
@@ -426,6 +649,66 @@ def download_model(body: DownloadModelBody) -> Dict[str, Any]:
     if code != 0:
         return {"success": False, "message": "download failed", "log": out}
     return {"success": True, "message": "download completed", "log": out}
+
+
+def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
+    """베이스 모델 메타를 llm_model_base에 단일 이름으로 저장하고 태그로 적용 카테고리를 관리한다."""
+    base_name = body.name.strip()
+    provided_path = (body.model_path or "").strip()
+    # 경로 미지정 시 storage/model/<name>로 자동 해석
+    auto_path = os.path.join(STORAGE_ROOT, base_name)
+    final_base_path = provided_path or auto_path
+    # 상대 경로 보정
+    if provided_path and not os.path.isabs(provided_path):
+        if not os.path.isfile(os.path.join(final_base_path, "config.json")):
+            cand = os.path.join(STORAGE_ROOT, provided_path)
+            if os.path.isfile(os.path.join(cand, "config.json")):
+                final_base_path = cand
+    cfg_ok = os.path.isfile(os.path.join(final_base_path, "config.json"))
+
+    tags = body.tags or ["all"]
+    # 정규화
+    tags = sorted(set([t.strip() for t in tags if t and t.strip()])) or ["all"]
+
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        # upsert-ish into llm_model_base
+        cur.execute("SELECT id FROM llm_model_base WHERE name=?", (base_name,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE llm_model_base SET provider=?, model_path=?, tags=?, created_at=CURRENT_TIMESTAMP WHERE id=?",
+                (body.provider, final_base_path, _json(tags), int(row["id"]))
+            )
+            model_id = int(row["id"])
+            existed = True
+        else:
+            cur.execute(
+                """
+                INSERT INTO llm_model_base(provider, name, model_path, tags)
+                VALUES(?,?,?,?)
+                """,
+                (body.provider, base_name, final_base_path, _json(tags))
+            )
+            model_id = int(cur.lastrowid)
+            existed = False
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "success": True,
+        "model": {
+            "id": model_id,
+            "name": base_name,
+            "model_path": final_base_path,
+            "tags": tags,
+            "exists": existed,
+        },
+        "pathChecked": cfg_ok,
+        "note": ("config.json 미존재 경고" if not cfg_ok else "ok")
+    }
 
 
 def train_model(body: TrainModelBody) -> Dict[str, Any]:
@@ -472,76 +755,152 @@ def set_topk_settings(topk: int) -> Dict[str, Any]:
 
 
 def get_model_list(category: str) -> Dict[str, Any]:
-    # 로컬 폴더 동기화 후 DB 조회
+    # 카테고리 정규화
+    category = _norm_category(category)
     _ensure_models_from_fs(category)
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-      SELECT id, name FROM llm_models
-      WHERE category=? AND is_active=1
-      ORDER BY trained_at DESC NULLS LAST, id DESC
-    """, (category,))
-    rows = cur.fetchall()
-    conn.close()
 
-    models = [{"id": r["id"], "name": r["name"]} for r in rows]
-    # 없으면 예비 목록(샘플) 제공
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        items: List[Dict[str, Any]] = []
+
+        # 1) 파인튜닝/카테고리별 모델 (기존 테이블)
+        if category in ("qa", "doc_gen", "summary"):
+            cur.execute(
+                """
+                SELECT id, name FROM llm_models
+                WHERE category=? AND is_active=1
+                ORDER BY trained_at DESC NULLS LAST, id DESC
+                """,
+                (category,)
+            )
+            for r in cur.fetchall():
+                items.append({"id": r["id"], "name": r["name"]})
+
+        # 2) 베이스 모델 중 태그가 all 또는 해당 카테고리를 포함하는 것
+        if category in ("qa", "doc_gen", "summary", "base"):
+            cur.execute("SELECT id, name, model_path, tags FROM llm_model_base ORDER BY id DESC")
+            for r in cur.fetchall():
+                try:
+                    tags = json.loads(r["tags"] or "[]")
+                except Exception:
+                    tags = []
+                # base 카테고리는 전체 base를 보여주고, qa/doc_gen/summary 는 all 또는 해당 태그만
+                show = (category == "base") or ("all" in tags) or (category in tags)
+                if not show:
+                    continue
+                # 베이스는 표시 이름을 그대로 쓰되, id 충돌 방지를 위해 음수 id로 가상화
+                items.append({"id": -int(r["id"]), "name": r["name"]})
+
+        # 중복 제거(이름 기준)
+        seen = set()
+        out_rows = []
+        for it in items:
+            if it["name"] in seen:
+                continue
+            seen.add(it["name"])
+            out_rows.append(it)
+
+    finally:
+        conn.close()
+
+    active_name = _active_model_name_for_category(category)
+    models = [{
+        "id": r["id"],
+        "name": r["name"],
+        "loaded": _is_model_loaded(r["name"]),
+        "active": (r["name"] == active_name) and _is_model_loaded(r["name"]),
+    } for r in out_rows]
     if not models:
-        models = [
-            {"id": 5, "name": "Qwen-3.3-summary-v3"},
-            {"id": 4, "name": "Qwen-3.3-summary-v2"},
-            {"id": 3, "name": "Qwen-3.3-summary-v1"},
-        ]
+        models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
     return {"category": category, "models": models}
 
 
-def load_or_unload_model(category: str, model_name: str) -> Dict[str, Any]:
+def load_model(category: str, model_name: str) -> Dict[str, Any]:
     """
-    카테고리별 '활성 모델'을 지정/해제. 실제 메모리 언로드는 이 계층에서 강제하지 않고,
-    추론 계층에서 필요 시 lazy-load 하도록 설계.
-    여기에 실제 메모리 로드/언로드 동작을 추가한다.
+    카테고리별 활성 모델을 메모리에 로드하고 active 로 설정한다.
+    이미 로드된 경우에도 active 만 갱신한다.
     """
     logger = logging.getLogger(__name__)
     try:
+        category = _norm_category(category)
         row = _lookup_model_by_name(model_name)
 
-        # Determine action: toggle – if loaded, unload; otherwise load
-        is_loaded = _MODEL_MANAGER.is_loaded(model_name)
-        performed = "unloaded" if is_loaded else "loaded"
-
-        if is_loaded:
-            _MODEL_MANAGER.unload(model_name)
-            # If unloading the currently active model for this category, clear it
-            active_name = _active_model_name_for_category(category)
-            if active_name == model_name:
-                _set_cache(ACTIVE_MODEL_CACHE_KEY_PREFIX + category, _json({"modelName": None}), "llm_admin")
-        else:
+        # If not loaded, load it (prefer DB/storage-resolved path → manager; fallback to adapter preload)
+        if not _is_model_loaded(model_name):
             try:
-                _MODEL_MANAGER.load(model_name)
+                try:
+                    # Resolve best candidate path
+                    candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+                    _MODEL_MANAGER.load(candidate)
+                except Exception:
+                    logging.getLogger(__name__).exception("manager load failed, trying adapter preload")
+                    pre_ok = _preload_via_adapters(model_name)
+                    if not pre_ok:
+                        raise RuntimeError("adapter preload also failed")
             except Exception:
-                logger.exception("failed to load model during toggle: %s", model_name)
+                logger.exception("failed to load model: %s", model_name)
                 return {"success": False, "message": f"모델 로드 실패: {model_name}", "category": category, "modelName": model_name}
-            _set_active_model_for_category(category, model_name)
 
-        message = f"모델 {performed} 완료"
+        # Set active for category
+        _set_active_model_for_category(category, model_name)
+
+        message = "모델 로드 완료"
         if row is None:
             message += " (주의: DB에 모델 메타가 없어 로컬 경로 기준 처리)"
-        return {"success": True, "message": message, "category": category, "modelName": model_name, "loaded": (performed == "loaded")}
+        return {"success": True, "message": message, "category": category, "modelName": model_name, "loaded": True}
     except Exception:
-        logger.exception("unexpected error in load_or_unload_model")
+        logger.exception("unexpected error in load_model")
         return {"success": False, "message": "예상치 못한 오류로 작업에 실패했습니다.", "category": category, "modelName": model_name}
 
 
 def unload_model(model_name: str) -> Dict[str, Any]:
-    """Explicitly unload a model from memory (does not change active cache unless it matches)."""
+    """Explicitly unload a model from memory (manager + adapters)."""
     logger = logging.getLogger(__name__)
+    was_loaded = _is_model_loaded(model_name)
+    # 각 단계는 독립적으로 시도하고, 일부 실패해도 최종 상태로 성공 여부 판단
     try:
-        was_loaded = _MODEL_MANAGER.is_loaded(model_name)
-        ok = _MODEL_MANAGER.unload(model_name)
-        return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
+        try:
+            # Try unloading by both name and resolved path to avoid key mismatch
+            _MODEL_MANAGER.unload(model_name)
+            try:
+                candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+                _MODEL_MANAGER.unload(candidate)
+            except Exception:
+                pass
+        except Exception:
+            logging.getLogger(__name__).exception("manager unload failed")
+        try:
+            _unload_via_adapters(model_name)
+        except Exception:
+            logging.getLogger(__name__).exception("adapter unload failed")
+        try:
+            _clear_local_cache_entries(model_name)
+            try:
+                candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+                _clear_local_cache_entries(candidate)
+            except Exception:
+                pass
+        except Exception:
+            logging.getLogger(__name__).exception("local cache clear failed")
+    finally:
+        now_loaded = _is_model_loaded(model_name)
+    ok = not now_loaded
+    return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
+
+
+def unload_model_for_category(category: str, model_name: str) -> Dict[str, Any]:
+    """Unload a model and clear active cache if it matches the category."""
+    category = _norm_category(category)
+    res = unload_model(model_name)
+    try:
+        active_name = _active_model_name_for_category(category)
+        if active_name == model_name:
+            _set_cache(ACTIVE_MODEL_CACHE_KEY_PREFIX + category, _json({"modelName": None}), "llm_admin")
     except Exception:
-        logger.exception("failed to unload model: %s", model_name)
-        return {"success": False, "message": "언로드 실패", "modelName": model_name}
+        logging.getLogger(__name__).exception("failed to clear active cache on unload for %s", category)
+    res.update({"category": category, "loaded": False})
+    return res
 
 
 def list_loaded_models() -> Dict[str, Any]:

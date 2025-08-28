@@ -14,7 +14,7 @@ from service.admin.LLM_finetuning import (
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
 
 
-@router.post("/fine-tuning", summary="파인튜닝 설정 및 실행")
+@router.post("/fine-tuning", summary="파인튜닝 설정 및 실행 (카테고리 필수)")
 def launch_fine_tuning(category: str = Query(..., description="qa | doc_gen | summary"), body: FineTuneRequest = ...):
     # Let service raise structured exceptions; middleware will format the response.
     return start_fine_tuning(category, body)
