@@ -25,8 +25,8 @@ def load_gpt_oss_20b(model_dir):
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
         # ----------------------------
-        # 1) 새 transformers(>=4.46) : Mxfp4Config 사용
-        # 2) 구버전               : legacy load_in_4bit kwargs 사용
+        # 1) transformers(>=4.46): try MXFP4; if env missing (triton/triton_kernels), fallback to 4-bit NF4
+        # 2) older transformers  : directly use 4-bit NF4
         # ----------------------------
         try:
             Mxfp4Config = getattr(
@@ -37,15 +37,32 @@ def load_gpt_oss_20b(model_dir):
                 compute_dtype=torch.bfloat16,
                 weight_dtype=torch.bfloat16,
             )
-            model = AutoModelForCausalLM.from_pretrained(
-                model_dir,
-                device_map="auto",
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-                quantization_config=quant_cfg,
-            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_dir,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    quantization_config=quant_cfg,
+                )
+            except Exception as qerr:
+                # MXFP4 not available (e.g., missing triton >=3.4.0 or triton_kernels). Fallback to 4-bit NF4.
+                logger.warning({
+                    "event": "mxfp4_unavailable_fallback_to_bnb4",
+                    "error": str(qerr),
+                })
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_dir,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                )
         except (AttributeError, ModuleNotFoundError):
-            # fallback for older transformers
+            # fallback for older transformers without MXFP4 support
             model = AutoModelForCausalLM.from_pretrained(
                 model_dir,
                 device_map="auto",
