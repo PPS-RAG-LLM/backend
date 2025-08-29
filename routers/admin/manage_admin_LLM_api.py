@@ -55,13 +55,21 @@ def set_settings(body: TopKSettingsBody):
 def model_list(category: str = Query(..., description="base | qa | doc_gen | summary")):
     return get_model_list(category)
 
-@router.post("/settings/model-load", summary="카테고리/모델명으로 모델 로드 및 active 설정")
-def model_load(category: str = Query(..., description="qa | doc_gen | summary, 반환"), body: ModelLoadBody = ...):
-    return load_model(category, body.modelName)
+@router.post("/settings/model-load", summary="모델명을 기준으로 로드 (베이스 모델은 모든 카테고리에 로드로 간주)")
+def model_load(body: ModelLoadBody = ...):
+    # 지연 로딩으로 새 함수 유무에 관계없이 동작하도록 처리
+    from service.admin import manage_admin_LLM as svc
+    load_by_name = getattr(svc, "load_model_by_name", None)
+    if callable(load_by_name):
+        return load_by_name(body.modelName)
+    # 구버전 폴백: 일단 한 카테고리에 로드하면 경로 일치 기준으로 모든 카테고리에서 로드 표시됨
+    return svc.load_model("qa", body.modelName)
 
-@router.post("/settings/model-unload", summary="카테고리/모델명으로 명시적 언로드 및 active 해제")
-def model_unload(category: str = Query(..., description="qa | doc_gen | summary"), body: ModelLoadBody = ...):
-    return unload_model_for_category(category, body.modelName)
+@router.post("/settings/model-unload", summary="모델명을 기준으로 명시적 언로드 (모든 카테고리에서 내려간 것으로 간주)")
+def model_unload(body: ModelLoadBody = ...):
+    # 언로드는 카테고리와 무관하게 동작. active 캐시는 카테고리별로 클리어 필요 시 별도 API 사용
+    from service.admin.manage_admin_LLM import unload_model
+    return unload_model(body.modelName)
 
 @router.get("/compare-models", summary="최근 평가 결과 기준 모델 비교 목록 => 카테고리별 평가 기준 목록. ")
 def compare_models_list(category: str = Query(...)):
