@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import List
 from datetime import datetime, timezone
 from collections import defaultdict
+import logging
+import sqlite3
+import shutil
 
 import torch
 from pydantic import BaseModel
@@ -35,24 +38,33 @@ resource_dir = Path(os.getenv("RESOURCE_DIR", BASE_DIR / "resources")).resolve()
 EXTRACTED_TEXT_DIR = resource_dir / "extracted_texts"
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
  
-BGE_MODEL_DIR = (resource_dir / "model" / "embedding_bge_m3").resolve()
-QWEN_MODEL_DIR = (resource_dir / "model" / "embedding_qwen3_4b").resolve()
+# Model root directory
+MODEL_ROOT_DIR = (resource_dir / "model").resolve()
 
 MILVUS_LITE_PATH = (resource_dir / "milvus_lite.db").resolve()
 COLLECTION_NAME = "pdf_chunks"
+
+# Fixed project/data paths
+PROJECT_ROOT = BASE_DIR.parent.parent  # backend/
+RAW_DATA_DIR = (PROJECT_ROOT / "storage" / "user_data" / "row_data").resolve()
+LOCAL_DATA_ROOT = (PROJECT_ROOT / "storage" / "user_data" / "local_data").resolve()
+SQLITE_DB_PATH = (PROJECT_ROOT / "storage" / "pps_rag.db").resolve()
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------
 # Pydantic Request Schemas
 # -------------------------------------------------
 class PDFExtractRequest(BaseModel):
-    dir_path: str  # Root directory that contains PDFs
+    """Deprecated: kept for compatibility; path is now fixed to ./storage/user_data/local_data."""
+    pass
 
 
 class RAGSearchRequest(BaseModel):
     query: str
     top_k: int = 5
     user_level: int = 1
-    model: str | None = "bge"  # 'bge' | 'qwen'
+    model: str | None = "bge"  # kept for backward-compat; API now uses saved settings
 
 
 class SinglePDFIngestRequest(BaseModel):
@@ -71,10 +83,9 @@ def set_vector_settings(embed_model_key: str | None = None, search_type: str | N
     global _CURRENT_EMBED_MODEL_KEY, _CURRENT_SEARCH_TYPE  # noqa: PLW0603
 
     if embed_model_key is not None:
-        key = embed_model_key.lower()
-        if key not in {"bge", "qwen"}:
-            raise ValueError("unsupported embeddingModel; allowed: 'bge', 'qwen'")
-        _CURRENT_EMBED_MODEL_KEY = key
+        # Resolve flexibly against available local model directories
+        canonical, _ = _resolve_model_input(embed_model_key)
+        _CURRENT_EMBED_MODEL_KEY = canonical
 
     if search_type is not None:
         st = search_type.lower()
@@ -102,11 +113,62 @@ def _mean_pooling(outputs, mask):  # type: ignore[valid-type]
     return summed / counts
 
 
-def _get_model_dir(model_key: str | None) -> Path:
+def _resolve_model_input(model_key: str | None) -> tuple[str, Path]:
+    """Resolve input to a concrete embedding model directory.
+
+    Accepts flexible keys, e.g., 'bge', 'bge_m3', 'embedding_bge_m3',
+    'qwen', 'qwen3_4b', 'qwen3_0_6b', 'embedding_qwen3_4b'.
+    Returns (canonical_key, model_dir_path). canonical_key is the directory name.
+    """
+    models: list[Path] = []
+    if MODEL_ROOT_DIR.exists():
+        for child in MODEL_ROOT_DIR.iterdir():
+            if child.is_dir():
+                models.append(child.resolve())
+
     key = (model_key or "bge").lower()
-    if key.startswith("qwen"):
-        return QWEN_MODEL_DIR
-    return BGE_MODEL_DIR
+
+    def aliases(p: Path) -> list[str]:
+        nm = p.name.lower()
+        als = [nm]
+        if nm.startswith("embedding_"):
+            als.append(nm[len("embedding_"):])
+        return als
+
+    # 1) Exact/alias match
+    for p in models:
+        als = aliases(p)
+        if key in als:
+            return p.name, p
+
+    # 2) Substring match
+    for p in models:
+        if key in p.name.lower():
+            return p.name, p
+
+    # 3) Heuristic by family
+    if "qwen" in key:
+        # prefer larger variants if multiple exist
+        preferred = [m for m in models if "qwen" in m.name.lower()]
+        if preferred:
+            # sort by name length desc as crude preference
+            preferred.sort(key=lambda x: len(x.name), reverse=True)
+            p = preferred[0]
+            return p.name, p
+
+    # default to bge family
+    preferred = [m for m in models if "bge" in m.name.lower()]
+    if preferred:
+        p = preferred[0]
+        return p.name, p
+
+    # Fallback to conventional path even if not present (will error later)
+    fallback = MODEL_ROOT_DIR / "embedding_bge_m3"
+    return fallback.name, fallback
+
+
+def _get_model_dir(model_key: str | None) -> Path:
+    return _resolve_model_input(model_key)[1]
 
 
 def _load_embedder(model_key: str | None = "bge"):
@@ -163,6 +225,135 @@ def _client() -> MilvusClient:
     return MilvusClient(str(MILVUS_LITE_PATH))
 
 
+# -------------------------------------------------
+# SQLite helpers for Security Level Rules
+# -------------------------------------------------
+
+def _db_connect() -> sqlite3.Connection:
+    SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(SQLITE_DB_PATH))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_level_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            max_level INTEGER NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_level_keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level INTEGER NOT NULL,
+            keyword TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _parse_at_string_to_keywords(value: str) -> list[str]:
+    # Split by '@' and strip; filter empties
+    if not value:
+        return []
+    tokens = [tok.strip() for tok in value.split("@")]
+    return [t for t in tokens if t]
+
+
+def set_security_level_rules(max_level: int, levels_map: dict[int, str]) -> dict:
+    """Persist security rules.
+
+    levels_map maps level -> '@' delimited string (e.g., "@출장@결혼").
+    """
+    if max_level < 1:
+        raise ValueError("max_level must be >= 1")
+
+    # Disallow configuring level 1 keywords
+    for level, value in levels_map.items():
+        if int(level) == 1 and _parse_at_string_to_keywords(value):
+            raise ValueError("level 1 cannot have keywords; it is always accessible to all")
+
+    conn = _db_connect()
+    try:
+        with conn:
+            # Upsert config (single row id=1)
+            conn.execute(
+                "INSERT INTO security_level_config(id, max_level) VALUES(1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET max_level=excluded.max_level, updated_at=CURRENT_TIMESTAMP",
+                (int(max_level),),
+            )
+            # Clear and insert keywords
+            conn.execute("DELETE FROM security_level_keywords")
+            for level, value in levels_map.items():
+                try:
+                    lvl = int(level)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("Invalid level key '%s' in levels_map", level)
+                    continue
+                if lvl < 1 or lvl > max_level:
+                    continue
+                if lvl == 1:
+                    # Do not store any keywords for level 1
+                    continue
+                for kw in _parse_at_string_to_keywords(value):
+                    conn.execute(
+                        "INSERT INTO security_level_keywords(level, keyword) VALUES(?, ?)",
+                        (lvl, kw),
+                    )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Failed to set security level rules")
+        raise
+    finally:
+        conn.close()
+
+    return get_security_level_rules()
+
+
+def get_security_level_rules() -> dict:
+    conn = _db_connect()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT max_level FROM security_level_config WHERE id=1").fetchone()
+        max_level = int(row[0]) if row else 1
+        rows = cur.execute(
+            "SELECT level, keyword FROM security_level_keywords ORDER BY level ASC, keyword ASC"
+        ).fetchall()
+        levels: dict[int, list[str]] = {i: [] for i in range(1, max_level + 1)}
+        for lvl, kw in rows:
+            if int(lvl) not in levels:
+                levels[int(lvl)] = []
+            levels[int(lvl)].append(str(kw))
+        return {
+            "maxLevel": max_level,
+            "levels": {str(k): v for k, v in levels.items()},
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to get security level rules")
+        raise
+    finally:
+        conn.close()
+
+
+def _determine_security_level_from_text(text: str, rules: dict) -> int:
+    """Return highest level whose any keyword appears in text. Defaults to 1."""
+    try:
+        max_level = int(rules.get("maxLevel", 1))
+        levels = rules.get("levels", {})
+        selected = 1
+        # Simple substring matching; prioritize higher levels
+        for lvl in range(1, max_level + 1):
+            keywords = levels.get(str(lvl), [])
+            for kw in keywords:
+                if kw and kw in text:
+                    if lvl > selected:
+                        selected = lvl
+        return selected
+    except Exception:  # noqa: BLE001
+        logger.exception("Error determining security level from text")
+        return 1
+
+
 def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str = "IP"):
     cols = client.list_collections()
     if COLLECTION_NAME not in cols:
@@ -192,71 +383,145 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
 
 
 # -------------------------------------------------
-# 1) PDF → 텍스트 추출
+# 1) PDF → 텍스트 추출 (fixed paths + security rules)
 # -------------------------------------------------
-async def extract_pdfs(req: PDFExtractRequest):
+async def extract_pdfs():
     import fitz  # type: ignore
     from tqdm import tqdm  # type: ignore
 
-    root_dir = Path(req.dir_path)
-    if not root_dir.exists():
-        return {"error": f"경로가 존재하지 않습니다: {req.dir_path}"}
-
+    # Ensure base directories
     EXTRACTED_TEXT_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Prepare security folders based on current rules
+    rules = get_security_level_rules()
+    max_level = int(rules.get("maxLevel", 1))
+    for lvl in range(1, max_level + 1):
+        (LOCAL_DATA_ROOT / f"securityLevel{lvl}").mkdir(parents=True, exist_ok=True)
+
+    # Load previous meta if any
     done_files: dict[str, dict] = {}
     if META_JSON_PATH.exists():
-        done_files = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
+        try:
+            done_files = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to read extraction meta JSON")
+            done_files = {}
 
     new_meta: dict[str, dict] = {}
-    pdf_paths = list(root_dir.rglob("*.pdf"))
+    pdf_paths = list(RAW_DATA_DIR.rglob("*.pdf"))
+    # Deduplicate by keeping only the latest version inferred from filename pattern with '_' and date-like suffix
+    # Example: "28._연봉제시행규정_20191128.pdf" => base key: "연봉제시행규정", date: 20191128
+    def _extract_base_and_date(p: Path):
+        name = p.stem  # without .pdf
+        parts = name.split("_")
+        # take last as date candidate if all digits and length in {4,6,8}
+        date_num = 0
+        if len(parts) >= 2:
+            cand = parts[-1]
+            if cand.isdigit() and len(cand) in (4, 6, 8):
+                try:
+                    date_num = int(cand)
+                except Exception:  # noqa: BLE001
+                    date_num = 0
+        # base: skip numeric prefixes and empty tokens, take the longest mid token
+        mid_tokens = [t for t in parts[:-1] if t and not t.isdigit()]
+        base = max(mid_tokens, key=len) if mid_tokens else parts[0]
+        return base, date_num
+
+    # Group by base and choose latest; remove older duplicates physically
+    grouped: dict[str, list[tuple[Path, int]]] = {}
+    for p in pdf_paths:
+        base, date_num = _extract_base_and_date(p)
+        grouped.setdefault(base, []).append((p, date_num))
+
+    kept_paths: list[Path] = []
+    removed_files: list[str] = []
+    for base, lst in grouped.items():
+        # pick max date_num; if all zero, keep the longest filename to be deterministic
+        lst_sorted = sorted(lst, key=lambda x: (x[1], len(x[0].name)))
+        keep = lst_sorted[-1]
+        kept_paths.append(keep[0])
+        to_remove = [p for (p, d) in lst_sorted[:-1]]
+        for old_path in to_remove:
+            try:
+                old_path.unlink(missing_ok=True)
+                removed_files.append(str(old_path.relative_to(RAW_DATA_DIR)))
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to remove duplicate file: %s", old_path)
+    # Use only latest files
+    pdf_paths = kept_paths
     if not pdf_paths:
-        return {"message": "처리할 PDF가 없습니다."}
+        return {"message": "처리할 PDF가 없습니다.", "meta_path": str(META_JSON_PATH), "deduplicated": {"removedCount": len(removed_files), "removed": removed_files}}
 
     for pdf_path in tqdm(pdf_paths, desc="PDF 전처리"):
-        pdf_rel = pdf_path.relative_to(root_dir)
-        txt_path = EXTRACTED_TEXT_DIR / pdf_rel.with_suffix(".txt")
-        key = str(pdf_rel)
-        if key in done_files and txt_path.exists():
-            new_meta[key] = done_files[key]
-            continue
         try:
+            # Extract text to determine level
             doc = fitz.open(pdf_path)
             text_pages = [p.get_text("text").strip() for p in doc]
             pdf_text = "\n\n".join(text_pages)
+
+            # Determine level from rules
+            sec_level = _determine_security_level_from_text(pdf_text, rules)
+            sec_folder = f"securityLevel{sec_level}"
+
+            # Destination relative path inside local_data/securityLevelN
+            rel_from_raw = pdf_path.relative_to(RAW_DATA_DIR)
+            dest_rel_pdf = Path(sec_folder) / rel_from_raw
+
+            # Copy PDF into local_data structure
+            dest_pdf_abs = LOCAL_DATA_ROOT / dest_rel_pdf
+            dest_pdf_abs.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(pdf_path, dest_pdf_abs)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to copy PDF to local_data: %s", dest_pdf_abs)
+
+            # Write extracted text under extracted_texts mirroring the same rel path
+            txt_path = EXTRACTED_TEXT_DIR / dest_rel_pdf.with_suffix(".txt")
             txt_path.parent.mkdir(parents=True, exist_ok=True)
             txt_path.write_text(pdf_text, encoding="utf-8")
 
-            # 보안레벨 추정
-            level_folder = pdf_rel.parts[0] if len(pdf_rel.parts) else "securityLevel1"
-            try:
-                security_level = int(level_folder.replace("securityLevel", ""))
-            except ValueError:
-                security_level = 1
-
-            doc_id_part, version_num = _parse_doc_version(pdf_rel.stem)
-
+            # Meta info
+            doc_id_part, version_num = _parse_doc_version(rel_from_raw.stem)
             lines = pdf_text.splitlines()
+            key = str(dest_rel_pdf)
             info = {
                 "chars": len(pdf_text),
                 "lines": len(lines),
                 "preview": pdf_text[:200].replace("\n", " ") + "…",
-                "security_level": security_level,
+                "security_level": int(sec_level),
                 "doc_id": doc_id_part,
                 "version": version_num,
             }
             new_meta[key] = info
         except Exception as e:  # noqa: BLE001
-            new_meta[key] = {"error": str(e)}
+            logger.exception("Failed to process PDF: %s", pdf_path)
+            # Keep an error entry in meta with destination under level 1 by default
+            try:
+                rel_from_raw = pdf_path.relative_to(RAW_DATA_DIR)
+                dest_rel_pdf = Path("securityLevel1") / rel_from_raw
+                new_meta[str(dest_rel_pdf)] = {"error": str(e)}
+            except Exception:
+                new_meta[str(pdf_path.name)] = {"error": str(e)}
 
     META_JSON_PATH.write_text(json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"message": "PDF 추출 완료", "pdf_count": len(pdf_paths), "meta_path": str(META_JSON_PATH)}
+    return {
+        "message": "PDF 추출 완료",
+        "pdf_count": len(pdf_paths),
+        "meta_path": str(META_JSON_PATH),
+        "deduplicated": {
+            "removedCount": len(removed_files),
+            "removed": removed_files,
+        },
+    }
 
 
 # -------------------------------------------------
 # 2) 전체 임베딩 & 인제스트
 # -------------------------------------------------
-async def ingest_embeddings(model_key: str | None = None):
+async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None = None, overlap: int | None = None):
     if model_key is None:
         model_key = _CURRENT_EMBED_MODEL_KEY
     if not META_JSON_PATH.exists():
@@ -269,7 +534,13 @@ async def ingest_embeddings(model_key: str | None = None):
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
-    MAX_TOKENS, OVERLAP = 512, 64
+    # Chunking parameters (with sane bounds)
+    MAX_TOKENS = 512
+    if isinstance(chunk_size, int) and chunk_size > 0:
+        MAX_TOKENS = int(chunk_size)
+    OVERLAP = 64
+    if isinstance(overlap, int) and overlap >= 0:
+        OVERLAP = max(0, min(int(overlap), max(0, MAX_TOKENS - 1)))
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split()
@@ -415,7 +686,13 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         doc_id = f"u{int(req.workspace_id)}__{base_stem}__{unique_suffix}"
 
     # 임베더/클라
-    tokenizer, model, device = _load_embedder(req.model or "bge")
+    # Always use saved embedding model from settings if available
+    try:
+        saved_model_key = get_vector_settings()["embeddingModel"]
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to load vector settings; defaulting to 'bge'")
+        saved_model_key = "bge"
+    tokenizer, model, device = _load_embedder(saved_model_key)
     emb_dim = int(_embed_text(tokenizer, model, device, "test").shape[0])
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
@@ -550,8 +827,21 @@ async def search_documents(req: RAGSearchRequest):
             sec_level = hit.entity.get("security_level")
             score = hit.score
 
-        full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
-        snippet = chunk_text(full_txt)[int(cidx)]
+        try:
+            full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to read text for path: %s", path)
+            full_txt = ""
+        chunks = chunk_text(full_txt)
+        idx = int(cidx) if isinstance(cidx, int) else int(cidx or 0)
+        if not chunks:
+            snippet = ""
+        elif idx < 0:
+            snippet = chunks[0]
+        elif idx >= len(chunks):
+            snippet = chunks[-1]
+        else:
+            snippet = chunks[idx]
         hits.append(
             {
                 "score": float(score),
@@ -589,8 +879,10 @@ async def delete_db():
     return {"message": "삭제 완료(Milvus Lite)", "dropped_collections": cols}
 
 
-async def list_indexed_files(limit: int = 16384, offset: int = 0):
-    """Return aggregated file entries. Supports pagination via limit/offset."""
+async def list_indexed_files(limit: int = 16384, offset: int = 0, query: str | None = None):
+    """Return aggregated file entries. Supports pagination via limit/offset.
+    If query is provided, filters by fileName contains query (case-sensitive substring).
+    """
     limit = max(1, min(limit, 16384))
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
@@ -639,6 +931,9 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0):
             "fileSize": size,
             "securityLevel": int(levels.get(path, 1)),
         })
+    if query:
+        q = str(query)
+        items = [it for it in items if q in it["fileName"]]
     return items
 
 
