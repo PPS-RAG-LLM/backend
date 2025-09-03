@@ -6,6 +6,7 @@ from utils.llms.registry import register, Streamer
 from repository.users.llm_models import get_llm_model_by_provider_and_name
 from utils import logger
 from errors import NotFoundError
+import os
 
 logger = logger(__name__)
 
@@ -24,9 +25,15 @@ def hf_factory(model_key: str) -> Streamer:
     model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
     logger.info(f"model_info: {model_info}")
     if not model_info:
-        raise NotFoundError(f"지원하지 않는 HF 모델: {model_key}")
-
-    local_path = model_info.get("model_path")
+        # Fallback: if DB missing, try default storage path
+        storage_root = os.getenv("STORAGE_MODEL_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..", "storage", "model"))
+        # Normalize to absolute path
+        storage_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage", "model")) if not os.path.isabs(storage_root) else storage_root
+        default_path = os.path.join(storage_root, model_key)
+        logger.info(f"DB miss, trying filesystem fallback: {default_path}")
+        local_path = default_path
+    else:
+        local_path = model_info.get("model_path")
     logger.info(f"hf_factory: {model_key}, {local_path}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성

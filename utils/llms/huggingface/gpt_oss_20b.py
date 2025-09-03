@@ -4,6 +4,7 @@ from transformers.generation.configuration_utils import GenerationConfig
 from threading import Thread  
 from config import config
 import time, torch
+from importlib import import_module
 from utils import logger
 from functools import lru_cache
 from typing import List, Dict, Any, Generator
@@ -12,25 +13,76 @@ logger = logger(__name__)
 
 @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_gpt_oss_20b(model_dir): 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        trust_remote_code = True,   # 모델 코드 신뢰
-        use_fast=False,             # 빠른 토크나이저 사용 여부
-        padding_side = "left"       # 패딩 위치
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir,
+            trust_remote_code=True,
+            use_fast=False,
+            padding_side="left",
         )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, 
-        device_map="auto",          # 모델 분산 처리
-        torch_dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
-        trust_remote_code=True,     # 모델 코드 신뢰
-        low_cpu_mem_usage=True      # 메모리 효율성
-        )
-    model.eval()
-    return model, tokenizer
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        # ----------------------------
+        # 1) transformers(>=4.46): try MXFP4; if env missing (triton/triton_kernels), fallback to 4-bit NF4
+        # 2) older transformers  : directly use 4-bit NF4
+        # ----------------------------
+        try:
+            Mxfp4Config = getattr(
+                import_module("transformers.utils.quantization_config"),
+                "Mxfp4Config",
+            )
+            quant_cfg = Mxfp4Config(
+                compute_dtype=torch.bfloat16,
+                weight_dtype=torch.bfloat16,
+            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_dir,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    quantization_config=quant_cfg,
+                )
+            except Exception as qerr:
+                # MXFP4 not available (e.g., missing triton >=3.4.0 or triton_kernels). Fallback to 4-bit NF4.
+                logger.warning({
+                    "event": "mxfp4_unavailable_fallback_to_bnb4",
+                    "error": str(qerr),
+                })
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_dir,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                )
+        except (AttributeError, ModuleNotFoundError):
+            # fallback for older transformers without MXFP4 support
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                device_map="auto",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        try:
+            model.to(torch.bfloat16)
+        except Exception:
+            # some older accelerate versions disallow .to after device_map
+            pass
+        model.eval()
+        return model, tokenizer
+    except Exception as e:
+        logger.exception({"event": "load_gpt_oss_20b_failed", "error": str(e)})
+        raise
 
 
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
@@ -38,7 +90,12 @@ def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, 
     if not model_dir:
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
-    model, tokenizer = load_gpt_oss_20b(model_dir)
+    try:
+        model, tokenizer = load_gpt_oss_20b(model_dir)
+    except Exception as e:
+        logger.error({"event": "stream_chat_failed", "stage": "load", "error": str(e)})
+        raise
+
     # 1. Harmony chat template 자동 적용
     #    - add_generation_prompt=True: assistant 응답 시작에 맞춰 템플릿 완성
     input_ids = tokenizer.apply_chat_template(
@@ -68,13 +125,23 @@ def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, 
         "use_cache": True,
         "streamer": streamer,
     }
-    thread = Thread(target=model.generate, kwargs=generation_args)
-    thread.start()
+    try:
+        thread = Thread(target=model.generate, kwargs=generation_args)
+        thread.start()
+    except Exception as e:
+        logger.exception({"event": "generation_start_failed", "error": str(e)})
+        raise
+
     #3. 스트리망 토큰 yield
-    for text_token in streamer:
-        if text_token:
-            yield text_token
-    thread.join()
+    try:
+        for text_token in streamer:
+            if text_token:
+                yield text_token
+    except Exception as e:
+        logger.exception({"event": "streaming_runtime_error", "error": str(e)})
+        raise
+    finally:
+        thread.join()
 
 def build_qwen_prompt(messages):
     prompt = ""
