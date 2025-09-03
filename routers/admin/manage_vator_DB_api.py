@@ -1,22 +1,31 @@
-from fastapi import APIRouter, Request, status, Body
+from __future__ import annotations
+
+from fastapi import APIRouter, Request, Body, status, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Literal
+
 from service.admin.manage_vator_DB import (
-    RAGSearchRequest,
-    SinglePDFIngestRequest,
+    # 설정
+    set_vector_settings,
+    get_vector_settings,
+    # 인제스트 파라미터(청크/오버랩)  ← 추가
+    set_ingest_params,
+    get_ingest_params,
+    # 보안레벨(작업유형별)
+    set_security_level_rules_per_task,
+    get_security_level_rules_all,
+    # 파이프라인
     extract_pdfs,
     ingest_embeddings,
     ingest_single_pdf,
-    search_documents,
-    delete_db,
-    set_vector_settings,
-    get_vector_settings,
+    execute_search,
+    # 관리
     list_indexed_files,
     delete_files_by_names,
-    set_security_level_rules,
-    get_security_level_rules,
+    delete_db,
+    # 타입
+    SinglePDFIngestRequest,
 )
-
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document"],
@@ -28,193 +37,239 @@ router = APIRouter(
     },
 )
 
+# ============================
+# Request/Response Models
+# ============================
+
 class VectorSettingsBody(BaseModel):
     embeddingModel: Optional[str] = Field(
         None,
-        description="임베딩 모델 키",
-        examples=["bge", "qwen"],
+        description="임베딩 모델 키 (예: bge, embedding_bge_m3, qwen3_4b 등)"
     )
-    searchType: Optional[str] = Field(
+    searchType: Optional[Literal["hybrid", "bm25"]] = Field(
         None,
-        description="검색 타입",
-        examples=["hybrid", "bm25"],
+        description="검색 방식 (hybrid | bm25)"
     )
 
-class DeleteFilesBody(BaseModel):
-    filesToDelete: List[str] = Field(..., description="삭제할 파일 이름 배열", examples=[["회사내규.pdf", "20240835_보고서.pdf"]])
+
+class TaskSecurityConfig(BaseModel):
+    maxLevel: int = Field(..., ge=1, description="최대 보안 레벨 (>=1)")
+    # 레벨별 키워드는 '@'로 구분된 단일 문자열로 받습니다. (예: '2': '@연봉@급여')
+    levels: Dict[str, str] = Field(
+        default_factory=dict,
+        description="레벨별 키워드 설정. 예: {'1': '@일반@공개', '2': '@연구@연봉', '3': '@부정@개인정보'}",
+        examples=[{"1": "@일반@공개", "2": "@연구@연봉", "3": "@부정@개인정보"}]
+    )
+
+
+class SecurityLevelsBody(BaseModel):
+    # 작업유형별(doc_gen, summary, qna) 보안설정
+    doc_gen: TaskSecurityConfig
+    summary: TaskSecurityConfig
+    qna: TaskSecurityConfig
+
+
+class UploadAllBody(BaseModel):
+    chunkSize: Optional[int] = Field(
+        None, ge=1, description="청크 토큰 크기 (기본 512)"
+    )
+    overlap: Optional[int] = Field(
+        None, ge=0, description="청크 간 오버랩 토큰 수 (기본 64)"
+    )
+    taskTypes: Optional[List[Literal["doc_gen", "summary", "qna"]]] = Field(
+        None,
+        description="지정 시 해당 작업유형만 인제스트 (미지정 시 모든 작업유형)"
+    )
+
 
 class ExecuteBody(BaseModel):
     question: str
     topK: int = Field(5, gt=0)
     securityLevel: int = Field(1, ge=1)
     sourceFilter: Optional[List[str]] = None
-
-
-class SecurityLevelsBody(BaseModel):
-    maxLevel: int = Field(
-        ..., ge=1, description="최대 보안 레벨", example=3
+    taskType: Literal["doc_gen", "summary", "qna"] = Field(
+        ..., description="검색할 작업유형"
     )
-    levels: dict[str, str] = Field(
+
+
+class SingleIngestBody(BaseModel):
+    pdfPath: str
+    taskTypes: Optional[List[Literal["doc_gen", "summary", "qna"]]] = None
+    workspaceId: Optional[int] = None
+
+
+class DeleteFilesBody(BaseModel):
+    filesToDelete: List[str] = Field(
         ...,
-        description="각 레벨의 키워드 설정. 키는 '2','3' 또는 'level_2','level_3' 형식. level 1 은 설정 불가",
-        example={
-            "2": "@연구@윤리@연봉",
-            "3": "@부정청탁@퇴직금",
-        },
+        description="삭제할 파일 이름 배열 (예: ['사규.pdf','보도자료_20240101.pdf'])",
+        examples=[["회사내규.pdf", "20240835_보고서.pdf"]],
     )
-
-
-class UploadAllBody(BaseModel):
-    chunkSize: Optional[int] = Field(
+    taskType: Optional[Literal["doc_gen", "summary", "qna"]] = Field(
         None,
-        ge=1,
-        description="청크 토큰 크기 (기본 512)",
-        example=400,
-    )
-    overlap: Optional[int] = Field(
-        None,
-        ge=0,
-        description="청크 간 오버랩 토큰 수 (기본 64)",
-        example=50,
+        description="지정 시 해당 작업유형 데이터만 삭제. 미지정 시 전체 작업유형에서 삭제"
     )
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "filesToDelete": [
+                    "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf"
+                ],
+                "taskType": "qna"
+            }
+        }
+    }
 
-@router.put("/admin/vector/settings", summary="벡터 설정(임베딩 모델/검색 타입) 변경. 임베딩 모델, 검색 방식 등 벡터 DB와 관련된 주요 설정을 업데이트합니다. 설정 변경 시 DB 리셋이 필요할 수 있습니다.")
+
+# ============================
+# Vector Settings
+# ============================
+
+@router.put(
+    "/admin/vector/settings",
+    summary="0. 벡터 설정(임베딩 모델/검색 방식) 업데이트",
+)
 async def update_vector_settings(body: VectorSettingsBody):
     set_vector_settings(body.embeddingModel, body.searchType)
     return {"message": "updated", **get_vector_settings()}
 
+
 @router.get(
     "/admin/vector/settings",
-    summary="현재 벡터 설정(임베딩 모델/검색 타입) 조회",
+    summary="현재 벡터 설정(임베딩 모델/검색 방식) 조회",
 )
 async def read_vector_settings():
     return get_vector_settings()
 
-@router.post("/admin/vector/extract", summary="row_data의 PDF를 텍스트로 추출하고 보안 레벨 규칙을 적용하여 local_data/securityLevelN 구조로 복사합니다.")
+
+# ============================
+# Security Levels (per task type)
+# ============================
+
+@router.post("/admin/vector/security-levels",summary="1. 작업유형별 보안레벨 규칙 설정(doc_gen/summary/qna 각각)")
+async def set_security_levels(body: SecurityLevelsBody = Body(...)):
+    # 내부 함수가 요구하는 dict 형태로 변환
+    cfg = {
+        "doc_gen": body.doc_gen.model_dump(),
+        "summary": body.summary.model_dump(),
+        "qna": body.qna.model_dump(),
+    }
+    return set_security_level_rules_per_task(cfg)
+
+
+@router.get("/admin/vector/security-levels",summary="작업유형별 보안레벨 규칙 조회")
+async def get_security_levels():
+    return get_security_level_rules_all()
+
+
+# ============================
+# Pipeline
+# ============================
+
+@router.post("/admin/vector/extract",summary="2. row_data의 PDF를 텍스트로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
 async def rag_extract_endpoint(request: Request):
-    request.app.extra.get("logger", print)(f"Extract Request from {request.client.host} (fixed paths)")
+    request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
     return await extract_pdfs()
 
-@router.post("/admin/vector/security-levels",summary="보안 레벨 규칙 설정 (maxLevel 및 각 레벨의 '@' 구분 키워드 설정)",)
-async def set_security_levels(
-    body: SecurityLevelsBody = Body(
-        ..., 
-        example={
-            "maxLevel": 3,
-            "levels": {
-                "2": "@연구@윤리@연봉",
-                "3": "@부정청탁@퇴직금"
-            }
-        }
-    )
-):
-    # Convert keys like 'level_1' or '1' to int -> string mapping
-    level_map: dict[int, str] = {}
-    for k, v in body.levels.items():
-        key = k.strip().lower()
-        num = None
-        if key.startswith("level_"):
-            try:
-                num = int(key.replace("level_", ""))
-            except ValueError:
-                num = None
-        else:
-            try:
-                num = int(key)
-            except ValueError:
-                num = None
-        if num is None:
-            continue
-        level_map[num] = v
-    return set_security_level_rules(max_level=body.maxLevel, levels_map=level_map)
 
-@router.get(
-    "/admin/vector/security-levels",
-    summary="보안 레벨 규칙 조회 (maxLevel 및 각 레벨의 키워드 목록)",
-)
-async def get_security_levels():
-    return get_security_level_rules()
-
-@router.post(
-    "/admin/vector/upload-all",
-    summary="추출된 모든 텍스트를 임베딩하여 벡터 DB에 저장 [나중에 extract와 합칠 것]",
-)
+@router.post("/admin/vector/upload-all",summary="3. 추출된 모든 텍스트를 작업유형별로 임베딩 후 Milvus(서버)에 저장")
 async def rag_ingest_endpoint(
     request: Request,
     body: UploadAllBody = Body(
-        default=UploadAllBody(),
-        example={
+        ...,
+        example={                # 단일 예시
             "chunkSize": 512,
             "overlap": 64,
-        },
+            "taskTypes": ["doc_gen", "summary", "qna"]
+        }
+        # 또는 examples= { ... }  로 여러 예시 제공 가능
     ),
 ):
-    from service.admin.manage_vator_DB import get_vector_settings
-    model_key = get_vector_settings()["embeddingModel"]
-    chunk_size = body.chunkSize
-    overlap = body.overlap
+    s = get_vector_settings()
+    set_ingest_params(body.chunkSize, body.overlap)
+    ingest_params = get_ingest_params()
     request.app.extra.get("logger", print)(
-        f"Bulk Ingest from {request.client.host} (model={model_key}, chunkSize={chunk_size}, overlap={overlap})"
+        f"[ingest] from {request.client.host} "
+        f"(model={s['embeddingModel']}, searchType={s['searchType']}, "
+        f"chunkSize={ingest_params['chunkSize']}, overlap={ingest_params['overlap']}, "
+        f"tasks={body.taskTypes})"
     )
-    return await ingest_embeddings(model_key=model_key, chunk_size=chunk_size, overlap=overlap)
+    return await ingest_embeddings(
+        model_key=s["embeddingModel"],
+        chunk_size=ingest_params["chunkSize"],
+        overlap=ingest_params["overlap"],
+        target_tasks=body.taskTypes,
+    )
 
-# @router.post("/admin/vector/upload", summary="하나 이상의 파일 또는 폴더 경로를 받아 벡터 DB에 저장합니다. 경로가 폴더이면 하위 파일들을 재귀적으로 처리하고, 중복된 파일은 최신 데이터로 갱신합니다.")
-# async def rag_ingest_file_endpoint(req: SinglePDFIngestRequest, request: Request):
-#     """workspace_id 가 제공되면 SQL(workspace_documents)에 기록됩니다."""
-#     request.app.extra.get("logger", print)(f"Single Ingest from {request.client.host}: {req.pdf_path} (model={req.model})")
-#     return await ingest_single_pdf(req)
+@router.post("/admin/vector/upload-one",summary="단일 PDF 인제스트(선택 작업유형 지정 가능)")
+async def rag_ingest_one_endpoint(body: SingleIngestBody = Body(...)):
+    req = SinglePDFIngestRequest(
+        pdf_path=body.pdfPath,
+        task_types=body.taskTypes,
+        workspace_id=body.workspaceId,
+    )
+    return await ingest_single_pdf(req)
 
-@router.post("/admin/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환(관리자 용)")
+
+@router.post("/admin/vector/execute",summary="4 관리자: 작업유형별 벡터/하이브리드 검색(보안레벨 적용)")
 async def rag_search_endpoint(body: ExecuteBody):
-    from service.admin.manage_vator_DB import execute_search, get_vector_settings
     model_key = get_vector_settings()["embeddingModel"]
     return await execute_search(
         question=body.question,
         top_k=body.topK,
         security_level=body.securityLevel,
         source_filter=body.sourceFilter,
+        task_type=body.taskType,
         model_key=model_key,
     )
 
-@router.post("/user/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
+
+@router.post(
+    "/user/vector/execute",
+    summary="사용자: 작업유형별 벡터/하이브리드 검색(보안레벨 적용)"
+)
 async def user_rag_search_endpoint(body: ExecuteBody):
-    from service.admin.manage_vator_DB import execute_search, get_vector_settings
     model_key = get_vector_settings()["embeddingModel"]
     return await execute_search(
         question=body.question,
         top_k=body.topK,
         security_level=body.securityLevel,
         source_filter=body.sourceFilter,
+        task_type=body.taskType,
         model_key=model_key,
     )
 
-@router.post("/user/vector/execute", summary="사용자 질의를 받아 벡터 검색 및 스니펫 반환")
-async def user_rag_search_endpoint(body: ExecuteBody):
-    from service.admin.manage_vator_DB import execute_search, get_vector_settings
-    model_key = get_vector_settings()["embeddingModel"]
-    return await execute_search(
-        question=body.question,
-        top_k=body.topK,
-        security_level=body.securityLevel,
-        source_filter=body.sourceFilter,
-        model_key=model_key,
-    )
+
+# ============================
+# Management
+# ============================
 
 @router.get(
     "/admin/vector/files",
-    summary="벡터 DB에 저장된 파일 목록을 조회. q로 파일명(부분 일치) 검색. 파라미터가 없으면 전체 반환.",
+    summary="인덱싱된 파일 목록(작업유형별 집계) 조회"
 )
-async def list_vector_files(limit: int = 1000, offset: int = 0, q: Optional[str] = None):
-    limit = max(1, min(limit, 16384))
-    return await list_indexed_files(limit=limit, offset=offset, query=q)
+async def list_vector_files_endpoint(
+    limit: int = Query(1000, ge=1, le=16384),
+    offset: int = Query(0, ge=0),
+    q: Optional[str] = Query(None, description="파일명 부분검색"),
+    taskType: Optional[Literal["doc_gen", "summary", "qna"]] = Query(None),
+):
+    return await list_indexed_files(limit=limit, offset=offset, query=q, task_type=taskType)
 
-@router.delete("/admin/vector/delete", summary= "파일 이름 목록을 받아 해당하는 파일들을 벡터 DB에서 삭제합니다.")
+
+@router.delete(
+    "/admin/vector/delete",
+    summary="파일 이름 목록(doc_id 스템) 기반으로 해당 문서 청크 삭제(작업유형 전체)"
+)
 async def delete_vector_files(body: DeleteFilesBody = Body(...)):
     return await delete_files_by_names(body.filesToDelete)
 
-@router.post("/admin/vector/delete-all", summary="Milvus Lite의 모든 컬렉션 삭제 [임베딩 모델 변경 시 필요]")
-async def rag_delete_db_endpoint(request: Request):
-    request.app.extra.get("logger", print)(f"Delete DB Request from {request.client.host}")
-    return await delete_db()
 
+@router.post(
+    "/admin/vector/delete-all",
+    summary="Milvus 서버 컬렉션 전체 삭제(초기화)"
+)
+async def rag_delete_db_endpoint(request: Request):
+    request.app.extra.get("logger", print)(f"[delete-all] from {request.client.host}")
+    return await delete_db()
+ 
