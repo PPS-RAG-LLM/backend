@@ -47,7 +47,7 @@ class ColorFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         level_color = COLORS.get(record.levelno, "") if self.use_colors else ""
         levelname_colored = f"{BOLD}{level_color}{record.levelname}{RESET}" if level_color else record.levelname
-        # inject extra token without mutating original levelname for other handlers
+        # 원래 levelname을 변경하지 않고 추가 토큰 삽입
         setattr(record, "levelname_colored", levelname_colored)
         return super().format(record)
 
@@ -57,7 +57,7 @@ class ColorFormatter(logging.Formatter):
             if datefmt:
                 return dt.strftime(datefmt)
             return dt.isoformat(timespec="seconds")
-        # fallback to default behavior (localtime)
+        # 기본 동작(로컬 시간)으로 대체
         return super().formatTime(record, datefmt)
 
 
@@ -69,10 +69,10 @@ def _build_stream_handler(level: int) -> logging.Handler:
     return handler
 
 def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger:
-    """Return a configured colorful console logger.
+    """설정된 컬러 콘솔 로거를 반환합니다.
 
-    - Set LOG_LEVEL env (DEBUG|INFO|WARNING|ERROR|CRITICAL) to override level
-    - Set LOG_NO_COLOR=1 to disable ANSI colors
+    - LOG_LEVEL 환경 변수 (DEBUG|INFO|WARNING|ERROR|CRITICAL)를 설정하여 레벨을 재정의할 수 있습니다.
+    - LOG_NO_COLOR=1을 설정하여 ANSI 색상을 비활성화할 수 있습니다.
     """
     logger = logging.getLogger(name)
     if level is None:
@@ -80,13 +80,13 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
         level = getattr(logging, level_name, logging.INFO)
     logger.setLevel(level)
     logger.propagate = False
-    # Avoid duplicate handlers if called multiple times
+    # 여러 번 호출될 때 중복 핸들러를 방지
     if not logger.handlers:
         logger.addHandler(_build_stream_handler(level))
     return logger
 
-# Convenience default logger
-app_logger = get_logger("back")
 
 def logger(name: str):
-    return app_logger.getChild(name)  # coreiq.<module path>
+    return get_logger("BE").getChild(name)  
+
+

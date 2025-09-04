@@ -21,7 +21,9 @@ class StreamChatRequest(BaseModel):
     sessionId: Optional[str] = None
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
-    
+
+
+
 @chat_router.post("/{slug}/stream-chat", summary="워크스페이스에서 스트리밍 채팅 실행")
 def stream_chat_endpoint(
     category: str = Query(...,description="doc_gen | summary"),
@@ -86,7 +88,7 @@ def to_see(gen):
         buf.append(chunk)
         text = "".join(buf)
         if len(text) >= 32 or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？")) or time.monotonic() - last_flush > 0.2:
-            logger.info(f"[flush] {repr(text)}")
+            # logger.info(f"[flush] {repr(text)}")
             yield f"data: {text}\n\n"
             buf.clear()
             last_flush = time.monotonic()
@@ -94,3 +96,5 @@ def to_see(gen):
         text = "".join(buf)
         logger.info(f"[flush-end] {repr(text)}")
         yield f"data: {text}\n\n"
+
+

@@ -4,7 +4,8 @@ server:
 
   # CORS middleware 설정
   cors_origins:
-    - "http://localhost:3006"
+    - "http://localhost:5173"
+    - "http://localhost:5174"
   trusted_hosts:
     - "*"
   force_https: false
@@ -28,8 +29,8 @@ provider:
     api_key: !ENV ${OPENAI_API_KEY}
     base_url: "https://api.openai.com/v1"
   huggingface: {}
-  ollama:
-    base_url: "http://localhost:11434"
+  # ollama:
+  #   base_url: "http://localhost:11434"
 
 default:
   timeout: 60
