@@ -16,7 +16,15 @@ def get_llm_model_by_provider_and_name(provider: str, name: str) -> Optional[Dic
             (name, provider)
         )
         row = cur.fetchone()
-        logger.info(f"DB에서 가져온 모델 정보: {dict(row)}")
-        return dict(row) if row else None
+        if row is None:
+            logger.info("DB에서 가져온 모델 정보: None")
+            return None
+        try:
+            data = dict(row)
+        except Exception:
+            logger.exception("row dict 변환 실패")
+            return None
+        logger.info(f"DB에서 가져온 모델 정보: {data}")
+        return data
     finally:
         conn.close()

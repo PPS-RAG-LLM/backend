@@ -16,7 +16,6 @@ def load_qwen_instruct_7b(model_dir):
     model.eval()
     return model, tokenizer
 
-
 def stream_chat(messages, **gen_kwargs):  
     logger.info(f"stream_chat: {gen_kwargs}")
 
@@ -55,8 +54,6 @@ def stream_chat(messages, **gen_kwargs):
         yield  text_token       # Yield the accumulated text
     thread.join()
 
-
-
 def build_qwen_prompt(messages):
     prompt = ""
     for msg in messages:
@@ -79,4 +76,3 @@ if __name__ == "__main__":
     ]
     for chunk in stream_chat(messages):
         print(chunk, end="", flush=True)
-
