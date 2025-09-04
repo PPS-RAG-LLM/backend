@@ -10,15 +10,17 @@ def add_llm_model():
         "model_path":"./service/storage/model/local_gpt_oss_20b",
         "category":  "qa",
         "type":      "base",
-        "is_default":0,
+        # "is_default":0,
         "is_active": 1,
     }
     sql = """
         INSERT INTO llm_models
-          (provider,name,revision,model_path,category,type,is_default,is_active,trained_at)
+          (provider,name,revision,model_path,category,type,is_active,trained_at)
         VALUES
-          (:provider,:name,:revision,:model_path,:category,:type,:is_default,:is_active,CURRENT_TIMESTAMP)
+          (:provider,:name,:revision,:model_path,:category,:type,:is_active,CURRENT_TIMESTAMP)
     """
+        #   (provider,name,revision,model_path,category,type,is_default,is_active,trained_at)
+        #   (:provider,:name,:revision,:model_path,:category,:type,:is_default,:is_active,CURRENT_TIMESTAMP)
     conn = get_db()
     try:
         conn.execute(sql, row)
