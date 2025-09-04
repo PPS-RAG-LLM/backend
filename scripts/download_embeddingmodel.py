@@ -7,7 +7,8 @@ from huggingface_hub import snapshot_download
 import os
 
 # 모델 저장 기본 경로
-base_dir = "/home/work/CoreIQ/backend/service/admin/resources/model"
+# base_dir = "/home/work/CoreIQ/backend/storage/embedding-models"
+base_dir = "/home/work/CoreIQ/Ruah/backend/storage/embedding-models"
 
 # 다운로드 대상 모델과 저장 폴더명 매핑
 models = {

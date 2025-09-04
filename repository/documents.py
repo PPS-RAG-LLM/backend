@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import List, Optional, Dict, Any
 from utils.database import get_db
+from utils import logger
+
+logger = logger(__name__)
 
 
 def insert_workspace_document(*, doc_id: str, filename: str, docpath: str, workspace_id: int, metadata: Optional[Dict[str, Any]] = None) -> int:
@@ -18,6 +21,27 @@ def insert_workspace_document(*, doc_id: str, filename: str, docpath: str, works
         )
         conn.commit()
         return int(cur.lastrowid)
+    finally:
+        conn.close()
+        
+
+def insert_document_vectors(*, doc_id: str, vector_ids: List[str])-> int:
+    """document_vectors 테이블에 doc_id:vector_id 1:N 매핑 기록"""
+    if not vector_ids:
+        return 0
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        rows = [(doc_id, v) for v in vector_ids]
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO document_vectors (doc_id, vector_id)
+            VALUES (?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 
@@ -55,3 +79,5 @@ def delete_workspace_documents_by_filenames(filenames: List[str]) -> int:
         return cur.rowcount
     finally:
         conn.close()
+
+

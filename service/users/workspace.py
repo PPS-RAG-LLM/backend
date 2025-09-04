@@ -218,6 +218,3 @@ def upload_and_embed_document(user_id: int, slug: str, file: UploadFile) -> Dict
     """임시 스텁: 파일 업로드 + 벡터 DB 인제스트 예정 구현."""
     # TODO: 구현
     raise NotImplementedError("upload_and_embed_document is not yet implemented")
-
-
-

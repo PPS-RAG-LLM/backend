@@ -16,13 +16,13 @@ class ProcessTimeMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
 
         # 배포시 사용하는 로그
-        # ms = (time.time() - start_time) * 1000  # ms 단위로 변환
-        # response.headers["X-process-Time"] = f"{ms:.1f}"
+        ms = (time.time() - start_time) * 1000  # ms 단위로 변환
+        response.headers["X-process-Time"] = f"{ms:.1f}"
 
-        # if ms >= SLOW_MS:
-        #     logger.info(f"slow request: {request.method} {request.url.path} {ms:.1f}ms")
-        # else:
-        #     logger.debug(f"process time: {ms:.1f}ms")
+        if ms >= SLOW_MS:
+            logger.info(f"slow request: {request.method} {request.url.path} {ms:.1f}ms")
+        else:
+            logger.debug(f"process time: {ms:.1f}ms")
         
         # 개발중에만 사용하는 로그
                 # 개발중에만 사용하는 로그
