@@ -113,6 +113,7 @@ def _init_db():
       model_path TEXT,
       category TEXT NOT NULL,
       type TEXT NOT NULL DEFAULT 'base',
+      is_default BOOLEAN DEFAULT 1,
       is_active BOOLEAN DEFAULT 1,
       trained_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -135,6 +136,7 @@ def _init_db():
               model_path TEXT,
               category TEXT NOT NULL CHECK (category IN ('qa','doc_gen','summary','all')),
               type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
+              is_default BOOLEAN DEFAULT 1,
               is_active BOOLEAN DEFAULT 1,
               trained_at DATETIME,
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -217,7 +219,7 @@ def _init_db():
     conn.close()
 
 
-_init_db()
+#_init_db()
 
 
 # ===== Utilities =====
@@ -746,16 +748,16 @@ def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
         row = cur.fetchone()
         if row:
             cur.execute(
-                "UPDATE llm_models SET provider=?, model_path=?, category='all', type='base', is_active=1 WHERE id=?",
-                (body.provider, path_for_db, int(row["id"]))
+                "UPDATE llm_models SET provider=?, model_path=?, category='all', type='base', is_active=1, is_default=1 WHERE id=?",
+                (body.provider, path_for_db, int(row["id"]))    
             )
             mdl_id = int(row["id"])
             existed = True
         else:
             cur.execute(
                 """
-                INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active)
-                VALUES(?,?,?,?, 'all', 'base', 1)
+                INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active, is_default)
+                VALUES(?,?,?,?, 'all', 'base', 1, 1)
                 """,
                 (body.provider, final_name, 0, path_for_db)
             )

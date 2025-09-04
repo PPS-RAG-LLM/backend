@@ -88,7 +88,7 @@ def to_see(gen):
         buf.append(chunk)
         text = "".join(buf)
         if len(text) >= 32 or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？")) or time.monotonic() - last_flush > 0.2:
-            logger.info(f"[flush] {repr(text)}")
+            # logger.info(f"[flush] {repr(text)}")
             yield f"data: {text}\n\n"
             buf.clear()
             last_flush = time.monotonic()

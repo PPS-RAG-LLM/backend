@@ -111,12 +111,14 @@ class DeleteFilesBody(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "filesToDelete": [
-                    "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf"
-                ],
-                "taskType": "qna"
-            }
+            "examples": [
+                {
+                    "filesToDelete": [
+                        "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf"
+                    ],
+                    "taskType": "qna"
+                }
+            ]
         }
     }
 
@@ -177,7 +179,7 @@ async def rag_ingest_endpoint(
     request: Request,
     body: UploadAllBody = Body(
         ...,
-        example={                # 단일 예시
+        examples={  
             "chunkSize": 512,
             "overlap": 64,
             "taskTypes": ["doc_gen", "summary", "qna"]

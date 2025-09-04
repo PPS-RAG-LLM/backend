@@ -87,6 +87,6 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
 
 
 def logger(name: str):
-    return get_logger("backend").getChild(name)  
+    return get_logger("BE").getChild(name)  
 
 

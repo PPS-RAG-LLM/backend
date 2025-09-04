@@ -149,8 +149,6 @@ CREATE TABLE IF NOT EXISTS "document_sync_executions" (
   CONSTRAINT "document_sync_executions_queue_id_fkey" FOREIGN KEY ("queue_id") REFERENCES "document_sync_queues" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-
-
 CREATE TABLE IF NOT EXISTS "workspace_users" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
   "user_id" INTEGER NOT NULL,

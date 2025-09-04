@@ -1,7 +1,7 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from .exceptions import BaseAPIException, ForbiddenError, InternalServerError, NotFoundError
-import traceback
+# import traceback
 from utils import logger
 
 logger = logger(__name__)
@@ -50,7 +50,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     """일반 예외 핸들러"""
     logger.error(f"Unexpected error: {str(exc)}")
     logger.error(f"Request: {request.method} {request.url}")
-    logger.error(f"Traceback: {traceback.format_exc()}")
+    # logger.error(f"Traceback: {traceback.format_exc()}")
     
     return JSONResponse(
         status_code=500,
