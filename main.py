@@ -17,6 +17,9 @@ from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from routers.users.workspace import router as workspace, router_singular as workspace_singular
 from routers.users.workspace_chat import chat_router as chat_router
 from routers.admin.manage_vator_DB_api import router as vector_db_router
+from routers.users.workspace_thread import thread_router
+from routers.admin.LLM_finetuning_api import router as llm_finetuning_router
+from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
 from routers.sso import sso_router as sso_router
@@ -89,7 +92,10 @@ app.add_exception_handler(NotFoundError, not_found_error_handler)
 app.include_router(workspace)
 app.include_router(workspace_singular)
 app.include_router(chat_router)
+app.include_router(thread_router)
 app.include_router(vector_db_router)
+app.include_router(llm_finetuning_router)
+app.include_router(admin_llm_router)
 app.include_router(sso_router)
 app.include_router(mock_company_router)
 # app.include_router(admin_router)

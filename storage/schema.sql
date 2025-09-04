@@ -149,8 +149,6 @@ CREATE TABLE IF NOT EXISTS "document_sync_executions" (
   CONSTRAINT "document_sync_executions_queue_id_fkey" FOREIGN KEY ("queue_id") REFERENCES "document_sync_queues" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-
-
 CREATE TABLE IF NOT EXISTS "workspace_users" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
   "user_id" INTEGER NOT NULL,
@@ -329,4 +327,3 @@ CREATE TABLE IF NOT EXISTS "fine_tuned_models" (
   CONSTRAINT "fine_tuned_models_model_id_fkey" FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT "fine_tuned_models_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "fine_tune_jobs" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-
