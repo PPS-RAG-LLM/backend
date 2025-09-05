@@ -20,8 +20,8 @@ user_data/
 pretrain/
 *model*
 *models*
-storage/embedding-models/
-storage/model/
+storage/embedding-models/*
+storage/model/*
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,linux,windows,audio,text
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,visualstudiocode,linux,windows,audio,text
