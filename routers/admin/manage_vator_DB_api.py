@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Body, status, Query
+from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Literal
 
@@ -21,10 +21,13 @@ from service.admin.manage_vator_DB import (
     execute_search,
     # 관리
     list_indexed_files,
+    list_indexed_files_overview,
     delete_files_by_names,
     delete_db,
     # 타입
     SinglePDFIngestRequest,
+    # 파일 저장
+    save_raw_file,
 )
 router = APIRouter(
     prefix="/v1",
@@ -46,9 +49,15 @@ class VectorSettingsBody(BaseModel):
         None,
         description="임베딩 모델 키 (예: bge, embedding_bge_m3, qwen3_4b 등)"
     )
-    searchType: Optional[Literal["hybrid", "bm25"]] = Field(
+    searchType: Optional[Literal["hybrid", "semantic", "bm25"]] = Field(
         None,
-        description="검색 방식 (hybrid | bm25)"
+        description="검색 방식 (hybrid | semantic | bm25)"
+    )
+    chunkSize: Optional[int] = Field(
+        None, ge=512, description="청크 토큰 크기 (기본 512)"
+    )
+    overlap: Optional[int] = Field(
+        None, ge=64, description="청크 간 오버랩 토큰 수 (기본 64)"
     )
 
 
@@ -69,17 +78,6 @@ class SecurityLevelsBody(BaseModel):
     qna: TaskSecurityConfig
 
 
-class UploadAllBody(BaseModel):
-    chunkSize: Optional[int] = Field(
-        None, ge=1, description="청크 토큰 크기 (기본 512)"
-    )
-    overlap: Optional[int] = Field(
-        None, ge=0, description="청크 간 오버랩 토큰 수 (기본 64)"
-    )
-    taskTypes: Optional[List[Literal["doc_gen", "summary", "qna"]]] = Field(
-        None,
-        description="지정 시 해당 작업유형만 인제스트 (미지정 시 모든 작업유형)"
-    )
 
 
 class ExecuteBody(BaseModel):
@@ -89,6 +87,9 @@ class ExecuteBody(BaseModel):
     sourceFilter: Optional[List[str]] = None
     taskType: Literal["doc_gen", "summary", "qna"] = Field(
         ..., description="검색할 작업유형"
+    )
+    searchMode: Optional[Literal["hybrid", "semantic", "bm25"]] = Field(
+        None, description="검색 모드 (기본: hybrid)"
     )
 
 
@@ -111,14 +112,12 @@ class DeleteFilesBody(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "examples": [
-                {
-                    "filesToDelete": [
-                        "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf"
-                    ],
-                    "taskType": "qna"
-                }
-            ]
+            "example": {
+                "filesToDelete": [
+                    "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf"
+                ],
+                "taskType": "qna"
+            }
         }
     }
 
@@ -127,13 +126,23 @@ class DeleteFilesBody(BaseModel):
 # Vector Settings
 # ============================
 
-@router.put(
+@router.post(
     "/admin/vector/settings",
-    summary="0. 벡터 설정(임베딩 모델/검색 방식) 업데이트",
+    summary="0. 벡터 설정(모델/검색/청크) 업데이트",
 )
 async def update_vector_settings(body: VectorSettingsBody):
-    set_vector_settings(body.embeddingModel, body.searchType)
-    return {"message": "updated", **get_vector_settings()}
+    try:
+        ret = set_vector_settings(
+            embed_model_key=body.embeddingModel,
+            search_type=body.searchType,
+            chunk_size=body.chunkSize,
+            overlap=body.overlap,
+        )
+        return {"message": "updated", **ret}
+
+    except Exception as e:
+        # 기타 오류 (모델 파일 없음 등)
+        return {"error": "백터 DB설정 불가(백터 DB를 전부 삭제)", "detail": str(e)}
 
 
 @router.get(
@@ -168,39 +177,30 @@ async def get_security_levels():
 # Pipeline
 # ============================
 
-@router.post("/admin/vector/extract",summary="2. row_data의 PDF를 텍스트로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
+@router.post("/admin/vector/upload-file", summary="2. 파일 업로드(row_data)")
+async def upload_raw_file(files: List[UploadFile] = File(...)):
+    saved_paths = []
+    for file in files:
+        content = await file.read()
+        saved = save_raw_file(file.filename, content)
+        saved_paths.append(saved)
+    return {"savedPaths": saved_paths, "count": len(saved_paths)}
+
+
+@router.post("/admin/vector/extract",summary="3. row_data의 PDF를 텍스트로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
 async def rag_extract_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
     return await extract_pdfs()
 
 
-@router.post("/admin/vector/upload-all",summary="3. 추출된 모든 텍스트를 작업유형별로 임베딩 후 Milvus(서버)에 저장")
-async def rag_ingest_endpoint(
-    request: Request,
-    body: UploadAllBody = Body(
-        ...,
-        examples={  
-            "chunkSize": 512,
-            "overlap": 64,
-            "taskTypes": ["doc_gen", "summary", "qna"]
-        }
-        # 또는 examples= { ... }  로 여러 예시 제공 가능
-    ),
-):
+@router.post("/admin/vector/upload-all",summary="4. (설정된 청크/오버랩으로) 모든 작업유형 인제스트")
+async def rag_ingest_endpoint(request: Request):
     s = get_vector_settings()
-    set_ingest_params(body.chunkSize, body.overlap)
-    ingest_params = get_ingest_params()
     request.app.extra.get("logger", print)(
-        f"[ingest] from {request.client.host} "
-        f"(model={s['embeddingModel']}, searchType={s['searchType']}, "
-        f"chunkSize={ingest_params['chunkSize']}, overlap={ingest_params['overlap']}, "
-        f"tasks={body.taskTypes})"
+        f"[ingest] from {request.client.host} (model={s['embeddingModel']}, searchType={s['searchType']}, chunkSize={s['chunkSize']}, overlap={s['overlap']})"
     )
     return await ingest_embeddings(
-        model_key=s["embeddingModel"],
-        chunk_size=ingest_params["chunkSize"],
-        overlap=ingest_params["overlap"],
-        target_tasks=body.taskTypes,
+        model_key=s["embeddingModel"],  # 모든 TASK_TYPES 대상으로
     )
 
 @router.post("/admin/vector/upload-one",summary="단일 PDF 인제스트(선택 작업유형 지정 가능)")
@@ -213,7 +213,7 @@ async def rag_ingest_one_endpoint(body: SingleIngestBody = Body(...)):
     return await ingest_single_pdf(req)
 
 
-@router.post("/admin/vector/execute",summary="4 관리자: 작업유형별 벡터/하이브리드 검색(보안레벨 적용)")
+@router.post("/admin/vector/execute",summary="관리자 검색")
 async def rag_search_endpoint(body: ExecuteBody):
     model_key = get_vector_settings()["embeddingModel"]
     return await execute_search(
@@ -223,12 +223,13 @@ async def rag_search_endpoint(body: ExecuteBody):
         source_filter=body.sourceFilter,
         task_type=body.taskType,
         model_key=model_key,
+        search_type=body.searchMode,  # ← override
     )
 
 
 @router.post(
     "/user/vector/execute",
-    summary="사용자: 작업유형별 벡터/하이브리드 검색(보안레벨 적용)"
+    summary="사용자 검색"
 )
 async def user_rag_search_endpoint(body: ExecuteBody):
     model_key = get_vector_settings()["embeddingModel"]
@@ -239,6 +240,7 @@ async def user_rag_search_endpoint(body: ExecuteBody):
         source_filter=body.sourceFilter,
         task_type=body.taskType,
         model_key=model_key,
+        search_type=body.searchMode,
     )
 
 
@@ -257,6 +259,14 @@ async def list_vector_files_endpoint(
     taskType: Optional[Literal["doc_gen", "summary", "qna"]] = Query(None),
 ):
     return await list_indexed_files(limit=limit, offset=offset, query=q, task_type=taskType)
+
+
+@router.get(
+    "/admin/vector/files/overview",
+    summary="작업유형·보안레벨별 집계 + 파일 리스트"
+)
+async def list_vector_files_overview():
+    return await list_indexed_files_overview()
 
 
 @router.delete(
