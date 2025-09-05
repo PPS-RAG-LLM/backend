@@ -32,8 +32,6 @@ provider:
   # ollama:
   #   base_url: "http://localhost:11434"
 
-
-
 default:
   timeout: 60
   top_p: 0.8
