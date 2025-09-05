@@ -32,6 +32,8 @@ provider:
   # ollama:
   #   base_url: "http://localhost:11434"
 
+
+
 default:
   timeout: 60
   top_p: 0.8
@@ -47,7 +49,12 @@ workspace:
   similarity_threshold: 0.25
   temperature: 0.7
 
-
+vector_defaults:
+  chunk_size: 512
+  overlap: 64
+  top_n: 4
+  similarity_threshold: 0.25
+  
 user_documents:
   doc_info_dir: storage/documents/documents-info
   vector_cache_dir: storage/documents/vector-cache

@@ -71,19 +71,22 @@ def _extract_text_and_meta(file_bytes: bytes, filename: str, content_type: str) 
         return text_all, meta
 
 
-def _chunk_text(text: str, max_tokens: int = 512, overlap: int = 64) -> List[str]:
+def _chunk_text(text: str, chunk_size: int , overlap: int ) -> List[str]:
     # 간단한 토큰 근사: 단어 기준 슬라이딩
+    conf = config["vector_defaults"]
+    chunk_size = conf["chunk_size"]
+    overlap = conf["overlap"]
     words = text.split()
     chunks: List[str] = []
     start = 0
     while start < len(words):
-        end = min(start + max_tokens, len(words))
+        end = min(start + chunk_size, len(words))
         chunk = " ".join(words[start:end]).strip()
         if chunk:
             chunks.append(chunk)
         if end == len(words):
             break
-        start += max(max_tokens - overlap, 1)
+        start += max(chunk_size - overlap, 1)
     return chunks
 
 

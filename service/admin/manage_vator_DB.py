@@ -313,6 +313,7 @@ def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
     return tok, model, device
 
 
+
 def _mean_pooling(outputs, mask):
     token_embeddings = outputs.last_hidden_state
     mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()

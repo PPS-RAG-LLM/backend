@@ -46,20 +46,17 @@ def insert_document_vectors(*, doc_id: str, vector_ids: List[str])-> int:
         conn.close()
 
 
-def list_workspace_documents(*, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    limit = max(1, min(int(limit), 1000))
-    offset = max(0, int(offset))
+def list_doc_ids_by_workspace(workspace_id: int) -> List[Dict[str, Any]]:
     conn = get_db()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, doc_id, filename, docpath, workspace_id, metadata, created_at, updated_at
+            SELECT doc_id
             FROM workspace_documents
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
+            WHERE workspace_id = ?
             """,
-            (limit, offset),
+            (workspace_id,)
         )
         rows = cur.fetchall()
         return [dict(r) for r in rows]
@@ -81,3 +78,16 @@ def delete_workspace_documents_by_filenames(filenames: List[str]) -> int:
         conn.close()
 
 
+def delete_document_vectors_by_doc_ids(doc_ids: List[str]) -> int:
+    """document_vectors에서 주어진 doc_id들의 벡터만 삭제한다."""
+    if not doc_ids:
+        return 0
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        q = ",".join(["?"] * len(doc_ids))
+        cur.execute(f"DELETE FROM document_vectors WHERE doc_id IN ({q})", doc_ids)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

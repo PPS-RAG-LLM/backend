@@ -3,13 +3,20 @@ from errors import NotFoundError, BadRequestError
 from utils.llms.registry import LLM
 from repository.users.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
 from repository.users.workspace_thread import get_thread_id_by_slug_for_user
+from repository.documents import list_doc_ids_by_workspace, delete_document_vectors_by_doc_ids
 from repository.users.workspace_chat import (
-    get_chat_history_by_workspace_id, 
     get_chat_history_by_thread_id,
     insert_chat_history,
 )
 from utils import logger
 import json, time
+from service.users.chat_retrieval import (
+    retrieve_contexts_local,
+    build_context_message,
+    extract_doc_ids_from_attachments,
+)
+from config import config
+
 logger = logger(__name__)
 
 def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -34,6 +41,7 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
 
     logger.info(f"msgs: {msgs}")
     return msgs
+
 
 def preflight_stream_chat_for_workspace(
     user_id: int,
@@ -74,6 +82,8 @@ def preflight_stream_chat_for_workspace(
 
     return {"ws": ws, "workspace_id": workspace_id, "thread_id": thread_id, "mode": mode}
 
+
+
 def stream_chat_for_workspace(
     user_id: int, 
     slug: str, 
@@ -107,11 +117,44 @@ def stream_chat_for_workspace(
                 messages.append({"role": "assistant", "content": assistant_text})
 
     runner = LLM.from_workspace(ws)
+
+    ###### RAG 컨텍스트 주입 ######
+    try:
+        #후보 문서 : 워크 스페이스 전역 + 첨부 임시 문서
+        candidate_doc_ids: List[str] = []
+        try:
+            if ws.get("id"):
+                ws_docs = list_doc_ids_by_workspace(ws["id"]) or []
+                logger.info(f"\n## 워크스페이스 문서 목록: \n{ws_docs}\n")
+                candidate_doc_ids.extend([str(d["doc_id"]) if isinstance(d, dict) else str(d) for d in ws_docs])
+        except Exception:
+            pass
+        doc_ids = extract_doc_ids_from_attachments(body.get("attachments"))
+        logger.info(f"\n## 첨부 문서 목록: \n{doc_ids}\n")
+        # 첨부에서 온 임시 문서 Retrieval 추가
+        candidate_doc_ids.extend(doc_ids)
+        logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")
+        # 중복 제거
+        candidate_doc_ids = list(dict.fromkeys(candidate_doc_ids))
+        logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")
+
+        if candidate_doc_ids:
+            top_k = int(ws.get("top_n") or 4)
+            thr = float(ws.get("similarity_threshold") or 0.0)
+            snippets = retrieve_contexts_local(body["message"], candidate_doc_ids, top_k=top_k, threshold=thr)
+            ctx = build_context_message(snippets)
+            logger.info(f"\n## CONTEXT 주입 결과: \n{ctx}\n")
+            if ctx:
+                messages.insert(0, {"role": "system", "content": ctx})
+    except Exception as e:
+        logger.error(f"RAG context build failed: {e}")
+
+    # 메시지 추가
     messages.extend(_build_messages(ws, body))
     temperature = ws.get("temperature")
 
-    logger.info(f"\n\nmessages: \n\n{messages}\n\n")
-    logger.info(f"temperature: {temperature}\n\n")
+    # logger.info(f"\n\nmessages: \n\n{messages}\n\n")
+    # logger.info(f"temperature: {temperature}\n\n")
 
     acc_text = []
     t0 = time.perf_counter()
@@ -142,3 +185,9 @@ def stream_chat_for_workspace(
         response=json.dumps(response_json, ensure_ascii=False),
         thread_id=thread_id,
     )
+    try:
+        temp_doc_ids = extract_doc_ids_from_attachments(body.get("attatchments") or [])
+        if temp_doc_ids:
+            delete_document_vectors_by_doc_ids(temp_doc_ids)
+    except Exception as e:
+        logger.error(f"vector clenup failed: {e}")

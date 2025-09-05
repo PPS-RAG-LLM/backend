@@ -50,6 +50,6 @@ def list_thread_chats_for_workspace(
                 "sources": None
             })
 
-    logger.info(f"messages: {messages}")
+    # logger.info(f"messages: {messages}")
 
     return messages
