@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS "document_vectors" (
 CREATE UNIQUE INDEX IF NOT EXISTS "document_vectors_doc_id_vector_id_key" ON "document_vectors"("doc_id", "vector_id");
 
 
-
 CREATE TABLE IF NOT EXISTS "workspaces" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
   "name" TEXT NOT NULL,
@@ -71,9 +70,10 @@ CREATE TABLE IF NOT EXISTS "workspaces" (
   "chat_mode" TEXT NOT NULL CHECK ("chat_mode" IN ('chat', 'query')),
   "pfp_filename" TEXT,
   "query_refusal_response" TEXT,
-  "vector_search_mode" TEXT DEFAULT 'default'
+  "vector_search_mode" TEXT NOT NULL DEFAULT 'hybrid' CHECK ("vector_search_mode" IN ('hybrid', 'vector','keyword'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "workspaces_slug_key" ON "workspaces"("slug");
+
 
 CREATE TABLE IF NOT EXISTS "workspace_chats" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

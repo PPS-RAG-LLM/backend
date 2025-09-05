@@ -23,7 +23,7 @@ def insert_workspace_document(*, doc_id: str, filename: str, docpath: str, works
         return int(cur.lastrowid)
     finally:
         conn.close()
-        
+
 
 def insert_document_vectors(*, doc_id: str, vector_ids: List[str])-> int:
     """document_vectors 테이블에 doc_id:vector_id 1:N 매핑 기록"""
