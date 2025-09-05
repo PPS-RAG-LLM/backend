@@ -1,6 +1,6 @@
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form
-from service.users.documents import upload_document
+from service.users.upload_documents import upload_document
 from utils import logger
 
 logger = logger(__name__)

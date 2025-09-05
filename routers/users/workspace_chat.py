@@ -23,7 +23,6 @@ class StreamChatRequest(BaseModel):
     reset: Optional[bool] = False
 
 
-
 @chat_router.post("/{slug}/stream-chat", summary="워크스페이스에서 스트리밍 채팅 실행")
 def stream_chat_endpoint(
     category: str = Query(...,description="doc_gen | summary"),

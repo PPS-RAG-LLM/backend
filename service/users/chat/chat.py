@@ -10,12 +10,11 @@ from repository.users.workspace_chat import (
 )
 from utils import logger
 import json, time
-from service.users.chat_retrieval import (
+from .retrieval import (
     retrieve_contexts_local,
     build_context_message,
     extract_doc_ids_from_attachments,
 )
-from config import config
 
 logger = logger(__name__)
 
