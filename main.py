@@ -36,6 +36,18 @@ logger = logger(__name__)
 async def lifspan(app):
     """주기적으로 만료된 세션 정리"""
     init_db() # 스키마 1회 초기화, 이미 있으면 즉시 스킵
+    
+    # 서버 시작 시 활성 임베딩 모델 확인 및 (선택) 프리로드
+    try:
+        from service.admin.manage_vator_DB import warmup_active_embedder
+        logger.info("활성 임베딩 모델 확인 및 (선택) 프리로드...")
+        # 프리로드 하고 싶으면:
+        # warmup_active_embedder(logger.info)
+        # 프리로드를 원치 않으면 위 호출을 주석 처리하고,
+        # 단순히 활성 키만 조회해서 로그만 남겨도 OK.
+    except Exception as e:
+        logger.error(f"임베딩 모델 확인/프리로드 실패: {e}")
+    
     from repository.users.session import cleanup_expired_sessions
     async def _periodic_db_session_cleanup():
         while True:

@@ -12,6 +12,8 @@ import math
 import logging
 import sqlite3
 import shutil
+import threading
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict, Counter
@@ -32,11 +34,11 @@ PROJECT_ROOT = BASE_DIR.parent.parent       # .../backend
 STORAGE_DIR = PROJECT_ROOT / "storage"
 USER_DATA_ROOT = STORAGE_DIR / "user_data"
 RAW_DATA_DIR = USER_DATA_ROOT / "row_data"
-LOCAL_DATA_ROOT = USER_DATA_ROOT / "local_data"   # 유지(폴더 구조 호환)
+LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"   # 유지(폴더 구조 호환)
 RESOURCE_DIR = (BASE_DIR / "resources").resolve()
 EXTRACTED_TEXT_DIR = RESOURCE_DIR / "extracted_texts"
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
-MODEL_ROOT_DIR = (RESOURCE_DIR / "model").resolve()
+MODEL_ROOT_DIR = (PROJECT_ROOT / "storage" / "embedding-models").resolve()
 
 SQLITE_DB_PATH = (PROJECT_ROOT / "storage" / "pps_rag.db").resolve()
 
@@ -57,17 +59,12 @@ _CURRENT_OVERLAP = 64
 # 인제스트 파라미터 설정
 # -------------------------------------------------
 def set_ingest_params(chunk_size: int | None = None, overlap: int | None = None):
-    global _CURRENT_CHUNK_SIZE, _CURRENT_OVERLAP
-    if chunk_size is not None and chunk_size > 0:
-        _CURRENT_CHUNK_SIZE = chunk_size
-    if overlap is not None and overlap >= 0:
-        _CURRENT_OVERLAP = overlap
+    # 이제 전역 대신 vector_settings에 저장
+    _update_vector_settings(chunk_size=chunk_size, overlap=overlap)
 
 def get_ingest_params():
-    return {
-        "chunkSize": _CURRENT_CHUNK_SIZE,
-        "overlap": _CURRENT_OVERLAP,
-    }
+    row = _get_vector_settings_row()
+    return {"chunkSize": row["chunk_size"], "overlap": row["overlap"]}
 # -------------------------------------------------
 # Pydantic 스키마
 # -------------------------------------------------
@@ -90,82 +87,183 @@ class SinglePDFIngestRequest(BaseModel):
 # -------------------------------------------------
 def _db_connect() -> sqlite3.Connection:
     SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(SQLITE_DB_PATH))
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vector_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            embedding_model TEXT NOT NULL DEFAULT 'bge',
-            search_type TEXT NOT NULL DEFAULT 'hybrid', -- 'hybrid' | 'bm25'
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS security_level_config_task (
-            task_type TEXT PRIMARY KEY,
-            max_level INTEGER NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS security_level_keywords_task (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_type TEXT NOT NULL,
-            level INTEGER NOT NULL,
-            keyword TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS query_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_type TEXT NOT NULL,
-            question TEXT NOT NULL,
-            top_k INTEGER NOT NULL,
-            user_level INTEGER NOT NULL,
-            model_key TEXT,
-            search_type TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    return conn
+    return sqlite3.connect(str(SQLITE_DB_PATH))
 
+
+# ====== New helpers ======
+def save_raw_file(filename: str, content: bytes) -> str:
+    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    out = RAW_DATA_DIR / filename
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(content)
+    return str(out)
+
+# === Embedding cache(singleton) ===
+_EMBED_CACHE: dict[str, tuple[any, any, any]] = {}   # key -> (tok, model, device)
+_EMBED_ACTIVE_KEY: Optional[str] = None
+_EMBED_LOCK = threading.Lock()
+
+def _invalidate_embedder_cache():
+    global _EMBED_CACHE, _EMBED_ACTIVE_KEY
+    with _EMBED_LOCK:
+        _EMBED_CACHE.clear()
+        _EMBED_ACTIVE_KEY = None
+
+def _get_or_load_embedder(model_key: str, preload: bool = False):
+    """
+    전역 캐시에서 (tok, model, device) 반환.
+    - 캐시에 없으면 로드해서 저장(지연 로딩)
+    - preload=True는 의미상 웜업 호출일 뿐, 반환 동작은 동일
+    """
+    global _EMBED_CACHE, _EMBED_ACTIVE_KEY
+    if not model_key:
+        raise ValueError("활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요.")
+
+    with _EMBED_LOCK:
+        if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
+            return _EMBED_CACHE[model_key]
+        # 키가 바뀌면 캐시 전체 무효화(동시 2개 방지)
+        _EMBED_CACHE.clear()
+        tok, model, device = _load_embedder(model_key)
+        _EMBED_CACHE[model_key] = (tok, model, device)
+        _EMBED_ACTIVE_KEY = model_key
+        return _EMBED_CACHE[model_key]
+
+def warmup_active_embedder(logger_func=print):
+    """
+    서버 기동 시 호출용(선택). 활성 모델 키를 조회해 캐시를 채움.
+    실패해도 서비스는 실제 사용 시 지연 로딩으로 복구됨.
+    """
+    try:
+        key = _get_active_embedding_model_name()
+        logger_func(f"[warmup] 활성 임베딩 모델: {key}. 로딩 시도...")
+        _get_or_load_embedder(key, preload=True)
+        logger_func(f"[warmup] 로딩 완료: {key}")
+    except Exception as e:
+        logger_func(f"[warmup] 로딩 실패(지연 로딩으로 복구 예정): {e}")
+
+async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
+    """
+    비동기 래퍼: blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
+    이벤트 루프 블로킹 방지
+    """
+    loop = asyncio.get_running_loop()
+    # blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
+    return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
+    
+def _get_active_embedding_model_name() -> str:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            "SELECT name FROM embedding_models WHERE is_active = 1 LIMIT 1"
+        ).fetchone()
+        if row:
+            return row[0]
+        else:
+            raise ValueError("활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요.")
+    finally:
+        conn.close()
+
+def _set_active_embedding_model(name: str):
+    conn = _db_connect()
+    try:
+        with conn:
+            # 모델 존재 없으면 추가
+            conn.execute(
+                "INSERT OR IGNORE INTO embedding_models(name, is_active, activated_at) VALUES(?, 0, CURRENT_TIMESTAMP)",
+                (name,)
+            )
+            # 전부 비활성 → 해당 name만 활성
+            conn.execute("UPDATE embedding_models SET is_active = 0 WHERE is_active = 1")
+            conn.execute(
+                "UPDATE embedding_models SET is_active = 1, activated_at = CURRENT_TIMESTAMP WHERE name = ?",
+                (name,)
+            )
+    finally:
+        conn.close()
+
+def _get_vector_settings_row() -> dict:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            "SELECT search_type, chunk_size, overlap FROM vector_settings WHERE id = 1"
+        ).fetchone()
+        if not row:
+            # 안전장치
+            return {"search_type": "hybrid", "chunk_size": 512, "overlap": 64}
+        return {"search_type": row[0], "chunk_size": int(row[1]), "overlap": int(row[2])}
+    finally:
+        conn.close()
+
+def _update_vector_settings(search_type: Optional[str] = None,
+                            chunk_size: Optional[int] = None,
+                            overlap: Optional[int] = None):
+    cur = _get_vector_settings_row()
+    new_search = (search_type or cur["search_type"]).lower()
+    if new_search not in {"hybrid", "semantic", "bm25"}:
+        raise ValueError("unsupported searchType; allowed: 'hybrid','semantic','bm25'")
+    new_chunk = int(chunk_size if chunk_size is not None else cur["chunk_size"])
+    new_overlap = int(overlap if overlap is not None else cur["overlap"])
+    if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
+        raise ValueError("invalid chunk/overlap (chunk>0, 0 <= overlap < chunk)")
+
+    conn = _db_connect()
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO vector_settings(id, search_type, chunk_size, overlap)
+                VALUES(1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  search_type=excluded.search_type,
+                  chunk_size=excluded.chunk_size,
+                  overlap=excluded.overlap,
+                  updated_at=CURRENT_TIMESTAMP
+            """, (new_search, new_chunk, new_overlap))
+    finally:
+        conn.close()
+
+def _milvus_has_data() -> bool:
+    client = _client()
+    if COLLECTION_NAME not in client.list_collections():
+        return False
+    try:
+        rows = client.query(collection_name=COLLECTION_NAME, output_fields=["pk"], limit=1)
+        return len(rows) > 0
+    except Exception:
+        # 인덱스/로드 전이라면 컬렉션 있게만 체크
+        return True
 
 # ---------------- Vector Settings ----------------
 def set_vector_settings(embed_model_key: Optional[str] = None,
-                        search_type: Optional[str] = None) -> Dict:
-    st = None
-    if search_type is not None:
-        low = search_type.lower()
-        if low not in {"hybrid", "bm25"}:
-            raise ValueError("unsupported searchType; allowed: 'hybrid', 'bm25'")
-        st = low
+                        search_type: Optional[str] = None,
+                        chunk_size: Optional[int] = None,
+                        overlap: Optional[int] = None) -> Dict:
+    _update_vector_settings(search_type=search_type, chunk_size=chunk_size, overlap=overlap)
 
-    conn = _db_connect()
-    try:
-        row = conn.execute("SELECT embedding_model, search_type FROM vector_settings WHERE id=1").fetchone()
-        cur_model = row[0] if row else "bge"
-        cur_search = row[1] if row else "hybrid"
-        new_model = embed_model_key or cur_model
-        new_search = st or cur_search
-        with conn:
-            conn.execute(
-                "INSERT INTO vector_settings(id, embedding_model, search_type) VALUES(1, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET embedding_model=excluded.embedding_model, search_type=excluded.search_type, updated_at=CURRENT_TIMESTAMP",
-                (new_model, new_search)
-            )
-        return {"embeddingModel": new_model, "searchType": new_search}
-    finally:
-        conn.close()
+    if embed_model_key is not None:
+        if _milvus_has_data():
+            raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
+        _set_active_embedding_model(embed_model_key)
+        # 중요: 여기서는 '로드하지 않음', 캐시만 무효화
+        _invalidate_embedder_cache()
+
+    return get_vector_settings()
 
 
 def get_vector_settings() -> Dict:
-    conn = _db_connect()
+    # 활성 모델 + 검색/청크
     try:
-        row = conn.execute("SELECT embedding_model, search_type FROM vector_settings WHERE id=1").fetchone()
-        if not row:
-            return set_vector_settings("bge", "hybrid")
-        return {"embeddingModel": row[0], "searchType": row[1]}
-    finally:
-        conn.close()
+        model = _get_active_embedding_model_name()
+    except ValueError:
+        model = None  # 활성 모델이 없는 경우
+    
+    row = _get_vector_settings_row()
+    return {
+        "embeddingModel": model,
+        "searchType": row["search_type"],
+        "chunkSize": row["chunk_size"],
+        "overlap": row["overlap"],
+    }
 
 
 # ------------- Security Level (per task) ---------
@@ -289,11 +387,11 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
     for p in cands:
         if key in p.name.lower():
             return p.name, p
-    # fallback: bge 계열
+    # fallback: qwen3_0_6b 계열
     for p in cands:
-        if "bge" in p.name.lower():
+        if "qwen3_0_6b" in p.name.lower():
             return p.name, p
-    fb = MODEL_ROOT_DIR / "embedding_bge_m3"
+    fb = MODEL_ROOT_DIR / "qwen3_0_6b"
     return fb.name, fb
 
 
@@ -301,8 +399,15 @@ def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, model_dir = _resolve_model_input(model_key)
     need_files = [model_dir/"tokenizer_config.json", model_dir/"tokenizer.json", model_dir/"config.json"]
-    if not all(p.exists() for p in need_files):
+    
+    # 모델 파일 누락 빠른 실패
+    missing_files = [f for f in need_files if not f.exists()]
+    if missing_files:
+        logger.error(f"[Embedding Model] 필수 파일 누락: {model_dir}")
+        logger.error(f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}")
         raise FileNotFoundError(f"[Embedding Model] 필수 파일 누락: {model_dir}")
+    
+    logger.info(f"[Embedding Model] 모델 로딩 시작: {model_key} from {model_dir}")
     tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True, local_files_only=True)
     model = (AutoModel.from_pretrained(
         str(model_dir),
@@ -310,6 +415,7 @@ def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
         local_files_only=True,
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
     ).to(device).eval())
+    logger.info(f"[Embedding Model] 모델 로딩 완료: {model_key}")
     return tok, model, device
 
 
@@ -340,8 +446,10 @@ def _client() -> MilvusClient:
 
 
 def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str = "IP"):
+    logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 시작: {COLLECTION_NAME}")
     cols = client.list_collections()
     if COLLECTION_NAME not in cols:
+        logger.info(f"[Milvus] 컬렉션 생성: {COLLECTION_NAME}")
         schema = client.create_schema(auto_id=True, enable_dynamic_field=False, description="PDF chunks (pro)")
         schema.add_field("pk", DataType.INT64, is_primary=True)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=int(emb_dim))
@@ -352,20 +460,26 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
         client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
+        logger.info(f"[Milvus] 컬렉션 생성 완료: {COLLECTION_NAME}")
 
     try:
         idx_list = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
     except Exception:
         idx_list = []
     if not idx_list:
+        logger.info(f"[Milvus] 인덱스 생성 시작: {COLLECTION_NAME} (최대 180초 소요 가능)")
         ip = client.prepare_index_params()
         ip.add_index("embedding", "FLAT", metric_type=metric, params={})
         client.create_index(COLLECTION_NAME, ip, timeout=180.0, sync=True)
+        logger.info(f"[Milvus] 인덱스 생성 완료: {COLLECTION_NAME}")
 
     try:
         client.load_collection(collection_name=COLLECTION_NAME)
+        logger.info(f"[Milvus] 컬렉션 로드 완료: {COLLECTION_NAME}")
     except Exception:
-        pass
+        logger.warning(f"[Milvus] 컬렉션 로드 실패 (이미 로드됨): {COLLECTION_NAME}")
+    
+    logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 완료: {COLLECTION_NAME}")
 
 
 # -------------------------------------------------
@@ -504,10 +618,10 @@ def _parse_doc_version(stem: str) -> Tuple[str, int]:
 #   - 작업유형별로 동일 청크를 각각 저장(task_type, security_level 분리)
 # -------------------------------------------------
 async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None = None, overlap: int | None = None, target_tasks: list[str] | None = None):
-    if chunk_size is None or overlap is None:
-        ingest_params = get_ingest_params()
-        chunk_size = chunk_size or ingest_params["chunkSize"]
-        overlap = overlap or ingest_params["overlap"]
+    # vector_settings 우선
+    params = _get_vector_settings_row()
+    MAX_TOKENS = int(params["chunk_size"])
+    OVERLAP = int(params["overlap"])
 
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 PDF 추출을 수행하세요."}
@@ -515,17 +629,12 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     # 모델/검색 설정 로드(모델키 우선순위: 인자 > settings)
     settings = get_vector_settings()
     eff_model_key = model_key or settings["embeddingModel"]
-
-    tok, model, device = _load_embedder(eff_model_key)
+    
+    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
     emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
 
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
-
-    MAX_TOKENS = 512 if not isinstance(chunk_size, int) or chunk_size <= 0 else int(chunk_size)
-    OVERLAP = 64
-    if isinstance(overlap, int) and overlap >= 0:
-        OVERLAP = max(0, min(int(overlap), max(0, MAX_TOKENS - 1)))
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split()
@@ -540,7 +649,8 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
         return chunks
 
     meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-    tasks = target_tasks or list(TASK_TYPES)
+    # 모든 TASK_TYPES 대상으로 고정
+    tasks = list(TASK_TYPES)
 
     total_inserted = 0
     for txt_path in EXTRACTED_TEXT_DIR.rglob("*.txt"):
@@ -748,16 +858,16 @@ def _bm25_like_score(query: str, doc: str, k1: float = 1.2, b: float = 0.75) -> 
     return float(score)
 
 
-async def search_documents(req: RAGSearchRequest) -> Dict:
+async def search_documents(req: RAGSearchRequest, search_type_override: Optional[str] = None) -> Dict:
     t0 = time.perf_counter()
     if req.task_type not in TASK_TYPES:
         return {"error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"}
 
     settings = get_vector_settings()
     model_key = req.model or settings["embeddingModel"]
-    search_type = settings["searchType"]
-
-    tok, model, device = _load_embedder(model_key)
+    search_type = (search_type_override or settings["searchType"]).lower()
+    
+    tok, model, device = await _get_or_load_embedder_async(model_key)
     q_emb = _embed_text(tok, model, device, req.query)
     client = _client()
     _ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP")
@@ -838,8 +948,13 @@ async def search_documents(req: RAGSearchRequest) -> Dict:
                 nb = norm(h["score_bm25"], bmin, bmax)
                 h["score"] = 0.7 * nv + 0.3 * nb
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+    elif search_type == "semantic":
+        # 순수 벡터만
+        for h in hits_raw:
+            h["score"] = h["score_vec"]
+        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
     else:
-        # 안전장치: 기본 벡터
+        # fallback = semantic
         for h in hits_raw:
             h["score"] = h["score_vec"]
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
@@ -850,17 +965,7 @@ async def search_documents(req: RAGSearchRequest) -> Dict:
 
     elapsed = round(time.perf_counter() - t0, 4)
 
-    # 로그 적재
-    conn = _db_connect()
-    try:
-        with conn:
-            conn.execute(
-                "INSERT INTO query_logs(task_type, question, top_k, user_level, model_key, search_type) VALUES(?,?,?,?,?,?)",
-                (req.task_type, req.query, int(req.top_k), int(req.user_level), model_key, search_type)
-            )
-    finally:
-        conn.close()
-
+    # query_logs 삭제: INSERT 제거
     return {
         "elapsed_sec": elapsed,
         "settings_used": {"model": model_key, "searchType": search_type},
@@ -881,12 +986,13 @@ async def search_documents(req: RAGSearchRequest) -> Dict:
 async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
                          source_filter: Optional[List[str]] = None,
                          task_type: str = "qna",
-                         model_key: Optional[str] = None) -> Dict:
+                         model_key: Optional[str] = None,
+                         search_type: Optional[str] = None) -> Dict:
     req = RAGSearchRequest(
         query=question, top_k=top_k, user_level=security_level,
         task_type=task_type, model=model_key
     )
-    res = await search_documents(req)
+    res = await search_documents(req, search_type_override=search_type)
     if source_filter and "hits" in res:
         names = {Path(n).stem for n in source_filter}
         res["hits"] = [h for h in res["hits"] if Path(h["path"]).stem in names]
@@ -897,6 +1003,9 @@ async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
 # 4) 관리 유틸
 # -------------------------------------------------
 async def delete_db():
+    # 모델 캐시 클리어
+    _invalidate_embedder_cache()
+    
     client = _client()
     cols = client.list_collections()
     for c in cols:
@@ -1021,3 +1130,14 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
         "taskType": task_type,
         "perFile": per_file,              # 파일별 처리현황
     }
+
+
+async def list_indexed_files_overview():
+    items = await list_indexed_files(limit=16384, offset=0, query=None, task_type=None)
+    # agg: task_type -> level -> count
+    agg: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for it in items:
+        agg[it["taskType"]][int(it["securityLevel"])] += it["chunkCount"]
+    # 보기 좋게 변환
+    overview = {t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()}
+    return {"overview": overview, "items": items}

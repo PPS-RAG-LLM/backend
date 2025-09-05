@@ -327,3 +327,57 @@ CREATE TABLE IF NOT EXISTS "fine_tuned_models" (
   CONSTRAINT "fine_tuned_models_model_id_fkey" FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT "fine_tuned_models_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "fine_tune_jobs" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+-- =========================
+-- Embedding models (하나만 활성)
+-- =========================
+CREATE TABLE IF NOT EXISTS embedding_models (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL UNIQUE,           -- 모델 키(예: bge, embedding_bge_m3, qwen3_0_6b)
+  provider     TEXT,                           -- 선택(예: hf, ollama, local 등)
+  model_path   TEXT,                           -- 로컬 경로나 식별자(옵션)
+  is_active    INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0,1)),
+  activated_at DATETIME,
+  created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- "활성 = 1" 이 최대 1행만 되도록 부분 유니크 인덱스
+CREATE UNIQUE INDEX IF NOT EXISTS ux_embedding_models_active_one
+  ON embedding_models(is_active)
+  WHERE is_active = 1;
+
+-- -- 최소 한 개 기본 후보를 만들어두고 싶으면(선택):
+-- INSERT OR IGNORE INTO embedding_models(name, provider, model_path, is_active, activated_at)
+-- VALUES ('qwen3_0_6b', 'local', NULL, 1, CURRENT_TIMESTAMP);
+
+-- =========================
+-- Vector settings (검색/청크)
+-- =========================
+CREATE TABLE IF NOT EXISTS vector_settings (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  search_type TEXT NOT NULL DEFAULT 'hybrid' CHECK (search_type IN ('hybrid','semantic','bm25')),
+  chunk_size  INTEGER NOT NULL DEFAULT 512,
+  overlap     INTEGER NOT NULL DEFAULT 64,
+  updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO vector_settings(id, search_type, chunk_size, overlap)
+VALUES (1, 'hybrid', 512, 64);
+
+-- =========================
+-- Security level rules (작업유형별)
+-- =========================
+CREATE TABLE IF NOT EXISTS security_level_config_task (
+  task_type TEXT PRIMARY KEY,          -- 'doc_gen' | 'summary' | 'qna'
+  max_level INTEGER NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS security_level_keywords_task (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_type TEXT NOT NULL,
+  level     INTEGER NOT NULL,
+  keyword   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_slk_task_level ON security_level_keywords_task(task_type, level, keyword);
