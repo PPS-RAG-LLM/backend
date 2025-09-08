@@ -1,0 +1,59 @@
+server:
+  host: 0.0.0.0
+  port: 3005
+
+  # CORS middleware 설정
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://localhost:5174"
+  trusted_hosts:
+    - "*"
+  force_https: false
+  gzip_min_size: 1000
+
+  # 쿠키 보안 설정
+  cookie_name: "coreiq_session"
+  cookie_session_max_age: 8*60*60     # 8 hours
+  cookie_httponly: true               # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
+  cookie_secure: true                 # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
+  cookie_samesite: 'lax'              # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어 
+                                      # 필요 시 "strict" 또는 "none"
+
+database:
+  path: storage/pps_rag.db
+  schema_path: storage/schema.sql
+
+
+provider:
+  openai:
+    api_key: !ENV ${OPENAI_API_KEY}
+    base_url: "https://api.openai.com/v1"
+  huggingface: {}
+  # ollama:
+  #   base_url: "http://localhost:11434"
+
+default:
+  timeout: 60
+  top_p: 0.8
+  repetition_penalty: 1.2
+  no_repeat_ngram_size: 3
+  early_stopping: true
+  max_tokens: 8000
+
+workspace:
+  chat_history: 20
+  query_refusal_response: "There is no information about this topic."
+  top_n : 4
+  similarity_threshold: 0.25
+  temperature: 0.7
+
+
+# Temporary defaults for vector processing (can be overridden by DB settings)
+vector_defaults:
+  chunk_size: 512
+  overlap: 64
+  top_n: 5
+  similarity_threshold: 0.25
+
+
+
