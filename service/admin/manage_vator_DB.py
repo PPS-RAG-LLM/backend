@@ -391,9 +391,6 @@ def _normalize_levels(levels_raw: Dict[str, Any], max_level: int) -> Dict[int, L
             continue
         if lv < 1 or lv > max_level:
             continue
-        if lv == 1:
-            # 정책: level 1 키워드는 무시
-            continue
         kws = _normalize_keywords(v)
         if kws:
             norm[lv] = kws

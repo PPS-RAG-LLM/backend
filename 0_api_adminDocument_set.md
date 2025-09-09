@@ -11,6 +11,17 @@
 
 
 /v1/admin/vector/security-levels
+
+{
+  "maxLevel": 3,
+  "levels": {
+    "1": "@일반@공개",
+    "2": "@연구@연봉@개인정보",
+    "3": "@부정"
+  }
+}
+
+
 {
   "doc_gen": {
     "maxLevel": 3,
