@@ -1013,7 +1013,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         anns_field="embedding",
         limit=int(candidate),
         search_params={"metric_type": "IP", "params": {}},
-        output_fields=["path", "chunk_idx", "task_type", "security_level"],
+        output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id"],
         filter=f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}",
     )
 
@@ -1038,17 +1038,20 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             cidx = int(ent.get("chunk_idx", 0))
             ttype = ent.get("task_type")
             lvl = int(ent.get("security_level", 1))
+            doc_id = ent.get("doc_id")
             score_vec = float(hit.get("distance", 0.0))
         else:
             path = hit.entity.get("path")
             cidx = int(hit.entity.get("chunk_idx", 0))
             ttype = hit.entity.get("task_type")
             lvl = int(hit.entity.get("security_level", 1))
+            doc_id = hit.entity.get("doc_id")
             score_vec = float(hit.score)
         snippet = _load_snippet(path, cidx)
         hits_raw.append({
             "path": path, "chunk_idx": cidx, "task_type": ttype,
-            "security_level": lvl, "score_vec": score_vec, "snippet": snippet
+            "security_level": lvl, "doc_id": doc_id,
+            "score_vec": score_vec, "snippet": snippet
         })
 
     # 후처리(검색방식)
@@ -1103,6 +1106,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 "chunk_idx": int(h["chunk_idx"]),
                 "task_type": h["task_type"],
                 "security_level": int(h["security_level"]),
+                "doc_id": h.get("doc_id"),
                 "snippet": h["snippet"],
             } for h in hits_sorted
         ],
@@ -1120,9 +1124,26 @@ async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
         task_type=task_type, model=model_key
     )
     res = await search_documents(req, search_type_override=search_type)
+    # Build check_file BEFORE optional source_filter so it reflects original candidates
+    check_files: List[str] = []
+    try:
+        for h in res.get("hits", []):
+            # Prefer doc_id when available; fallback to path-derived filename
+            doc_id_val = h.get("doc_id")
+            if doc_id_val:
+                check_files.append(f"{str(doc_id_val)}.pdf")
+                continue
+            p = Path(h.get("path", ""))
+            if str(p):
+                check_files.append(p.with_suffix(".pdf").name)
+    except Exception:
+        pass
+
     if source_filter and "hits" in res:
         names = {Path(n).stem for n in source_filter}
         res["hits"] = [h for h in res["hits"] if Path(h["path"]).stem in names]
+
+    res["check_file"] = sorted(list(set(check_files)))
     return res
 
 
