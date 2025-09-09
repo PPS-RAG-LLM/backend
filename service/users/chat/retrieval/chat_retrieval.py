@@ -3,19 +3,11 @@ import numpy as np
 from typing import List, Dict, Any
 from pathlib import Path
 import json
-from utils import logger
+from utils import logger, free_torch_memory, load_embedding_model
 from errors import NotFoundError
 
 logger = logger(__name__)
 
-
-@lru_cache(maxsize=1)
-def _load_sentence_model():
-    from config import config as _cfg
-    from sentence_transformers import SentenceTransformer
-    model_dir = (_cfg.get("user_documents", {}) or {}).get("embedding_model_dir")
-    logger.info(f"load sentence model from {model_dir}")
-    return SentenceTransformer(str(model_dir))
 
 # config 기반 경로 헬퍼
 def _doc_dirs():
@@ -29,6 +21,7 @@ def extract_doc_ids_from_attachments(attachments: List[Dict[str, Any]]) -> List[
     """attachments[].name에서 '-<uuid>.json'을 파싱해 doc_id 목록 반환."""
     doc_info_dir, _ = _doc_dirs()
     doc_ids: List[str] = []
+
     for att in attachments or []:
         name = (att.get("name") or "").strip()
         if not name.endswith(".json"):
@@ -51,8 +44,10 @@ def extract_doc_ids_from_attachments(attachments: List[Dict[str, Any]]) -> List[
 
 def _embed_text_local(text: str):
     logger.info(f"embed text {text}")
-    m = _load_sentence_model()
-    return m.encode([text], convert_to_numpy=True, show_progress_bar=False)[0]
+    m = load_embedding_model()
+    result =  m.encode([text], convert_to_numpy=True, show_progress_bar=False)[0]
+    free_torch_memory()
+    return result
 
 def _cosine(a, b):
     na = np.linalg.norm(a); nb = np.linalg.norm(b)
@@ -90,4 +85,4 @@ def retrieve_contexts_local(query: str, candidate_doc_ids: List[str], top_k: int
 def build_context_message(snippets: List[Dict[str, Any]]) -> str:
     if not snippets: return ""
     parts = [f"[{i}] {h['text']}" for i, h in enumerate(snippets, 1)]
-    return "아래 CONTEXTS 를 근거로 한국어로 답변하세요.\n" + "\n---\n### CONTEXTS\n".join(parts)
+    return "아래 CONTEXTS 를 근거로 한국어로 답변하세요.\n\n### CONTEXTS\n" + "\n---\n".join(parts)

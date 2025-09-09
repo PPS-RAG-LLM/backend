@@ -88,6 +88,6 @@ def delete_document_vectors_by_doc_ids(doc_ids: List[str]) -> int:
         q = ",".join(["?"] * len(doc_ids))
         cur.execute(f"DELETE FROM document_vectors WHERE doc_id IN ({q})", doc_ids)
         conn.commit()
-        return cur.rowcount
+        return int(cur.rowcount)
     finally:
         conn.close()

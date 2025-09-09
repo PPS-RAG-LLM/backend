@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS "workspaces" (
   "chat_mode" TEXT NOT NULL CHECK ("chat_mode" IN ('chat', 'query')),
   "pfp_filename" TEXT,
   "query_refusal_response" TEXT,
-  "vector_search_mode" TEXT NOT NULL DEFAULT 'hybrid' CHECK ("vector_search_mode" IN ('hybrid', 'vector','keyword'))
+  "vector_search_mode" TEXT NOT NULL DEFAULT 'hybrid' CHECK ("vector_search_mode" IN ('hybrid', 'semantic', 'bm25'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "workspaces_slug_key" ON "workspaces"("slug");
 
@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS "workspace_threads" (
   "user_id" INTEGER,
   "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  CONSTRAINT "workspace_threads_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "workspace_threads_slug_key" ON "workspace_threads"("slug");
 CREATE INDEX IF NOT EXISTS "workspace_threads_workspace_id_idx" ON "workspace_threads"("workspace_id");

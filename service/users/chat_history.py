@@ -26,7 +26,7 @@ def list_thread_chats_for_workspace(
     logger.info(f"limit: {limit}")
 
     chat_history = get_chat_history_by_thread_id(user_id=user_id, thread_id=thread_id, limit=limit)
-    logger.info(f"chat_history: {chat_history}")
+    # logger.info(f"chat_history: {chat_history}")
 
     messages : List[Dict[str, Any]] = []
     if limit > 0 or limit is not None:

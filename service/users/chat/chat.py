@@ -132,7 +132,6 @@ def stream_chat_for_workspace(
         logger.info(f"\n## 첨부 문서 목록: \n{doc_ids}\n")
         # 첨부에서 온 임시 문서 Retrieval 추가
         candidate_doc_ids.extend(doc_ids)
-        logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")
         # 중복 제거
         candidate_doc_ids = list(dict.fromkeys(candidate_doc_ids))
         logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")

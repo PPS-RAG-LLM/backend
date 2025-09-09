@@ -8,7 +8,7 @@ from repository.users.workspace_chat import (
     get_chat_history_by_thread_id,
     insert_chat_history,
 )
-from utils import logger
+from utils import logger, free_torch_memory
 import json, time
 logger = logger(__name__)
 
@@ -142,3 +142,4 @@ def stream_chat_for_workspace(
         response=json.dumps(response_json, ensure_ascii=False),
         thread_id=thread_id,
     )
+    free_torch_memory()
