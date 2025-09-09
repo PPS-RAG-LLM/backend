@@ -37,14 +37,40 @@ async def lifspan(app):
     """주기적으로 만료된 세션 정리"""
     init_db() # 스키마 1회 초기화, 이미 있으면 즉시 스킵
     
-    # 서버 시작 시 활성 임베딩 모델 확인 및 (선택) 프리로드
+    # 서버 시작 시 활성 임베딩 모델 확인 및 rag_settings 동기화
+    try:
+        import sqlite3
+        from pathlib import Path
+        from service.admin.manage_vator_DB import _db_connect
+        conn = _db_connect()
+        try:
+            row = conn.execute("SELECT name FROM embedding_models WHERE is_active=1 LIMIT 1").fetchone()
+            if row:
+                active_key = row[0]
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO rag_settings(id, embedding_key)
+                        VALUES(1, ?)
+                        ON CONFLICT(id) DO UPDATE SET embedding_key=excluded.embedding_key, updated_at=CURRENT_TIMESTAMP
+                        """,
+                        (active_key,)
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                logger.info(f"활성 임베딩 모델 확인: {active_key}")
+            else:
+                logger.warning("활성 임베딩 모델이 없습니다. embedding_models에서 is_active=1을 하나 지정하세요.")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"임베딩 모델 확인 실패: {e}")
+
+    # (선택) 프리로드는 지연 로딩으로 대체 가능
     try:
         from service.admin.manage_vator_DB import warmup_active_embedder
         logger.info("활성 임베딩 모델 확인 및 (선택) 프리로드...")
-        # 프리로드 하고 싶으면:
         # warmup_active_embedder(logger.info)
-        # 프리로드를 원치 않으면 위 호출을 주석 처리하고,
-        # 단순히 활성 키만 조회해서 로그만 남겨도 OK.
     except Exception as e:
         logger.error(f"임베딩 모델 확인/프리로드 실패: {e}")
     

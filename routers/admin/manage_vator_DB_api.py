@@ -14,6 +14,8 @@ from service.admin.manage_vator_DB import (
     # 보안레벨(작업유형별)
     set_security_level_rules_per_task,
     get_security_level_rules_all,
+    upsert_security_level_for_task,
+    get_security_level_rules_for_task,
     # 파이프라인
     extract_pdfs,
     ingest_embeddings,
@@ -63,15 +65,16 @@ class VectorSettingsBody(BaseModel):
 
 class TaskSecurityConfig(BaseModel):
     maxLevel: int = Field(..., ge=1, description="최대 보안 레벨 (>=1)")
-    # 레벨별 키워드는 '@'로 구분된 단일 문자열로 받습니다. (예: '2': '@연봉@급여')
-    levels: Dict[str, str] = Field(
+    # '@'로 구분된 문자열도 허용(레거시 호환)
+    levels: Dict[str, str | List[str]] = Field(
         default_factory=dict,
-        description="레벨별 키워드 설정. 예: {'1': '@일반@공개', '2': '@연구@연봉', '3': '@부정@개인정보'}",
-        examples=[{"1": "@일반@공개", "2": "@연구@연봉", "3": "@부정@개인정보"}]
+        description="레벨별 키워드 설정. '@' 문자열 또는 키워드 배열 모두 허용",
+        examples=[{"1": "@일반@공개", "2": "@연구@연봉", "3": "@부정"}]
     )
 
 
 class SecurityLevelsBody(BaseModel):
+    service: Optional[str] = Field(default="global", description="서비스 이름(드롭다운)")
     # 작업유형별(doc_gen, summary, qna) 보안설정
     doc_gen: TaskSecurityConfig
     summary: TaskSecurityConfig
@@ -157,19 +160,39 @@ async def read_vector_settings():
 # Security Levels (per task type)
 # ============================
 
-@router.post("/admin/vector/security-levels",summary="1. 작업유형별 보안레벨 규칙 설정(doc_gen/summary/qna 각각)")
-async def set_security_levels(body: SecurityLevelsBody = Body(...)):
-    # 내부 함수가 요구하는 dict 형태로 변환
-    cfg = {
-        "doc_gen": body.doc_gen.model_dump(),
-        "summary": body.summary.model_dump(),
-        "qna": body.qna.model_dump(),
-    }
-    return set_security_level_rules_per_task(cfg)
+from typing import List as _ListType, Dict as _DictType
+from pydantic import conint
+
+TaskLiteral = Literal["doc_gen", "summary", "qna"]
+
+class SecurityLevelSingleBody(BaseModel):
+    maxLevel: conint(ge=1) = Field(..., description="최대 보안 레벨(>=1)")
+    levels: _DictType[str, _ListType[str] | str] = Field(default_factory=dict)
+
+@router.post(
+    "/admin/vector/security-levels/{taskType}",
+    summary="작업유형별 보안레벨 규칙 '개별' 저장(doc_gen/summary/qna 중 하나)",
+    status_code=status.HTTP_200_OK,
+)
+async def set_security_levels_one(taskType: TaskLiteral, body: SecurityLevelSingleBody):
+    try:
+        res = upsert_security_level_for_task(
+            task_type=taskType,
+            max_level=int(body.maxLevel),
+            levels_raw=body.levels,
+        )
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/admin/vector/security-levels",summary="작업유형별 보안레벨 규칙 조회")
-async def get_security_levels():
+@router.get(
+    "/admin/vector/security-levels",
+    summary="보안레벨 규칙 조회(전체 또는 특정 작업유형)"
+)
+async def get_security_levels(taskType: Optional[TaskLiteral] = None):
+    if taskType:
+        return get_security_level_rules_for_task(taskType)
     return get_security_level_rules_all()
 
 
