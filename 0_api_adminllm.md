@@ -1,3 +1,13 @@
+{
+  "name": "Qwen2.5-7B-Instruct-1M",
+  "model_path": "string",
+  "provider": "huggingface",
+  "tags": [
+    "all"
+  ]
+}
+
+=====================================================================================
 POST	/v1/admin/llm/settings	TOPK 조정 – RAG 반환 문서 수 변경	
 📤 요청 본문
 application/json

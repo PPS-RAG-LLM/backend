@@ -294,10 +294,10 @@ async def list_vector_files_overview():
 
 @router.delete(
     "/admin/vector/delete",
-    summary="파일 이름 목록(doc_id 스템) 기반으로 해당 문서 청크 삭제(작업유형 전체)"
+    summary="파일 이름 목록(doc_id 스템) 기반 삭제. taskType 지정 시 해당 작업유형만 삭제"
 )
 async def delete_vector_files(body: DeleteFilesBody = Body(...)):
-    return await delete_files_by_names(body.filesToDelete)
+    return await delete_files_by_names(body.filesToDelete, task_type=body.taskType)
 
 
 @router.post(

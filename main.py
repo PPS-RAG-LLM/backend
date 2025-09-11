@@ -73,6 +73,21 @@ async def lifspan(app):
         # warmup_active_embedder(logger.info)
     except Exception as e:
         logger.error(f"임베딩 모델 확인/프리로드 실패: {e}")
+
+    # ====== LLM 활성 목록 로깅(로드는 하지 않음) ======
+    try:
+        from service.admin.manage_admin_LLM import get_active_llm_models
+        active_llms = get_active_llm_models()
+        if active_llms:
+            logger.info("활성 LLM 모델(로드 지연, 최초 사용 시 로드):")
+            for m in active_llms:
+                logger.info(
+                    f" - id={m.get('id')} name={m.get('name')} category={m.get('category')} path={m.get('model_path')}"
+                )
+        else:
+            logger.warning("활성 LLM 모델이 없습니다. llm_models.is_active=1을 설정하세요.")
+    except Exception as e:
+        logger.error(f"LLM 활성 목록 로깅 실패: {e}")
     
     from repository.users.session import cleanup_expired_sessions
     async def _periodic_db_session_cleanup():

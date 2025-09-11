@@ -184,11 +184,10 @@ CREATE TABLE IF NOT EXISTS "system_prompt_template" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
   "name" TEXT NOT NULL,         -- 화면표시용: ‘출장계획서’
   "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary')),
-  "content" TEXT NOT NULL,      -- 실제 프롬프트 본문
-  "required_vars" TEXT,         -- JSON 배열: ["date","name"] 
-  "is_default" BOOLEAN DEFAULT false,
-  "is_active" BOOLEAN DEFAULT true
+  "content" TEXT NOT NULL,      -- 실제 프롬프트 본문 # 시스템 프롬프트 
+  "is_default" BOOLEAN DEFAULT false
 );
+
 -- system_prompt_template: 카테고리별 기본 템플릿은 하나만 허용
 CREATE UNIQUE INDEX IF NOT EXISTS "system_prompt_template_one_default_per_category"
 ON "system_prompt_template"("category") WHERE is_default = true;
@@ -217,8 +216,8 @@ END;
 
 CREATE TABLE IF NOT EXISTS "prompt_mapping" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  "template_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계)
-  "variable_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계)
+  "template_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계) [1:N]
+  "variable_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계) [N:1]
   "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   -- 외래키 제약조건 추가

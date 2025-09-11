@@ -1091,7 +1091,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
     # 프롬프트 컨텍스트 생성
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
-    prompt = f"사용자 질의: {req.query}\n\n관련 문서 스니펫:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
+    prompt = f"사용자 질의: {req.query}\n\:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
 
     elapsed = round(time.perf_counter() - t0, 4)
 
