@@ -301,6 +301,14 @@ async def delete_vector_files(body: DeleteFilesBody = Body(...)):
 
 
 @router.post(
+    "/admin/vector/delete",
+    summary="[POST] 파일 이름 목록(doc_id 스템) 기반 삭제. taskType 지정 시 해당 작업유형만 삭제"
+)
+async def delete_vector_files_post(body: DeleteFilesBody = Body(...)):
+    return await delete_files_by_names(body.filesToDelete, task_type=body.taskType)
+
+
+@router.post(
     "/admin/vector/delete-all",
     summary="Milvus 서버 컬렉션 전체 삭제(초기화)"
 )

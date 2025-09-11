@@ -1091,7 +1091,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
     # 프롬프트 컨텍스트 생성
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
-    prompt = f"사용자 질의: {req.query}\n\:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
+    prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
 
     elapsed = round(time.perf_counter() - t0, 4)
 
@@ -1178,6 +1178,7 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optiona
             output_fields=["path", "chunk_idx", "security_level", "task_type"],
             limit=limit,
             offset=offset,
+            consistency_level="Strong",
         )
     except Exception:
         rows = []
@@ -1254,14 +1255,35 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
 
     for name in file_names:
         stem = Path(name).stem
+        # Align fileName -> doc_id by stripping version suffix if present
+        try:
+            base_id, _ver = _parse_doc_version(stem)
+        except Exception:
+            base_id = stem
         try:
             # doc_id == 'stem' [&& task_type == 'xxx']
-            filt = f"doc_id == '{stem}'{task_filter}"
+            filt = f"doc_id == '{base_id}'{task_filter}"
             client.delete(collection_name=COLLECTION_NAME, filter=filt)
             deleted_total += 1
             per_file[name] = per_file.get(name, 0) + 1
         except Exception:
+            logger.exception("Failed to delete from Milvus for file: %s", name)
             per_file[name] = per_file.get(name, 0)
+
+    # Ensure deletion is visible to subsequent queries (file lists/overview)
+    try:
+        client.flush(COLLECTION_NAME)
+    except Exception:
+        logger.exception("Failed to flush Milvus after deletion")
+    # Force reload to avoid any stale cache/state on the server side
+    try:
+        client.release_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        pass
+    try:
+        client.load_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        logger.exception("Failed to reload collection after deletion")
 
     deleted_sql = None
     if delete_workspace_documents_by_filenames:
@@ -1269,6 +1291,7 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
             # SQL은 작업유형 구분이 없다고 가정(기존 그대로)
             deleted_sql = delete_workspace_documents_by_filenames(file_names)
         except Exception:
+            logger.exception("Failed to delete workspace documents in SQL")
             deleted_sql = None
 
     return {
