@@ -242,37 +242,40 @@ BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS "prompt_mapping" (
-  "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  "template_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계) [1:N]
-  "variable_id" INTEGER NOT NULL,  -- NOT NULL로 변경 (필수 관계) [N:1]
-  "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  -- 외래키 제약조건 추가
-  CONSTRAINT "prompt_mapping_template_id_fkey" 
-    FOREIGN KEY ("template_id") 
-    REFERENCES "system_prompt_template" ("id") 
-    ON DELETE CASCADE ON UPDATE CASCADE,  -- 템플릿 삭제 시 매핑도 삭제
-  CONSTRAINT "prompt_mapping_variable_id_fkey" 
-    FOREIGN KEY ("variable_id") 
-    REFERENCES "system_prompt_variables" ("id") 
-    ON DELETE CASCADE ON UPDATE CASCADE,  -- 변수 삭제 시 매핑도 삭제
-  -- 동일한 템플릿-변수 조합 중복 방지
-  UNIQUE("template_id", "variable_id")
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "template_id" INTEGER NOT NULL, -- NOT NULL로 변경 (필수 관계) [1:N]
+    "variable_id" INTEGER NOT NULL, -- NOT NULL로 변경 (필수 관계) [N:1]
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- 외래키 제약조건 추가
+    CONSTRAINT "prompt_mapping_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "system_prompt_template" ("id") ON DELETE CASCADE ON UPDATE CASCADE, -- 템플릿 삭제 시 매핑도 삭제
+    CONSTRAINT "prompt_mapping_variable_id_fkey" FOREIGN KEY ("variable_id") REFERENCES "system_prompt_variables" ("id") ON DELETE CASCADE ON UPDATE CASCADE, -- 변수 삭제 시 매핑도 삭제
+    -- 동일한 템플릿-변수 조합 중복 방지
+    UNIQUE ("template_id", "variable_id")
 );
 
 CREATE TABLE IF NOT EXISTS "llm_models" (
-  "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  "provider" TEXT NOT NULL,
-  "name" TEXT UNIQUE NOT NULL,
-  "revision" INTEGER,
-  "model_path" TEXT,
-  "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary', 'all')),
-  "subcategory" TEXT, -- doc_gen 전용(옵션)
-  "type" TEXT NOT NULL DEFAULT 'base' CHECK ("type" IN ('base', 'lora', 'full')),
-  "is_default" BOOLEAN NOT NULL DEFAULT false,
-  "is_active"  BOOLEAN NOT NULL DEFAULT true,
-  "trained_at" DATETIME,
-  "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "provider" TEXT NOT NULL,
+    "name" TEXT UNIQUE NOT NULL,
+    "revision" INTEGER,
+    "model_path" TEXT,
+    "category" TEXT NOT NULL CHECK (
+        category IN (
+            'qa',
+            'doc_gen',
+            'summary',
+            'all'
+        )
+    ),
+    "subcategory" TEXT, -- doc_gen 전용(옵션)
+    "type" TEXT NOT NULL DEFAULT 'base' CHECK (
+        "type" IN ('base', 'lora', 'full')
+    ),
+    "is_default" BOOLEAN NOT NULL DEFAULT false,
+    "is_active" BOOLEAN NOT NULL DEFAULT true,
+    "trained_at" DATETIME,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- 카테고리별 is_default=1 모델은 하나만 허용
 CREATE UNIQUE INDEX IF NOT EXISTS "llm_models_one_default_per_category" ON "llm_models" ("category")
@@ -303,22 +306,21 @@ END;
 
 -- (신규) 테스크 기본 모델 매핑: (category, subcategory) 별 1개 모델을 지정
 CREATE TABLE IF NOT EXISTS "llm_task_defaults" (
-  "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-  "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary')),
-  "subcategory" TEXT,
-  "model_id" INTEGER NOT NULL,
-  "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT "llm_task_defaults_model_id_fkey"
-    FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id")
-    ON DELETE CASCADE ON UPDATE CASCADE
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "category" TEXT NOT NULL CHECK (
+        category IN ('qa', 'doc_gen', 'summary')
+    ),
+    "subcategory" TEXT,
+    "model_id" INTEGER NOT NULL,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "llm_task_defaults_model_id_fkey" FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- (표현식 허용) 카테고리+서브카테고리(NULL을 빈문자 취급)의 고유성 보장
-CREATE UNIQUE INDEX IF NOT EXISTS "ux_llm_task_defaults_cat_subcat_norm"
-ON "llm_task_defaults" (
-  "category",
-  IFNULL("subcategory",'')
+CREATE UNIQUE INDEX IF NOT EXISTS "ux_llm_task_defaults_cat_subcat_norm" ON "llm_task_defaults" (
+    "category",
+    IFNULL("subcategory", '')
 );
 
 CREATE TABLE IF NOT EXISTS "chat_feedback" (
@@ -421,15 +423,6 @@ CREATE TABLE IF NOT EXISTS vector_settings (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT
-    OR IGNORE INTO vector_settings (
-        id,
-        search_type,
-        chunk_size,
-        overlap
-    )
-VALUES (1, 'hybrid', 512, 64);
-
 -- =========================
 -- Security level rules (작업유형별)
 -- =========================
@@ -446,19 +439,20 @@ CREATE TABLE IF NOT EXISTS security_level_keywords_task (
     keyword TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS ix_slk_task_level ON security_level_keywords_task(task_type, level, keyword);
+CREATE INDEX IF NOT EXISTS ix_slk_task_level ON security_level_keywords_task (task_type, level, keyword);
 
 -- =========================
 -- RAG global settings (single source of truth)
 -- =========================
 CREATE TABLE IF NOT EXISTS rag_settings (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),
-  search_type   TEXT NOT NULL DEFAULT 'hybrid' CHECK (search_type IN ('hybrid','bm25','vector')),
-  chunk_size    INTEGER NOT NULL DEFAULT 512 CHECK (chunk_size > 0),
-  overlap       INTEGER NOT NULL DEFAULT 64 CHECK (overlap >= 0),
-  embedding_key TEXT NOT NULL DEFAULT 'embedding_bge_m3',
-  updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    search_type TEXT NOT NULL DEFAULT 'hybrid' CHECK (
+        search_type IN ('hybrid', 'bm25', 'vector')
+    ),
+    chunk_size INTEGER NOT NULL DEFAULT 512 CHECK (chunk_size > 0),
+    overlap INTEGER NOT NULL DEFAULT 64 CHECK (overlap >= 0),
+    embedding_key TEXT NOT NULL DEFAULT 'embedding_bge_m3',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO rag_settings(id) VALUES (1)
-ON CONFLICT(id) DO NOTHING;
+INSERT INTO rag_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

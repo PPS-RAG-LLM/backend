@@ -29,9 +29,22 @@ def backup_data_only_dump(db_path: Path) -> Path:
 	ensure_backup_dir()
 	out_file = BACKUP_DIR / f"pps_rag_data_{timestamp()}.sql"
 	with sqlite3.connect(db_path) as con, open(out_file, "w", encoding="utf-8") as f:
-		for line in con.iterdump():
-			if line.startswith("INSERT INTO"):
-				f.write(line + "\n")
+		cur = con.cursor()
+		# 데이터 전용 덤프 (컬럼 목록 포함 INSERT)
+		f.write("BEGIN;\n")
+		tables = [r[0] for r in cur.execute(
+			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+		)]
+		for t in tables:
+			cols = [r[1] for r in cur.execute(f'PRAGMA table_info("{t}")')]
+			if not cols:
+				continue
+			col_list = ", ".join(f'"{c}"' for c in cols)
+			qcols = ", ".join(f'quote("{c}")' for c in cols)
+			for row in cur.execute(f'SELECT {qcols} FROM "{t}"'):
+				values = ", ".join(row)  # quote() 결과는 이미 SQL literal
+				f.write(f'INSERT INTO "{t}" ({col_list}) VALUES ({values});\n')
+		f.write("COMMIT;\n")
 	print(f"[+] 데이터 전용 덤프 생성: {out_file}")
 	return out_file
 
@@ -54,31 +67,31 @@ def recreate_db(schema_path: Path, db_path: Path):
 	print(f"[+] 스키마로 신규 DB 생성 완료: {db_path}")
 
 def restore_data_from_dump(db_path: Path, dump_sql: Path):
-    with sqlite3.connect(db_path) as con:
-        con.execute("PRAGMA foreign_keys=OFF;")
-        
-        # 덤프 파일 내용 읽기
-        sql = dump_sql.read_text(encoding="utf-8")
-        
-        # INSERT 문에서 테이블 이름 추출하여 기존 데이터 삭제
-        import re
-        tables = set(re.findall(r'INSERT INTO "([^"]+)"', sql))
-        for table in tables:
-            con.execute(f"DELETE FROM {table};")
-        
-        # 덤프 복원
-        con.executescript(sql)
-        con.execute("PRAGMA foreign_keys=ON;")
-        violations = list(con.execute("PRAGMA foreign_key_check;"))
+	with sqlite3.connect(db_path) as con:
+		con.execute("PRAGMA foreign_keys=OFF;")
 		
-        if violations:
-            print(f"[!] 외래키 위반 {len(violations)}건 감지:", file=sys.stderr)
-            for row in violations[:10]:
-                print(f"    {row}", file=sys.stderr)
-            if len(violations) > 10:
-                print("    ...", file=sys.stderr)
-            sys.exit(1)
-    print(f"[+] 데이터 복원 완료: {dump_sql}")
+		# 덤프 파일 내용 읽기
+		sql = dump_sql.read_text(encoding="utf-8")
+		
+		# INSERT 문에서 테이블 이름 추출(줄바꿈/공백/인용 허용)
+		import re
+		tables = set(re.findall(r'INSERT\s+INTO\s+"?([^"\s]+)"?', sql, flags=re.IGNORECASE))
+		for table in tables:
+			con.execute(f'DELETE FROM "{table}";')
+		
+		# 덤프 복원
+		con.executescript(sql)
+		con.execute("PRAGMA foreign_keys=ON;")
+		violations = list(con.execute("PRAGMA foreign_key_check;"))
+		
+		if violations:
+			print(f"[!] 외래키 위반 {len(violations)}건 감지:", file=sys.stderr)
+			for row in violations[:10]:
+				print(f"    {row}", file=sys.stderr)
+			if len(violations) > 10:
+				print("    ...", file=sys.stderr)
+			sys.exit(1)
+	print(f"[+] 데이터 복원 완료: {dump_sql}")
 
 def latest_dump_file() -> Path | None:
 	if not BACKUP_DIR.exists():

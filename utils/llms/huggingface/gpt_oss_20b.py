@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Generator
 logger = logger(__name__)
 
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
+    
     logger.info(f"\n\nstream_chat: {gen_kwargs}\n\n")
     model_dir = gen_kwargs.get("model_path")
     if not model_dir:

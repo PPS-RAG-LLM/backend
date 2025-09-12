@@ -80,3 +80,55 @@ def get_thread_id_by_slug_for_user(user_id: int, thread_slug: str) -> int:
         return row[0] if row else None
     finally:
         conn.close()
+
+def get_thread_by_slug_for_user(user_id: int, thread_slug: str) -> dict | None:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, slug, user_id, workspace_id
+            FROM workspace_threads
+            WHERE user_id = ? AND slug = ?
+            LIMIT 1
+            """,
+            (user_id, thread_slug),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def update_thread_name_by_slug_for_user(user_id: int, thread_slug: str, new_name: str) -> dict | None:
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE workspace_threads
+            SET name = ?, updated_at = ?
+            WHERE user_id = ? AND slug = ?
+            """,
+            (new_name, now_kst_string(), user_id, thread_slug),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        # 업데이트된 행 조회
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, slug, user_id, workspace_id
+            FROM workspace_threads
+            WHERE user_id = ? AND slug = ?
+            LIMIT 1
+            """,
+            (user_id, thread_slug),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    except sqlite3.IntegrityError as exc:
+        logger.error(f"thread update failed: {exc}")
+        raise DatabaseError(f"thread update failed: {exc}") from exc
+    finally:
+        conn.close()
