@@ -241,7 +241,8 @@ CREATE TABLE IF NOT EXISTS "llm_models" (
   "name" TEXT UNIQUE NOT NULL,
   "revision" INTEGER,
   "model_path" TEXT,
-  "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary')),
+  "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary', 'all')),
+  "subcategory" TEXT, -- doc_gen 전용(옵션)
   "type" TEXT NOT NULL DEFAULT 'base' CHECK ("type" IN ('base', 'lora', 'full')),
   "is_default" BOOLEAN NOT NULL DEFAULT false,
   "is_active"  BOOLEAN NOT NULL DEFAULT true,
@@ -273,6 +274,26 @@ BEGIN
   SET is_default = 0
   WHERE category = NEW.category AND id <> OLD.id;
 END;
+
+-- (신규) 테스크 기본 모델 매핑: (category, subcategory) 별 1개 모델을 지정
+CREATE TABLE IF NOT EXISTS "llm_task_defaults" (
+  "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  "category" TEXT NOT NULL CHECK (category IN ('qa', 'doc_gen', 'summary')),
+  "subcategory" TEXT,
+  "model_id" INTEGER NOT NULL,
+  "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "llm_task_defaults_model_id_fkey"
+    FOREIGN KEY ("model_id") REFERENCES "llm_models" ("id")
+    ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- (표현식 허용) 카테고리+서브카테고리(NULL을 빈문자 취급)의 고유성 보장
+CREATE UNIQUE INDEX IF NOT EXISTS "ux_llm_task_defaults_cat_subcat_norm"
+ON "llm_task_defaults" (
+  "category",
+  IFNULL("subcategory",'')
+);
 
 CREATE TABLE IF NOT EXISTS "chat_feedback" (
   "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

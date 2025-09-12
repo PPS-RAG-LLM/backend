@@ -112,6 +112,10 @@ class FineTuneRequest(BaseModel):
     overfittingPrevention: bool = True
     trainSetFile: str
     gradientAccumulationSteps: int = 8
+    quantizationBits: Optional[int] = Field(
+        default=None,
+        description="QLORA 전용: 양자화 비트 선택 (4 또는 8)",
+    )
     tuningType: Optional[str] = Field(
         default="QLORA",
         description="파인튜닝 방식: LORA | QLORA | FULL",
@@ -130,9 +134,30 @@ def _now_local_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def _ensure_output_dir(model_name: str) -> str:
-    os.makedirs(STORAGE_MODEL_ROOT, exist_ok=True)
+    try:
+        os.makedirs(STORAGE_MODEL_ROOT, exist_ok=True)
+    except PermissionError as e:
+        raise InternalServerError(f"permission denied creating model root '{STORAGE_MODEL_ROOT}': {e}")
+    except OSError as e:
+        try:
+            if getattr(e, "errno", None) == 13:
+                raise InternalServerError(f"permission denied creating model root '{STORAGE_MODEL_ROOT}': {e}")
+        except Exception:
+            pass
+        raise
+
     out_dir = os.path.join(STORAGE_MODEL_ROOT, model_name)
-    os.makedirs(out_dir, exist_ok=True)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except PermissionError as e:
+        raise InternalServerError(f"permission denied creating output dir '{out_dir}': {e}")
+    except OSError as e:
+        try:
+            if getattr(e, "errno", None) == 13:
+                raise InternalServerError(f"permission denied creating output dir '{out_dir}': {e}")
+        except Exception:
+            pass
+        raise
     cfg_path = os.path.join(out_dir, "config.json")
     if not os.path.isfile(cfg_path):
         try:
@@ -339,6 +364,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "reserveDate": reserve_now,
         "category": category,
         "gradientAccumulationSteps": req.gradientAccumulationSteps,
+        "quantizationBits": req.quantizationBits,
     }
     try:
         cur.execute("""
