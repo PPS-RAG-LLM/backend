@@ -16,7 +16,7 @@ def list_thread_chats_for_workspace(
     slug: str,
     thread_slug: str,
 ):
-    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     workspace = get_workspace_by_workspace_id(user_id, workspace_id)
     if not workspace:
         raise NotFoundError("Workspace not found")

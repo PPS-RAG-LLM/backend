@@ -7,15 +7,15 @@ import torch
 
 logger = logger(__name__)
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def load_embedding_model():
     model_dir = (_cfg.get("user_documents", {}) or {}).get("embedding_model_dir")
     logger.info(f"load sentence model from {model_dir}")
-    return SentenceTransformer(str(model_dir))
+    return SentenceTransformer(str(model_dir), device="cpu")
 
 
 @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
-def load_gpt_oss_20b(model_dir): 
+def load_hf_llm_model(model_dir): 
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir,
         trust_remote_code = True,   # 모델 코드 신뢰

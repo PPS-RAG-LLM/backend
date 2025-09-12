@@ -57,6 +57,7 @@ def stream_chat_qa_endpoint(
     body    : StreamChatRequest = Body(...,description="채팅 요청 본문")
     ):
     user_id = 3
+    logger.info(f"\n\n[stream_chat_qa_endpoint] \n\n{body}\n\n")
     # 스트리밍 시작 전에 검증
     preflight_stream_chat_for_workspace(
         user_id=user_id,

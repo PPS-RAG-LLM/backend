@@ -43,14 +43,14 @@ default:
 workspace:
   chat_history: 20
   query_refusal_response: "There is no information about this topic."
-  top_n : 4
+  top_n : 2
   similarity_threshold: 0.25
   temperature: 0.7
 
 vector_defaults:
-  chunk_size: 512
-  overlap: 64
-  top_n: 4
+  chunk_size: 250
+  overlap: 50
+  top_n: 2
   similarity_threshold: 0.25
   
 user_documents:

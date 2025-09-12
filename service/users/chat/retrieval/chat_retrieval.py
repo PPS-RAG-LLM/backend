@@ -18,29 +18,45 @@ def _doc_dirs():
 
 # documents-info/<name>.json에서 id 우선, 실패 시 파일명에서 uuid 폴백
 def extract_doc_ids_from_attachments(attachments: List[Dict[str, Any]]) -> List[str]:
-    """attachments[].name에서 '-<uuid>.json'을 파싱해 doc_id 목록 반환."""
+    """attachments의 name 또는 contentString에서 '-<uuid>.json'을 파싱해 doc_id 목록 반환."""
+    logger.info(f"\n\n[extract_doc_ids_from_attachments] \n\n{attachments}\n\n")
     doc_info_dir, _ = _doc_dirs()
     doc_ids: List[str] = []
 
     for att in attachments or []:
-        name = (att.get("name") or "").strip()
+        # dict / pydantic model 모두 지원
+        if isinstance(att, dict):
+            name = (att.get("name") or att.get("contentString") or "").strip()
+        else:
+            name = (getattr(att, "name", None) or getattr(att, "contentString", "") or "").strip()
+
+        # URL/경로 섞인 경우 basename만 취함 + 쿼리 제거
+        name = name.split("/")[-1].split("?")[0]
+
         if not name.endswith(".json"):
             continue
+
+        # 1) 파일명에서 UUID 폴백
+        base = name[:-5]  # .json 제거
+        maybe_uuid = base.rsplit("-", 1)[-1].strip()
+        if maybe_uuid and maybe_uuid.count("-") == 4:
+            doc_ids.append(maybe_uuid)
+            continue
+
+        # 2) 문서 info JSON에서 id 읽기(파일이 있을 경우)
         p = doc_info_dir / name
-        logger.info(f"check doc '{name}' from '{p}'")
         if p.exists():
             try:
                 j = json.loads(p.read_text(encoding="utf-8"))
-                _id = str(j.get("id")).strip()
-            except NotFoundError:
+                _id = str(j.get("id") or "").strip()
+                if _id:
+                    doc_ids.append(_id)
+            except Exception:
                 pass
-        base = name[:-5]  # .json 제거
-        maybe_uuid = base.rsplit("-", 1)[-1].strip()
-        # 간단 UUID 형태 검사(하이픈 4개)
-        if maybe_uuid and maybe_uuid.count("-") == 4:
-            doc_ids.append(maybe_uuid)
+
     # 중복 제거, 순서 유지
     return list(dict.fromkeys(doc_ids))
+
 
 def _embed_text_local(text: str):
     logger.info(f"embed text {text}")
