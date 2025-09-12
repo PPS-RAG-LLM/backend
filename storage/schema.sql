@@ -421,15 +421,6 @@ CREATE TABLE IF NOT EXISTS vector_settings (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT
-    OR IGNORE INTO vector_settings (
-        id,
-        search_type,
-        chunk_size,
-        overlap
-    )
-VALUES (1, 'hybrid', 512, 64);
-
 -- =========================
 -- Security level rules (작업유형별)
 -- =========================

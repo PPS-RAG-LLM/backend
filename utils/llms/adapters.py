@@ -56,7 +56,7 @@ def hf_factory(model_key: str) -> Streamer:
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("qwen_2.5_vl"):
         return _Wrap(lambda messages, **kw: qwen_vl_7b.stream_chat(messages, model_path=local_path, **kw))
-    if model_key.startswith("gpt_oss"):
+    if model_key.startswith("gpt_oss") or model_key.startswith("gpt-oss"):
         return _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=local_path, **kw))
     else:
         logger.error(f"해당모델 이름으로 시작하는 로직이 없음. {model_key}")
