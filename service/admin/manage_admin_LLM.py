@@ -401,7 +401,7 @@ class _ModelManager:
             if key in self._cache:
                 return self._cache[key]
             try:
-                from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig  # type: ignore
+                from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
                 import torch  # type: ignore
 
                 # gpt-oss는 어댑터 전용 경로로 처리 (HF BitsAndBytes 경로 차단)
@@ -409,12 +409,19 @@ class _ModelManager:
                 if base_key.startswith("gpt-oss") or base_key.startswith("gpt_oss"):
                     raise RuntimeError("gpt-oss should be loaded via adapter only")
 
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                )
+                # Optional quantization (disable via env LLM_DISABLE_BNB=1)
+                bnb_config = None
+                try:
+                    if os.getenv("LLM_DISABLE_BNB", "0") not in ("1", "true", "TRUE", "True"):
+                        from transformers import BitsAndBytesConfig  # type: ignore
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                        )
+                except Exception:
+                    bnb_config = None
                 tok = AutoTokenizer.from_pretrained(key, trust_remote_code=True, local_files_only=True)
                 if tok.pad_token_id is None:
                     if getattr(tok, "eos_token_id", None) is not None:
@@ -422,13 +429,23 @@ class _ModelManager:
                     else:
                         tok.add_special_tokens({"pad_token": "<|pad|>"})
                         tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
-                mdl = AutoModelForCausalLM.from_pretrained(
-                    key,
-                    trust_remote_code=True,
-                    device_map="auto",
-                    quantization_config=bnb_config,
-                    local_files_only=True,
-                )
+                try:
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        key,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        quantization_config=bnb_config,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    # Fallback: reload without quantization if bnb/triton not available
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        key,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                        local_files_only=True,
+                    )
                 self._cache[key] = (tok, mdl)
                 return tok, mdl
             except Exception:
@@ -981,7 +998,12 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
                         _MODEL_MANAGER.load(candidate)
                     except Exception:
                         logging.getLogger(__name__).exception("manager load failed, trying adapter preload")
-                        pre_ok = _preload_via_adapters(model_name)
+                        # Prefer central adapters.preload_adapter_model if available
+                        try:
+                            from utils.llms.adapters import preload_adapter_model  # type: ignore
+                            pre_ok = preload_adapter_model(model_name)
+                        except Exception:
+                            pre_ok = _preload_via_adapters(model_name)
                         if not pre_ok:
                             raise RuntimeError("adapter preload also failed")
             except Exception:

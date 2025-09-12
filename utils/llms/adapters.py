@@ -62,6 +62,29 @@ def hf_factory(model_key: str) -> Streamer:
         logger.error(f"해당모델 이름으로 시작하는 로직이 없음. {model_key}")
     raise NotFoundError(f"지원하지 않는 huggingface 모델: {model_key}")
 
+
+def preload_adapter_model(model_key: str) -> bool:
+    """Preload a local HF model via shared loader so that adapter path can stream later.
+    This avoids bitsandbytes/triton by using utils.model_load.load_hf_llm_model.
+    Returns True on success, False otherwise.
+    """
+    try:
+        model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
+        local_path = _resolve_model_path(model_info.get("model_path"))
+        from utils import load_hf_llm_model
+        load_hf_llm_model(str(local_path))
+        try:
+            logger.info(f"adapter preload ok: {model_key} -> {local_path}")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        try:
+            logger.exception(f"adapter preload failed for {model_key}: {e}")
+        except Exception:
+            pass
+        return False
+
 ### OpenAI API
 
 class OpenAIStreamer:
