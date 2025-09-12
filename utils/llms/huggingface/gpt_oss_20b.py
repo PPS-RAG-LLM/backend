@@ -10,6 +10,14 @@ from typing import List, Dict, Any, Generator
 
 logger = logger(__name__)
 
+@lru_cache(maxsize=2)
+def load_gpt_oss_20b(model_dir):
+    """Adapter 경로에서 사용하는 gpt-oss 로더.
+    utils.model_load.load_hf_llm_model을 사용하여 사전 로드/캐시한다.
+    """
+    model, tokenizer = load_hf_llm_model(model_dir)
+    return model, tokenizer
+
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
     logger.info(f"\n\nstream_chat: {gen_kwargs}\n\n")
     model_dir = gen_kwargs.get("model_path")
