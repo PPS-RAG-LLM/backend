@@ -4,17 +4,28 @@ from transformers.generation.configuration_utils import GenerationConfig
 from threading import Thread  
 from config import config
 import time 
-from utils import logger
+from utils import logger, free_torch_memory, load_hf_llm_model
 from functools import lru_cache
+import torch
 
 logger = logger(__name__)
 
-@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
-def load_qwen_instruct_7b(model_dir): 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir, device_map="auto")
-    model.eval()
-    return model, tokenizer
+# @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
+# def load_qwen_instruct_7b(model_dir): 
+#     tokenizer = AutoTokenizer.from_pretrained(
+#         model_dir, 
+#         local_files_only=True, 
+#         trust_remote_code=True
+#         )
+#     model = AutoModelForCausalLM.from_pretrained(
+#         model_dir, 
+#         device_map="auto", 
+#         local_files_only=True, 
+#         trust_remote_code=True,
+#         torch_dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
+#         )
+#     model.eval()
+#     return model, tokenizer
 
 def stream_chat(messages, **gen_kwargs):  
     logger.info(f"stream_chat: {gen_kwargs}")
@@ -23,7 +34,7 @@ def stream_chat(messages, **gen_kwargs):
     if not model_dir:
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
-    model, tokenizer = load_qwen_instruct_7b(model_dir)
+    model, tokenizer = load_hf_llm_model(model_dir)
     text = build_qwen_prompt(messages)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -53,6 +64,7 @@ def stream_chat(messages, **gen_kwargs):
         time.sleep(0.0001)      # Simulate real-time output with a short delay
         yield  text_token       # Yield the accumulated text
     thread.join()
+    free_torch_memory()
 
 def build_qwen_prompt(messages):
     prompt = ""

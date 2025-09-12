@@ -54,20 +54,31 @@ def recreate_db(schema_path: Path, db_path: Path):
 	print(f"[+] 스키마로 신규 DB 생성 완료: {db_path}")
 
 def restore_data_from_dump(db_path: Path, dump_sql: Path):
-	with sqlite3.connect(db_path) as con:
-		con.execute("PRAGMA foreign_keys=OFF;")
-		sql = dump_sql.read_text(encoding="utf-8")
-		con.executescript(sql)
-		con.execute("PRAGMA foreign_keys=ON;")
-		violations = list(con.execute("PRAGMA foreign_key_check;"))
-		if violations:
-			print(f"[!] 외래키 위반 {len(violations)}건 감지:", file=sys.stderr)
-			for row in violations[:10]:
-				print(f"    {row}", file=sys.stderr)
-			if len(violations) > 10:
-				print("    ...", file=sys.stderr)
-			sys.exit(1)
-	print(f"[+] 데이터 복원 완료: {dump_sql}")
+    with sqlite3.connect(db_path) as con:
+        con.execute("PRAGMA foreign_keys=OFF;")
+        
+        # 덤프 파일 내용 읽기
+        sql = dump_sql.read_text(encoding="utf-8")
+        
+        # INSERT 문에서 테이블 이름 추출하여 기존 데이터 삭제
+        import re
+        tables = set(re.findall(r'INSERT INTO "([^"]+)"', sql))
+        for table in tables:
+            con.execute(f"DELETE FROM {table};")
+        
+        # 덤프 복원
+        con.executescript(sql)
+        con.execute("PRAGMA foreign_keys=ON;")
+        violations = list(con.execute("PRAGMA foreign_key_check;"))
+		
+        if violations:
+            print(f"[!] 외래키 위반 {len(violations)}건 감지:", file=sys.stderr)
+            for row in violations[:10]:
+                print(f"    {row}", file=sys.stderr)
+            if len(violations) > 10:
+                print("    ...", file=sys.stderr)
+            sys.exit(1)
+    print(f"[+] 데이터 복원 완료: {dump_sql}")
 
 def latest_dump_file() -> Path | None:
 	if not BACKUP_DIR.exists():

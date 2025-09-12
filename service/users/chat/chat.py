@@ -3,13 +3,19 @@ from errors import NotFoundError, BadRequestError
 from utils.llms.registry import LLM
 from repository.users.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
 from repository.users.workspace_thread import get_thread_id_by_slug_for_user
+from repository.documents import list_doc_ids_by_workspace, delete_document_vectors_by_doc_ids
 from repository.users.workspace_chat import (
-    get_chat_history_by_workspace_id, 
     get_chat_history_by_thread_id,
     insert_chat_history,
 )
 from utils import logger
 import json, time
+from .retrieval import (
+    retrieve_contexts_local,
+    build_context_message,
+    extract_doc_ids_from_attachments,
+)
+
 logger = logger(__name__)
 
 def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -35,6 +41,7 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
     logger.info(f"msgs: {msgs}")
     return msgs
 
+
 def preflight_stream_chat_for_workspace(
     user_id: int,
     slug: str,
@@ -49,7 +56,7 @@ def preflight_stream_chat_for_workspace(
     # 카테고리 검증(옵션)
     if category not in ("qa", "doc_gen", "summary"):
         raise BadRequestError("category must be one of: qa, doc_gen, summary")
-    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
 
     if not workspace_id:
         raise NotFoundError("워크스페이스를 찾을 수 없습니다")
@@ -73,6 +80,8 @@ def preflight_stream_chat_for_workspace(
         raise BadRequestError("mode must be 'chat' or 'query'")
 
     return {"ws": ws, "workspace_id": workspace_id, "thread_id": thread_id, "mode": mode}
+
+
 
 def stream_chat_for_workspace(
     user_id: int, 
@@ -106,12 +115,76 @@ def stream_chat_for_workspace(
                     pass
                 messages.append({"role": "assistant", "content": assistant_text})
 
-    runner = LLM.from_workspace(ws)
-    messages.extend(_build_messages(ws, body))
+    runner = LLM.from_workspace(ws) 
+
+    ###### RAG 컨텍스트 주입 ######
+    temp_docs_ids : List[str] = []
+    ctx = ""
+    try:
+        #후보 문서 : 워크 스페이스 전역 + 첨부 임시 문서
+        candidate_doc_ids: List[str] = []
+        try:
+            if ws.get("id"):
+                ws_docs = list_doc_ids_by_workspace(ws["id"]) or []
+                logger.info(f"\n## 워크스페이스 문서 목록: \n{ws_docs}\n")
+                candidate_doc_ids.extend([str(d["doc_id"]) if isinstance(d, dict) else str(d) for d in ws_docs])
+        except Exception:
+            pass
+        temp_doc_ids = extract_doc_ids_from_attachments(body.get("attachments"))
+        logger.info(f"\n## 첨부 문서 목록: \n{temp_doc_ids}\n")
+        # 첨부에서 온 임시 문서 Retrieval 추가
+        candidate_doc_ids.extend(temp_doc_ids)
+        # 중복 제거
+        candidate_doc_ids = list(dict.fromkeys(candidate_doc_ids))
+        logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")
+
+        if candidate_doc_ids:
+            top_k = int(ws.get("top_n") or 4)
+            thr = float(ws.get("similarity_threshold") or 0.0)
+            snippets = retrieve_contexts_local(body["message"], candidate_doc_ids, top_k=top_k, threshold=thr)
+            ctx = build_context_message(snippets) or ""
+            logger.info(f"\n## CONTEXT 주입 결과: \n{ctx}\n")
+            if ctx:
+                messages.insert(0, {"role": "system", "content": ctx})
+    except Exception as e:
+        logger.error(f"RAG context build failed: {e}")
+
+    # 메시지 구성 : [system = system_prompt + ctx] + [history] + [user]
+    messages : List[Dict[str, Any]] = []
+
+    # 1) system : 워크스페이스 시스템 프롬프트와 RAG 컨텍스트 단일 system으로 합침
+    system_parts: List[str] = []
+    if ws.get("system_prompt"):
+        system_parts.append(ws["system_prompt"] + ". 반드시 한국어로 대답하세요.")
+    if ctx:
+        system_parts.append(ctx)
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+    # 2) history (QA일 때만)
+    if category == "qa":
+        limit = ws["chat_history"]
+        if limit > 0  and thread_id is not None:
+            chat_history = get_chat_history_by_thread_id(user_id, thread_id, limit)
+            for chat in chat_history[::-1]:
+                messages.append({"role": "user", "content": chat["prompt"]})
+                assistant_text = chat["response"]
+                try:
+                    assistant_text = json.loads(assistant_text).get("text", assistant_text)
+                except Exception:
+                    pass
+                messages.append({"role": "assistant", "content": assistant_text})
+    
+    # 3) user: system 중복 방지를 위해 system_prompt 제거한 ws로 사용자 메시지만 추가
+    ws_no_sys = dict(ws)
+    ws_no_sys["system_prompt"] = None
+    messages.extend(_build_messages(ws_no_sys, body))
+
+    logger.info(f"\n\nretrieval: \n\n{messages}\n\n")
     temperature = ws.get("temperature")
 
-    logger.info(f"\n\nmessages: \n\n{messages}\n\n")
-    logger.info(f"temperature: {temperature}\n\n")
+    # logger.info(f"\n\nmessages: \n\n{messages}\n\n")
+    # logger.info(f"temperature: {temperature}\n\n")
 
     acc_text = []
     t0 = time.perf_counter()
@@ -142,3 +215,8 @@ def stream_chat_for_workspace(
         response=json.dumps(response_json, ensure_ascii=False),
         thread_id=thread_id,
     )
+    try:
+        if temp_doc_ids:  # 임시 문서 삭제
+            delete_document_vectors_by_doc_ids(temp_doc_ids)
+    except Exception as e:
+        logger.error(f"vector clenup failed: {e}")

@@ -16,7 +16,7 @@ def list_thread_chats_for_workspace(
     slug: str,
     thread_slug: str,
 ):
-    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     workspace = get_workspace_by_workspace_id(user_id, workspace_id)
     if not workspace:
         raise NotFoundError("Workspace not found")
@@ -26,7 +26,7 @@ def list_thread_chats_for_workspace(
     logger.info(f"limit: {limit}")
 
     chat_history = get_chat_history_by_thread_id(user_id=user_id, thread_id=thread_id, limit=limit)
-    logger.info(f"chat_history: {chat_history}")
+    # logger.info(f"chat_history: {chat_history}")
 
     messages : List[Dict[str, Any]] = []
     if limit > 0 or limit is not None:
@@ -50,6 +50,6 @@ def list_thread_chats_for_workspace(
                 "sources": None
             })
 
-    logger.info(f"messages: {messages}")
+    # logger.info(f"messages: {messages}")
 
     return messages

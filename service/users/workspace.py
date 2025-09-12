@@ -145,7 +145,7 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
 ### 워크스페이스 상세 조회
 
 def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
-    workspace_id = get_workspace_id_by_slug_for_user(slug)
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     if not workspace_id:
         raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
     ws = get_workspace_by_workspace_id(user_id, workspace_id)
@@ -192,7 +192,7 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
     # if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
     #     updates["slug"] = generate_unique_slug(updates["name"]) 
 
-    workspace_id = get_workspace_id_by_slug_for_user(slug) # 워크스페이스 아이디 조회
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug) # 워크스페이스 아이디 조회
     update_workspace_by_slug_for_user(user_id, slug, updates) # 워크스페이스 업데이트
     ws = get_workspace_by_workspace_id(user_id, workspace_id) # 워크스페이스 상세 조회
 
@@ -218,6 +218,3 @@ def upload_and_embed_document(user_id: int, slug: str, file: UploadFile) -> Dict
     """임시 스텁: 파일 업로드 + 벡터 DB 인제스트 예정 구현."""
     # TODO: 구현
     raise NotImplementedError("upload_and_embed_document is not yet implemented")
-
-
-

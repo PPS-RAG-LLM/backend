@@ -23,7 +23,6 @@ class StreamChatRequest(BaseModel):
     reset: Optional[bool] = False
 
 
-
 @chat_router.post("/{slug}/stream-chat", summary="워크스페이스에서 스트리밍 채팅 실행")
 def stream_chat_endpoint(
     category: str = Query(...,description="doc_gen | summary"),
@@ -58,6 +57,7 @@ def stream_chat_qa_endpoint(
     body    : StreamChatRequest = Body(...,description="채팅 요청 본문")
     ):
     user_id = 3
+    logger.info(f"\n\n[stream_chat_qa_endpoint] \n\n{body}\n\n")
     # 스트리밍 시작 전에 검증
     preflight_stream_chat_for_workspace(
         user_id=user_id,

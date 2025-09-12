@@ -18,10 +18,9 @@ user_data/
 .vscode/
 *.th
 pretrain/
-*model*
-*models*
 storage/embedding-models/*
 storage/model/*
+storage/documents/*
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,linux,windows,audio,text
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,visualstudiocode,linux,windows,audio,text

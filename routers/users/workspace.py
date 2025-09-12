@@ -10,6 +10,7 @@ from service.users.workspace import (
     update_workspace as update_workspace_service,
     upload_and_embed_document,
 )
+from service.users.documents.list_documents import list_local_documents_for_workspace
 from typing import Dict, List, Any
 from errors import BadRequestError
 from utils import logger
@@ -130,3 +131,17 @@ def update_workspace(slug: str, body: WorkspaceUpdateBody):
     result = update_workspace_service(user_id, slug, body.model_dump(exclude_unset=True))
     return result
 
+
+@router_singular.get("/{slug}/documents", summary="워크스페이스 별 인스턴스에 로컬로 저장된 모든 문서 목록")
+def list_workspace_documents(slug: str):
+    """
+    각 워크스페이스에 등록된 documents를 반환한다.
+
+    TODO : 유저 정보도 넣어야하나?
+    """
+    try:
+        user_id = 3
+        return list_local_documents_for_workspace(user_id, slug)
+    except Exception as e:
+        logger.error({"list_workspace_documents_failed": str(e)})
+        raise

@@ -251,17 +251,25 @@ def delete_workspace_by_slug_for_user(user_id: int, slug: str) -> bool:
     finally:
         con.close()
 
-def get_workspace_id_by_slug_for_user(slug: str) -> Optional[int]:
+def get_workspace_id_by_slug_for_user(user_id: int, slug: str) -> Optional[int]:
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM workspaces WHERE slug = ? ", (slug,))
+        cur.execute(
+            """
+            SELECT w.id
+            FROM workspaces AS w
+            INNER JOIN workspace_users AS wu ON wu.workspace_id = w.id
+            WHERE w.slug = ? AND wu.user_id = ?
+            LIMIT 1
+            """,
+            (slug, user_id),
+        )
         row = cur.fetchone()
-        workspace_id = row["id"] if row else None
-        logger.info(f"workspace_id: {workspace_id}")
-        return workspace_id
+        return row["id"] if row else None
     finally:
         conn.close()
+
 
 def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """선택적 필드만 업데이트하고, 갱신된 행을 반환한다."""
@@ -310,4 +318,5 @@ def update_workspace_by_slug_for_user(user_id: int, slug: str, updates: Dict[str
         raise DatabaseError(f"workspace update failed: {exc}") from exc
     finally:
         con.close()
+
 

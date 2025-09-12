@@ -22,11 +22,7 @@ from datetime import datetime, timezone
 import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
-from utils.voctor_DB import (
-    load_embedding_model as util_load_embedding_model,
-    embed_text as util_embed_text,
-    chunk_text_with_overlap,
-)
+from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -369,21 +365,61 @@ def _determine_level_for_task(text: str, task_rules: Dict) -> int:
 # 모델 로딩/임베딩
 # -------------------------------------------------
 def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
-    # Delegate to shared resolver for consistency
-    from utils.voctor_DB import resolve_model_dir
-    key = (model_key or "").lower()
-    d = resolve_model_dir(key, model_root_dir=MODEL_ROOT_DIR)
-    return d.name, d
+    key = (model_key or "bge").lower()
+    cands: List[Path] = []
+    if MODEL_ROOT_DIR.exists():
+        for p in MODEL_ROOT_DIR.iterdir():
+            if p.is_dir():
+                cands.append(p.resolve())
+
+    def aliases(p: Path) -> List[str]:
+        nm = p.name.lower()
+        res = [nm]
+        if nm.startswith("embedding_"):
+            res.append(nm[len("embedding_"):])
+        return res
+
+    # 우선 exact/alias
+    for p in cands:
+        if key in aliases(p):
+            return p.name, p
+    # 부분일치
+    for p in cands:
+        if key in p.name.lower():
+            return p.name, p
+    # fallback: qwen3_0_6b 계열
+    for p in cands:
+        if "qwen3_0_6b" in p.name.lower():
+            return p.name, p
+    fb = MODEL_ROOT_DIR / "qwen3_0_6b"
+    return fb.name, fb
 
 
 def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
-    # Delegate to shared loader (includes file checks and logging)
-    tok, model, device = util_load_embedding_model(model_key, model_root_dir=MODEL_ROOT_DIR)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _, model_dir = _resolve_model_input(model_key)
+    need_files = [model_dir/"tokenizer_config.json", model_dir/"tokenizer.json", model_dir/"config.json"]
+    
+    # 모델 파일 누락 빠른 실패
+    missing_files = [f for f in need_files if not f.exists()]
+    if missing_files:
+        logger.error(f"[Embedding Model] 필수 파일 누락: {model_dir}")
+        logger.error(f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}")
+        raise FileNotFoundError(f"[Embedding Model] 필수 파일 누락: {model_dir}")
+    
+    logger.info(f"[Embedding Model] 모델 로딩 시작: {model_key} from {model_dir}")
+    tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True, local_files_only=True)
+    model = (AutoModel.from_pretrained(
+        str(model_dir),
+        trust_remote_code=True,
+        local_files_only=True,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    ).to(device).eval())
+    logger.info(f"[Embedding Model] 모델 로딩 완료: {model_key}")
     return tok, model, device
 
 
 def _mean_pooling(outputs, mask):
-    # Deprecated: now provided by utils.voctor_DB.embed_text
     token_embeddings = outputs.last_hidden_state
     mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     summed = torch.sum(token_embeddings * mask_expanded, dim=1)
@@ -392,10 +428,11 @@ def _mean_pooling(outputs, mask):
 
 
 def _embed_text(tok, model, device, text: str, max_len: int = 512):
-    # Deprecated shim: route to utils.voctor_DB.embed_text for consistency
-    vec_list = util_embed_text(tok, model, device, text, max_len=max_len)
-    import numpy as np
-    return np.array(vec_list, dtype="float32")
+    inputs = tok(text, truncation=True, padding="longest", max_length=max_len, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outs = model(**inputs)
+    vec = _mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
+    return vec
 
 
 # -------------------------------------------------
@@ -600,8 +637,16 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        # Delegate to shared util for consistency
-        return chunk_text_with_overlap(text, chunk_size=max_tokens, overlap=overlap)
+        words = text.split()
+        chunks: List[str] = []
+        start = 0
+        while start < len(words):
+            end = min(start + max_tokens, len(words))
+            chunk = " ".join(words[start:end]).strip()
+            if chunk:
+                chunks.append(chunk)
+            start += max_tokens - overlap
+        return chunks
 
     meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
     # 모든 TASK_TYPES 대상으로 고정
@@ -723,10 +768,16 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
-    from utils.voctor_DB import chunk_text_with_overlap as _chunk
     MAX_TOKENS, OVERLAP = 512, 64
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        return _chunk(text, chunk_size=max_tokens, overlap=overlap)
+        words = text.split(); chunks: List[str] = []
+        start = 0
+        while start < len(words):
+            end = min(start + max_tokens, len(words))
+            chunk = " ".join(words[start:end]).strip()
+            if chunk: chunks.append(chunk)
+            start += max_tokens - overlap
+        return chunks
 
     # 기존 삭제
     try:
