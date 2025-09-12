@@ -10,7 +10,7 @@ def init_db():
 	if _INITIALIZED:
 		return
 	con = sqlite3.connect(db["path"])
-	con.execute("PRAGMA foregin_keys=ON;")
+	con.execute("PRAGMA foreign_keys=ON;")
 	cur = con.cursor()
 
 	# 대표 테이블 존재 여부 확인 (users 또는 workspaces 등)

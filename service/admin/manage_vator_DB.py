@@ -15,7 +15,7 @@ import shutil
 import threading
 import asyncio
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
 
@@ -97,6 +97,23 @@ def save_raw_file(filename: str, content: bytes) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(content)
     return str(out)
+
+
+def save_raw_to_row_data(f):
+    """Save FastAPI UploadFile to row_data and return relative path."""
+    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    name = Path(getattr(f, "filename", "uploaded"))
+    dst = RAW_DATA_DIR / name.name
+    if dst.exists():
+        stem, ext = name.stem, name.suffix
+        dst = RAW_DATA_DIR / f"{stem}_{int(time.time())}{ext}"
+    with dst.open("wb") as out:
+        data = f.file.read() if hasattr(f, "file") else b""
+        out.write(data)
+    try:
+        return str(dst.relative_to(RAW_DATA_DIR))
+    except Exception:
+        return dst.name
 
 # === Embedding cache(singleton) ===
 _EMBED_CACHE: dict[str, tuple[any, any, any]] = {}   # key -> (tok, model, device)
@@ -195,13 +212,37 @@ def _get_vector_settings_row() -> dict:
     finally:
         conn.close()
 
+
+def _get_rag_settings_row() -> dict:
+    """Unified RAG settings loader. Returns empty dict if table/row missing."""
+    conn = _db_connect()
+    try:
+        try:
+            row = conn.execute(
+                "SELECT embedding_key, search_type, chunk_size, overlap FROM rag_settings WHERE id=1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if not row:
+            return {}
+        return {
+            "embedding_key": row[0],
+            "search_type": row[1],
+            "chunk_size": int(row[2]),
+            "overlap": int(row[3]),
+        }
+    finally:
+        conn.close()
+
 def _update_vector_settings(search_type: Optional[str] = None,
                             chunk_size: Optional[int] = None,
                             overlap: Optional[int] = None):
     cur = _get_vector_settings_row()
     new_search = (search_type or cur["search_type"]).lower()
+    if new_search == "vector":
+        new_search = "semantic"
     if new_search not in {"hybrid", "semantic", "bm25"}:
-        raise ValueError("unsupported searchType; allowed: 'hybrid','semantic','bm25'")
+        raise ValueError("unsupported searchType; allowed: 'hybrid','semantic','bm25' (or 'vector' alias)")
     new_chunk = int(chunk_size if chunk_size is not None else cur["chunk_size"])
     new_overlap = int(overlap if overlap is not None else cur["overlap"])
     if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
@@ -238,25 +279,65 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
                         search_type: Optional[str] = None,
                         chunk_size: Optional[int] = None,
                         overlap: Optional[int] = None) -> Dict:
+    # Keep legacy behavior but sync rag_settings if present
     _update_vector_settings(search_type=search_type, chunk_size=chunk_size, overlap=overlap)
+    conn = _db_connect()
+    try:
+        cur = get_vector_settings()
+        key = embed_model_key or cur.get("embeddingModel")
+        # if model change requested, enforce no data
+        if embed_model_key is not None:
+            if _milvus_has_data():
+                raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
+            _set_active_embedding_model(embed_model_key)
+            _invalidate_embedder_cache()
+            key = embed_model_key
 
-    if embed_model_key is not None:
-        if _milvus_has_data():
-            raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
-        _set_active_embedding_model(embed_model_key)
-        # 중요: 여기서는 '로드하지 않음', 캐시만 무효화
-        _invalidate_embedder_cache()
+        st_in = (search_type or cur.get("searchType") or "hybrid").lower()
+        st_store = "vector" if st_in in {"vector", "semantic"} else st_in
+        cs = int(chunk_size or cur.get("chunkSize") or 512)
+        ov = int(overlap or cur.get("overlap") or 64)
+
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO rag_settings(id, embedding_key, search_type, chunk_size, overlap)
+                    VALUES(1, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      embedding_key=excluded.embedding_key,
+                      search_type=excluded.search_type,
+                      chunk_size=excluded.chunk_size,
+                      overlap=excluded.overlap,
+                      updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (key, st_store, cs, ov)
+                )
+        except sqlite3.OperationalError:
+            # rag_settings 미존재 시 무시(마이그레이션 전)
+            pass
+    finally:
+        conn.close()
 
     return get_vector_settings()
 
 
 def get_vector_settings() -> Dict:
-    # 활성 모델 + 검색/청크
+    # Prefer unified rag_settings if present
+    rag = _get_rag_settings_row()
+    if rag:
+        return {
+            "embeddingModel": rag.get("embedding_key"),
+            "searchType": rag.get("search_type"),
+            "chunkSize": rag.get("chunk_size"),
+            "overlap": rag.get("overlap"),
+        }
+
+    # Fallback to legacy tables
     try:
         model = _get_active_embedding_model_name()
     except ValueError:
         model = None  # 활성 모델이 없는 경우
-    
     row = _get_vector_settings_row()
     return {
         "embeddingModel": model,
@@ -272,6 +353,103 @@ def _parse_at_string_to_keywords(value: str) -> List[str]:
         return []
     toks = [t.strip() for t in value.split("@")]
     return [t for t in toks if t]
+
+
+def _normalize_keywords(val: Any) -> List[str]:
+    """
+    리스트/튜플/셋: 각 원소를 str로 캐스팅, 공백/해시 제거
+    문자열: '@' 기준으로 토큰화
+    빈 값 제거 및 중복 제거
+    """
+    out: List[str] = []
+    if isinstance(val, str):
+        toks = [t.strip() for t in val.split("@")]
+    elif isinstance(val, (list, tuple, set)):
+        toks = [str(t).strip() for t in val]
+    else:
+        toks = []
+    for t in toks:
+        if not t:
+            continue
+        if t.startswith("#"):
+            t = t[1:]
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _normalize_levels(levels_raw: Dict[str, Any], max_level: int) -> Dict[int, List[str]]:
+    norm: Dict[int, List[str]] = {}
+    for k, v in (levels_raw or {}).items():
+        try:
+            lv = int(str(k).strip().replace("level_", ""))
+        except Exception:
+            continue
+        if lv < 1 or lv > max_level:
+            continue
+        kws = _normalize_keywords(v)
+        if kws:
+            norm[lv] = kws
+    return norm
+
+
+def upsert_security_level_for_task(task_type: str, max_level: int, levels_raw: Dict[str, Any]) -> Dict:
+    if task_type not in TASK_TYPES:
+        raise ValueError(f"invalid task_type: {task_type}")
+    if max_level < 1:
+        raise ValueError("maxLevel must be >= 1")
+
+    levels_map = _normalize_levels(levels_raw, max_level)
+
+    conn = _db_connect()
+    try:
+        with conn:
+            # 1) UPDATE existing row
+            cur = conn.execute(
+                "UPDATE security_level_config_task SET max_level=?, updated_at=CURRENT_TIMESTAMP WHERE task_type=?",
+                (max_level, task_type),
+            )
+            # 2) If no row was updated, INSERT new row
+            if getattr(cur, "rowcount", 0) == 0:
+                conn.execute(
+                    "INSERT INTO security_level_config_task(task_type, max_level, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (task_type, max_level),
+                )
+
+            # Replace keywords for this task_type
+            conn.execute("DELETE FROM security_level_keywords_task WHERE task_type = ?", (task_type,))
+            for lv, kws in levels_map.items():
+                for kw in kws:
+                    conn.execute(
+                        "INSERT INTO security_level_keywords_task(task_type, level, keyword) VALUES (?, ?, ?)",
+                        (task_type, int(lv), kw),
+                    )
+        return get_security_level_rules_for_task(task_type)
+    finally:
+        conn.close()
+
+
+def get_security_level_rules_for_task(task_type: str) -> Dict:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            "SELECT max_level FROM security_level_config_task WHERE task_type=?",
+            (task_type,)
+        ).fetchone()
+        max_level = int(row[0]) if row else 1
+        res: Dict[str, Any] = {"taskType": task_type, "maxLevel": max_level, "levels": {str(i): [] for i in range(1, max_level + 1)}}
+        for (lv, kw) in conn.execute(
+            """
+            SELECT level, keyword FROM security_level_keywords_task
+            WHERE task_type=? ORDER BY level ASC, keyword ASC
+            """,
+            (task_type,)
+        ).fetchall():
+            key = str(int(lv))
+            res["levels"].setdefault(key, []).append(str(kw))
+        return res
+    finally:
+        conn.close()
 
 
 def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
@@ -886,7 +1064,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         anns_field="embedding",
         limit=int(candidate),
         search_params={"metric_type": "IP", "params": {}},
-        output_fields=["path", "chunk_idx", "task_type", "security_level"],
+        output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id"],
         filter=f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}",
     )
 
@@ -911,17 +1089,20 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             cidx = int(ent.get("chunk_idx", 0))
             ttype = ent.get("task_type")
             lvl = int(ent.get("security_level", 1))
+            doc_id = ent.get("doc_id")
             score_vec = float(hit.get("distance", 0.0))
         else:
             path = hit.entity.get("path")
             cidx = int(hit.entity.get("chunk_idx", 0))
             ttype = hit.entity.get("task_type")
             lvl = int(hit.entity.get("security_level", 1))
+            doc_id = hit.entity.get("doc_id")
             score_vec = float(hit.score)
         snippet = _load_snippet(path, cidx)
         hits_raw.append({
             "path": path, "chunk_idx": cidx, "task_type": ttype,
-            "security_level": lvl, "score_vec": score_vec, "snippet": snippet
+            "security_level": lvl, "doc_id": doc_id,
+            "score_vec": score_vec, "snippet": snippet
         })
 
     # 후처리(검색방식)
@@ -948,7 +1129,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 nb = norm(h["score_bm25"], bmin, bmax)
                 h["score"] = 0.7 * nv + 0.3 * nb
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
-    elif search_type == "semantic":
+    elif search_type in {"semantic", "vector"}:
         # 순수 벡터만
         for h in hits_raw:
             h["score"] = h["score_vec"]
@@ -961,7 +1142,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
     # 프롬프트 컨텍스트 생성
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
-    prompt = f"사용자 질의: {req.query}\n\n관련 문서 스니펫:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
+    prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
 
     elapsed = round(time.perf_counter() - t0, 4)
 
@@ -976,6 +1157,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 "chunk_idx": int(h["chunk_idx"]),
                 "task_type": h["task_type"],
                 "security_level": int(h["security_level"]),
+                "doc_id": h.get("doc_id"),
                 "snippet": h["snippet"],
             } for h in hits_sorted
         ],
@@ -993,9 +1175,26 @@ async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
         task_type=task_type, model=model_key
     )
     res = await search_documents(req, search_type_override=search_type)
+    # Build check_file BEFORE optional source_filter so it reflects original candidates
+    check_files: List[str] = []
+    try:
+        for h in res.get("hits", []):
+            # Prefer doc_id when available; fallback to path-derived filename
+            doc_id_val = h.get("doc_id")
+            if doc_id_val:
+                check_files.append(f"{str(doc_id_val)}.pdf")
+                continue
+            p = Path(h.get("path", ""))
+            if str(p):
+                check_files.append(p.with_suffix(".pdf").name)
+    except Exception:
+        pass
+
     if source_filter and "hits" in res:
         names = {Path(n).stem for n in source_filter}
         res["hits"] = [h for h in res["hits"] if Path(h["path"]).stem in names]
+
+    res["check_file"] = sorted(list(set(check_files)))
     return res
 
 
@@ -1030,6 +1229,7 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optiona
             output_fields=["path", "chunk_idx", "security_level", "task_type"],
             limit=limit,
             offset=offset,
+            consistency_level="Strong",
         )
     except Exception:
         rows = []
@@ -1106,14 +1306,35 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
 
     for name in file_names:
         stem = Path(name).stem
+        # Align fileName -> doc_id by stripping version suffix if present
+        try:
+            base_id, _ver = _parse_doc_version(stem)
+        except Exception:
+            base_id = stem
         try:
             # doc_id == 'stem' [&& task_type == 'xxx']
-            filt = f"doc_id == '{stem}'{task_filter}"
+            filt = f"doc_id == '{base_id}'{task_filter}"
             client.delete(collection_name=COLLECTION_NAME, filter=filt)
             deleted_total += 1
             per_file[name] = per_file.get(name, 0) + 1
         except Exception:
+            logger.exception("Failed to delete from Milvus for file: %s", name)
             per_file[name] = per_file.get(name, 0)
+
+    # Ensure deletion is visible to subsequent queries (file lists/overview)
+    try:
+        client.flush(COLLECTION_NAME)
+    except Exception:
+        logger.exception("Failed to flush Milvus after deletion")
+    # Force reload to avoid any stale cache/state on the server side
+    try:
+        client.release_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        pass
+    try:
+        client.load_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        logger.exception("Failed to reload collection after deletion")
 
     deleted_sql = None
     if delete_workspace_documents_by_filenames:
@@ -1121,6 +1342,7 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
             # SQL은 작업유형 구분이 없다고 가정(기존 그대로)
             deleted_sql = delete_workspace_documents_by_filenames(file_names)
         except Exception:
+            logger.exception("Failed to delete workspace documents in SQL")
             deleted_sql = None
 
     return {

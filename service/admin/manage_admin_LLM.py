@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
 from pydantic import BaseModel, Field
+from utils.database import get_db as _get_db
 
 # ===== In-memory temp settings (kept for backward-compat) =====
 _DEFAULT_TOPK: int = 5
@@ -23,6 +24,7 @@ os.environ.setdefault("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db
 DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
 STORAGE_ROOT = "/home/work/CoreIQ/backend/storage/model"  # train_qwen_rag.py 와 동일
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
+ACTIVE_PROMPT_CACHE_PREFIX = "active_prompt:"     # active_prompt:qa:report
 RAG_TOPK_CACHE_KEY = "rag_topk"
 
 # Backend root for portable paths (same approach as LLM_finetuning.py)
@@ -86,140 +88,118 @@ class InferBody(BaseModel):
 
 
 class InsertBaseModelBody(BaseModel):
-    name: str = Field(..., description="베이스 모델 표시 이름 (llm_models에 category='all'로 단일 저장)")
-    model_path: Optional[str] = Field(None, description="(옵션) 모델 로컬 경로. 미지정 시 STORAGE_ROOT/name 가정")
-    provider: str = Field("huggingface", description="모델 제공자: huggingface | openai 등")
-    tags: Optional[List[str]] = Field(default_factory=lambda: ["all"], description="등록 카테고리: all | qa | doc_gen | summary")
+    name: str = Field(..., description="베이스 모델 표시 이름 (예: gpt-oss-20b)")
+    model_path: Optional[str] = Field(
+        None, description="옵션. 상대/절대 모두 허용. 미지정 시 STORAGE_ROOT/name 가정"
+    )
+    provider: str = Field("huggingface", description="모델 제공자")
+    category: str = Field("all", description="항상 'all'로 저장(단일 레코드)")
+
+# 활성 프롬프트 선택 저장용
+class ActivePromptBody(BaseModel):
+    category: str = Field(..., description="doc_gen | summary | qna")
+    subtask: Optional[str] = Field(None, description="doc_gen 전용 서브테스크")
+    promptId: int = Field(..., description="선택할 프롬프트 ID")
 
 # ===== DB Helpers =====
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _init_db():
-    """필요한 테이블이 없으면 생성 (ERD 기반)."""
+    # Delegate to shared database connector (respects config/database paths and pragmas)
+    return _get_db()
+# ===== Migration / helpers =====
+def _migrate_llm_models_if_needed():
     conn = _connect()
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-
-    # llm_models
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS llm_models(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      provider TEXT NOT NULL,
-      name TEXT UNIQUE NOT NULL,
-      revision INTEGER DEFAULT 0,
-      model_path TEXT,
-      category TEXT NOT NULL,
-      type TEXT NOT NULL DEFAULT 'base',
-      is_default BOOLEAN DEFAULT 1,
-      is_active BOOLEAN DEFAULT 1,
-      trained_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # migrate llm_models CHECK constraint to allow 'all' category
     try:
+        cur.execute("PRAGMA table_info(llm_models)")
+        cols = {r[1] for r in cur.fetchall()}  # name is at index 1
         cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_models'")
         row = cur.fetchone()
-        ddl = row["sql"] if row else None
-        if ddl and "CHECK" in ddl and "'all'" not in ddl:
-            cur.execute("PRAGMA foreign_keys=off")
-            cur.execute("""
+        ddl = row[0] if row else ""
+        need_sub = "subcategory" not in cols
+        need_all = ("CHECK" in ddl) and ("'all'" not in ddl)
+        if not (need_sub or need_all):
+            return
+        cur.execute("PRAGMA foreign_keys=off")
+        cur.execute(
+            """
             CREATE TABLE llm_models__new(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               provider TEXT NOT NULL,
               name TEXT UNIQUE NOT NULL,
-              revision INTEGER DEFAULT 0,
+              revision INTEGER,
               model_path TEXT,
               category TEXT NOT NULL CHECK (category IN ('qa','doc_gen','summary','all')),
+              subcategory TEXT,
               type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
-              is_default BOOLEAN DEFAULT 1,
-              is_active BOOLEAN DEFAULT 1,
+              is_default BOOLEAN NOT NULL DEFAULT 0,
+              is_active BOOLEAN NOT NULL DEFAULT 1,
               trained_at DATETIME,
-              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
-            """)
-            cur.execute("""
-              INSERT INTO llm_models__new(id, provider, name, revision, model_path, category, type, is_active, trained_at, created_at)
-              SELECT id, provider, name, revision, model_path, category, type, is_active, trained_at, created_at FROM llm_models
-            """)
-            cur.execute("DROP TABLE llm_models")
-            cur.execute("ALTER TABLE llm_models__new RENAME TO llm_models")
-            cur.execute("PRAGMA foreign_keys=on")
+            """
+        )
+        # Copy common columns
+        keep = [
+            "id","provider","name","revision","model_path","category","type","is_default","is_active","trained_at","created_at"
+        ]
+        present = []
+        for c in keep:
+            try:
+                cur.execute(f"SELECT 1 FROM llm_models LIMIT 1")
+                present.append(c)
+            except Exception:
+                pass
+        sel = ", ".join([c for c in keep if c in cols])
+        if sel:
+            cur.execute(f"INSERT INTO llm_models__new({sel}) SELECT {sel} FROM llm_models")
+        cur.execute("DROP TABLE llm_models")
+        cur.execute("ALTER TABLE llm_models__new RENAME TO llm_models")
+        cur.execute("PRAGMA foreign_keys=on")
+        conn.commit()
     except Exception:
         logging.getLogger(__name__).exception("llm_models migration failed")
+    finally:
+        conn.close()
 
-    # system_prompt_template
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS system_prompt_template(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      required_vars TEXT,
-      is_active BOOLEAN DEFAULT 1
+
+def _normalize_model_path_input(p: str) -> str:
+    s = (p or "").strip().replace("\\","/")
+    if not s:
+        return s
+    prefixes = (
+        "storage/model/",
+        "./storage/model/",
+        "/home/work/CoreIQ/backend/storage/model/",
     )
-    """)
-
-    # system_prompt_variables
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS system_prompt_variables(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value TEXT,
-      description TEXT NOT NULL
-    )
-    """)
-
-    # prompt_mapping
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS prompt_mapping(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      template_id INTEGER,
-      variable_id INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(template_id) REFERENCES system_prompt_template(id) ON DELETE CASCADE ON UPDATE CASCADE,
-      FOREIGN KEY(variable_id) REFERENCES system_prompt_variables(id) ON DELETE CASCADE ON UPDATE CASCADE
-    )
-    """)
-
-    # event_logs (모델 평가결과 저장용)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS event_logs(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event TEXT NOT NULL,
-      metadata TEXT,
-      user_id INTEGER,
-      occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # cache_data (전역설정/활성모델)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS cache_data(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      data TEXT NOT NULL,
-      belongs_to TEXT,
-      by_id INTEGER,
-      expires_at DATETIME,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    # (deprecated) llm_model_base, llm_model_runtime 테이블은 사용하지 않음
-
-    conn.commit()
-    conn.close()
+    for pref in prefixes:
+        if s.startswith(pref):
+            s = s[len(pref):]
+            break
+    if "/storage/model/" in s:
+        s = s.split("/storage/model/", 1)[1]
+    return s.strip("/")
 
 
-#_init_db()
+def _db_set_active_by_path(rel_path: str, active: bool) -> None:
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE llm_models SET is_active=? WHERE model_path=?", (1 if active else 0, rel_path))
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to sync is_active by path")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+
+
+
+# no-op: initialization is handled in main.py via init_db()
 
 
 # ===== Utilities =====
@@ -239,10 +219,21 @@ def _get_cache(name: str) -> Optional[str]:
     conn.close()
     return row["data"] if row else None
 def _norm_category(category: str) -> str:
-    try:
-        return (category or "").strip()
-    except Exception:
-        return category
+    """
+    외부 표기는 qna, 내부 스키마/기존 코드는 qa.
+    """
+    c = (category or "").strip().lower()
+    if c == "qna":
+        return "qa"
+    return c
+
+def _subtask_key(subtask: Optional[str]) -> str:
+    return (subtask or "").strip().lower()
+
+def _active_prompt_cache_key(category: str, subtask: Optional[str]) -> str:
+    c = _norm_category(category)
+    s = _subtask_key(subtask)
+    return f"{ACTIVE_PROMPT_CACHE_PREFIX}{c}:{s or '-'}"
 
 
 
@@ -255,6 +246,81 @@ def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional
     """, (name, data, belongs_to, by_id))
     conn.commit()
     conn.close()
+
+
+# ---------- 활성 프롬프트: 사용자 선택 저장/조회 ----------
+def get_active_prompt(category: str, subtask: Optional[str]) -> Dict[str, Any]:
+    key = _active_prompt_cache_key(category, subtask)
+    data = _get_cache(key)
+    info = json.loads(data) if data else None
+    return {"category": _norm_category(category), "subtask": _subtask_key(subtask) or None, "active": info}
+
+
+def set_active_prompt(body: ActivePromptBody) -> Dict[str, Any]:
+    key = _active_prompt_cache_key(body.category, body.subtask)
+    payload = {"promptId": body.promptId, "setAt": _now_iso()}
+    _set_cache(key, _json(payload), "llm_admin")
+    return {"success": True, "category": _norm_category(body.category), "subtask": _subtask_key(body.subtask) or None, "active": payload}
+
+
+# ===== 새로 추가: 활성 LLM 모델 조회(로깅용) =====
+def get_active_llm_models() -> List[Dict[str, Any]]:
+    """
+    llm_models에서 is_active=1 인 모델 목록을 반환한다.
+    로깅/표시 용도로만 사용하며, 모델을 실제로 로드하지 않는다.
+    """
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, provider, name, category, model_path, type, is_default, is_active, trained_at, created_at
+        FROM llm_models
+        WHERE is_active=1
+        ORDER BY id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            keys = r.keys()
+            out.append({k: r[k] for k in keys})
+        except Exception:
+            out.append(dict(r))  # best-effort
+    return out
+
+
+# ===== 새로 추가: 최초 사용 시 지연 로딩 =====
+def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
+    """
+    주어진 모델이 메모리에 없으면 로드하고, 있으면 아무것도 하지 않는다.
+    active cache 설정은 하지 않는다(단순 '최초 사용 시 로드' 용도).
+    """
+    try:
+        if _is_model_loaded(model_name):
+            return {"loaded": True, "message": "already loaded", "modelName": model_name}
+
+        lower = (model_name or "").lower()
+        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
+            # gpt-oss는 어댑터 사전 로더 경로 사용
+            if not _preload_via_adapters(model_name):
+                return {"loaded": False, "message": "adapter preload failed", "modelName": model_name}
+            return {"loaded": True, "message": "adapter preloaded", "modelName": model_name}
+
+        # 일반 모델은 매니저로 로드 시도, 실패 시 어댑터 경로도 시도
+        candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+        try:
+            _MODEL_MANAGER.load(candidate)
+            return {"loaded": True, "message": "loaded", "modelName": model_name}
+        except Exception:
+            logging.getLogger(__name__).exception("lazy load via manager failed, trying adapter")
+            if _preload_via_adapters(model_name):
+                return {"loaded": True, "message": "adapter preloaded (fallback)", "modelName": model_name}
+            return {"loaded": False, "message": "load failed", "modelName": model_name}
+    except Exception:
+        logging.getLogger(__name__).exception("lazy_load_if_needed unexpected error")
+        return {"loaded": False, "message": "unexpected error", "modelName": model_name}
 
 
 def _ensure_models_from_fs(category: str) -> None:
@@ -559,10 +625,34 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
 
 
 def _strip_category_suffix(name: str) -> str:
-    for suf in ("-qa", "-doc_gen", "-summary"):
+    # 허용: -qa/-doc_gen/-summary 및 _qa/_qna/_doc_gen/_summary
+    for suf in ("-qa", "-doc_gen", "-summary", "_qa", "_qna", "_doc_gen", "_summary"):
         if name.endswith(suf):
             return name[: -len(suf)]
     return name
+
+def _infer_category_from_name(name: str) -> Optional[str]:
+    n = (name or "").lower()
+    if n.endswith(("_summary", "-summary")):
+        return "summary"
+    if n.endswith(("_qna", "_qa", "-qa")):
+        return "qa"
+    if n.endswith(("_doc_gen", "-doc_gen")):
+        return "doc_gen"
+    return None
+
+def _to_rel_under_storage_root(p: str) -> str:
+    """
+    storage/model 하위 상대경로(보통 폴더명)로 저장.
+    절대경로여도 STORAGE_ROOT 기준 상대경로로 환원.
+    """
+    try:
+        rp = os.path.relpath(p, STORAGE_ROOT)
+        if rp in (".", ""):
+            return os.path.basename(p.rstrip("/"))
+        return rp
+    except Exception:
+        return os.path.basename(p.rstrip("/"))
 
 
 def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
@@ -716,59 +806,48 @@ def download_model(body: DownloadModelBody) -> Dict[str, Any]:
 
 
 def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
-    """베이스 모델을 llm_models에 category='all'로 단일 저장한다."""
+    """
+    기본 모델 등록(단일 레코드):
+      - 항상 category='all', subcategory=NULL 로 한 행만 저장
+      - model_path는 STORAGE_ROOT 하위 상대경로(폴더명)로 저장
+      - 동일 name 존재 시 upsert
+    """
+    _migrate_llm_models_if_needed()
     base_name = body.name.strip()
-    provided_path = (body.model_path or "").strip()
-    auto_path = os.path.join(STORAGE_ROOT, base_name)
-    final_base_path = provided_path or auto_path
-    if provided_path and not os.path.isabs(provided_path):
-        if not os.path.isfile(os.path.join(final_base_path, "config.json")):
-            cand = os.path.join(STORAGE_ROOT, provided_path)
-            if os.path.isfile(os.path.join(cand, "config.json")):
-                final_base_path = cand
-    # Try suffix-stripped directory if still not found
-    if not os.path.isfile(os.path.join(final_base_path, "config.json")):
-        try:
-            stripped = _strip_category_suffix(base_name)
-            cand2 = os.path.join(STORAGE_ROOT, stripped)
-            if os.path.isfile(os.path.join(cand2, "config.json")):
-                final_base_path = cand2
-        except Exception:
-            pass
-    cfg_ok = os.path.isfile(os.path.join(final_base_path, "config.json"))
-    # Store relative path (portable in DB)
-    path_for_db = _to_rel(final_base_path)
+    provided = (body.model_path or "").strip()
+    rel_folder = _normalize_model_path_input(provided or base_name)
+    abs_path = os.path.join(STORAGE_ROOT, rel_folder)
+    cfg_ok = os.path.isfile(os.path.join(abs_path, "config.json"))
 
-    inserted: List[Dict[str, Any]] = []
-    conn = _connect()
+    conn = _connect(); cur = conn.cursor()
     try:
-        cur = conn.cursor()
-        final_name = base_name
-        cur.execute("SELECT id FROM llm_models WHERE name=?", (final_name,))
+        cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
         row = cur.fetchone()
         if row:
             cur.execute(
-                "UPDATE llm_models SET provider=?, model_path=?, category='all', type='base', is_active=1, is_default=1 WHERE id=?",
-                (body.provider, path_for_db, int(row["id"]))    
+                """
+                UPDATE llm_models
+                   SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
+                 WHERE id=?
+                """,
+                (body.provider, rel_folder, int(row[0]))
             )
-            mdl_id = int(row["id"])
-            existed = True
+            mdl_id = int(row[0]); existed = True
         else:
             cur.execute(
                 """
-                INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active, is_default)
-                VALUES(?,?,?,?, 'all', 'base', 1, 1)
+                INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
+                VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
                 """,
-                (body.provider, final_name, 0, path_for_db)
+                (body.provider, base_name, 0, rel_folder)
             )
-            mdl_id = int(cur.lastrowid)
-            existed = False
-        inserted.append({"id": mdl_id, "name": final_name, "category": 'all', "model_path": path_for_db, "exists": existed})
+            mdl_id = int(cur.lastrowid); existed = False
         conn.commit()
     finally:
         conn.close()
 
-    return {"success": True, "inserted": inserted, "pathChecked": cfg_ok, "note": ("config.json 미존재 경고" if not cfg_ok else "ok")}
+    note = "ok" if cfg_ok else "경고: 모델 폴더에 config.json이 보이지 않습니다."
+    return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
 
 
 def train_model(body: TrainModelBody) -> Dict[str, Any]:
@@ -825,17 +904,19 @@ def get_model_list(category: str) -> Dict[str, Any]:
         if category == "all":
             cur.execute(
                 """
-                SELECT id, name FROM llm_models
-                WHERE category='all' AND is_active=1
-                ORDER BY trained_at DESC NULLS LAST, id DESC
+                SELECT id, name, type, category, model_path
+                FROM llm_models
+                WHERE is_active=1 AND category='all'
+                ORDER BY trained_at DESC, id DESC
                 """
             )
         else:
             cur.execute(
                 """
-                SELECT id, name FROM llm_models
-                WHERE category IN (?, 'all') AND is_active=1
-                ORDER BY trained_at DESC NULLS LAST, id DESC
+                SELECT id, name, type, category, model_path
+                FROM llm_models
+                WHERE is_active=1 AND (category=? OR category='all')
+                ORDER BY trained_at DESC, id DESC
                 """,
                 (category,)
             )
@@ -855,10 +936,13 @@ def get_model_list(category: str) -> Dict[str, Any]:
     active_name = _active_model_name_for_category(category)
     models = []
     for r in rows:
+        # base 중복 방지: type='base'이며 category!='all'이면 화면에서 숨김
+        row_type = str((r["type"] or "")).lower()
+        row_cat  = str((r["category"] or "")).lower()
+        if (row_type == "base") and (row_cat != "all"):
+            continue
         name = r["name"]
-        cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name)
-        if not cand:
-            cand = name
+        cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
         models.append({
             "id": r["id"],
@@ -907,6 +991,15 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         # Set active for category
         _set_active_model_for_category(category, model_name)
 
+        # DB is_active 동기화(동일 경로 전체)
+        try:
+            row = _lookup_model_by_name(model_name)
+            rel_path = (row["model_path"] if row else None) or _normalize_model_path_input(os.path.basename((_resolve_model_path_for_name(model_name) or model_name)))
+            if rel_path:
+                _db_set_active_by_path(rel_path, True)
+        except Exception:
+            logging.getLogger(__name__).exception("is_active sync on load failed")
+
         message = "모델 로드 완료"
         if row is None:
             message += " (주의: DB에 모델 메타가 없어 로컬 경로 기준 처리)"
@@ -948,7 +1041,137 @@ def unload_model(model_name: str) -> Dict[str, Any]:
     finally:
         now_loaded = _is_model_loaded(model_name)
     ok = not now_loaded
+    # DB is_active 동기화(동일 경로 전체)
+    try:
+        row = _lookup_model_by_name(model_name)
+        rel_path = (row["model_path"] if row else None)
+        if not rel_path:
+            resolved = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
+            rel_path = _to_rel_under_storage_root(resolved)
+        if rel_path:
+            _db_set_active_by_path(rel_path, False)
+    except Exception:
+        logging.getLogger(__name__).exception("is_active sync on unload failed")
     return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
+
+
+# ===== 기본 모델 매핑(테스크/서브테스크) =====
+class DefaultModelBody(BaseModel):
+    category: str
+    subcategory: Optional[str] = None
+    modelName: str
+
+
+def set_default_model(body: DefaultModelBody) -> Dict[str, Any]:
+    _migrate_llm_models_if_needed()
+    cat = _norm_category(body.category)
+    sub = (body.subcategory or "").strip().lower() or None
+    conn = _connect(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM llm_models WHERE name=?", (body.modelName,))
+        row = cur.fetchone()
+        if not row:
+            return {"success": False, "message": f"모델이 없습니다: {body.modelName}"}
+        model_id = int(row[0])
+        cur.execute(
+            """
+            INSERT INTO llm_task_defaults(category, subcategory, model_id)
+            VALUES(?,?,?)
+            ON CONFLICT(category, IFNULL(subcategory,'')) DO UPDATE SET model_id=excluded.model_id, updated_at=CURRENT_TIMESTAMP
+            """,
+            (cat, sub, model_id)
+        )
+        conn.commit()
+        return {"success": True, "category": cat, "subcategory": sub, "modelId": model_id, "modelName": body.modelName}
+    finally:
+        conn.close()
+
+
+def get_default_model(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
+    cat = _norm_category(category)
+    sub = (subcategory or "").strip().lower() or None
+    conn = _connect(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT m.id, m.name FROM llm_task_defaults d
+            JOIN llm_models m ON m.id=d.model_id
+            WHERE d.category=? AND IFNULL(d.subcategory,'')=IFNULL(?, '')
+            LIMIT 1
+            """,
+            (cat, sub)
+        )
+        row = cur.fetchone()
+        model = {"id": row[0], "name": row[1]} if row else None
+        return {"category": cat, "subcategory": sub, "model": model}
+    finally:
+        conn.close()
+
+
+def select_model_for_task(category: str, subcategory: Optional[str] = None) -> Optional[str]:
+    """
+    우선순위:
+      1) llm_task_defaults 매핑
+      2) 해당 과업(및 서브테스크) 활성 모델
+      3) category='all' 활성 베이스
+    반환: 모델 name (없으면 None)
+    """
+    cat = _norm_category(category)
+    sub = (subcategory or "").strip().lower() or None
+    conn = _connect(); cur = conn.cursor()
+    try:
+        # 1) explicit default mapping
+        cur.execute(
+            """
+            SELECT m.name
+              FROM llm_task_defaults d JOIN llm_models m ON m.id=d.model_id
+             WHERE d.category=? AND IFNULL(d.subcategory,'')=IFNULL(?, '')
+             LIMIT 1
+            """,
+            (cat, sub)
+        )
+        r = cur.fetchone()
+        if r:
+            return r[0]
+
+        # 2) task-specific active model (doc_gen with subcategory first)
+        if cat == "doc_gen" and sub:
+            cur.execute(
+                """
+                SELECT name FROM llm_models
+                 WHERE is_active=1 AND category='doc_gen' AND IFNULL(subcategory,'')=?
+                 ORDER BY trained_at DESC, id DESC LIMIT 1
+                """,
+                (sub,)
+            )
+            r = cur.fetchone()
+            if r:
+                return r[0]
+
+        cur.execute(
+            """
+            SELECT name FROM llm_models
+             WHERE is_active=1 AND category=?
+             ORDER BY trained_at DESC, id DESC LIMIT 1
+            """,
+            (cat,)
+        )
+        r = cur.fetchone()
+        if r:
+            return r[0]
+
+        # 3) fallback base(all)
+        cur.execute(
+            """
+            SELECT name FROM llm_models
+             WHERE is_active=1 AND category='all'
+             ORDER BY trained_at DESC, id DESC LIMIT 1
+            """
+        )
+        r = cur.fetchone()
+        return r[0] if r else None
+    finally:
+        conn.close()
 
 
 def unload_model_for_category(category: str, model_name: str) -> Dict[str, Any]:
@@ -1021,30 +1244,50 @@ def compare_models(payload: CompareModelsBody) -> Dict[str, Any]:
     return {"modelList": model_list}
 
 
-def list_prompts(category: str) -> Dict[str, Any]:
+def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]:
+    category = _norm_category(category)
+    subtask = _subtask_key(subtask)
     conn = _connect()
     cur = conn.cursor()
-    cur.execute("""
-      SELECT id, name, content FROM system_prompt_template
-      WHERE category=? AND is_active=1
-      ORDER BY id DESC
-    """, (category,))
+    if subtask:
+        cur.execute(
+            """
+          SELECT id, name, content, subtask FROM system_prompt_template
+          WHERE category=? AND ifnull(subtask,'')=? AND ifnull(is_active,1)=1
+          ORDER BY id DESC
+        """,
+            (category, subtask),
+        )
+    else:
+        cur.execute(
+            """
+          SELECT id, name, content, subtask FROM system_prompt_template
+          WHERE category=? AND ifnull(is_active,1)=1
+          ORDER BY id DESC
+        """,
+            (category,),
+        )
     rows = cur.fetchall()
     conn.close()
-    prompt_list = [{"promptId": r["id"], "title": r["name"], "prompt": r["content"]} for r in rows]
-    return {"category": category, "promptList": prompt_list}
+    prompt_list = [
+        {"promptId": r["id"], "title": r["name"], "prompt": r["content"], "subtask": r["subtask"]}
+        for r in rows
+    ]
+    return {"category": category, "subtask": subtask or None, "promptList": prompt_list}
 
 
-def create_prompt(category: str, body: CreatePromptBody) -> Dict[str, Any]:
+def create_prompt(category: str, subtask: Optional[str], body: CreatePromptBody) -> Dict[str, Any]:
     start = time.time()
+    category = _norm_category(category)
+    subtask = _subtask_key(subtask)
     conn = _connect()
     cur = conn.cursor()
     # 템플릿 생성
     required_vars = [v.key for v in body.variables] if body.variables else []
     cur.execute("""
-      INSERT INTO system_prompt_template(name, category, content, required_vars, is_active)
-      VALUES(?,?,?,?,1)
-    """, (body.title, category, body.prompt, _json(required_vars)))
+      INSERT INTO system_prompt_template(name, category, content, subtask, required_vars, is_active)
+      VALUES(?,?,?,?,?,1)
+    """, (body.title, category, body.prompt, (subtask or None), _json(required_vars)))
     template_id = cur.lastrowid
 
     # 변수/매핑 생성
@@ -1068,7 +1311,7 @@ def create_prompt(category: str, body: CreatePromptBody) -> Dict[str, Any]:
 def _fetch_prompt_full(prompt_id: int) -> Tuple[sqlite3.Row, List[Dict[str, Any]]]:
     conn = _connect()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM system_prompt_template WHERE id=? AND is_active=1", (prompt_id,))
+    cur.execute("SELECT * FROM system_prompt_template WHERE id=? AND ifnull(is_active,1)=1", (prompt_id,))
     tmpl = cur.fetchone()
     if not tmpl:
         conn.close()
@@ -1092,6 +1335,8 @@ def get_prompt(prompt_id: int) -> Dict[str, Any]:
         "promptId": tmpl["id"],
         "title": tmpl["name"],
         "prompt": tmpl["content"],
+        "category": tmpl["category"],
+        "subtask": tmpl["subtask"],
         "variables": [{"key": v["key"], "value": v["value"], "type": v["type"]} for v in variables],
     }
 

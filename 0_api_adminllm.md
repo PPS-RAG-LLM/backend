@@ -1,3 +1,83 @@
+
+
+/v1/admin/llm/model/insert-base
+{
+  "name": "Qwen2.5-7B-Instruct-1M",
+  "model_path": "storage/model/Qwen2.5-7B-Instruct-1M",
+  "provider": "huggingface",
+  "category": "all"
+}
+
+{
+  "name": "gpt-oss-20b",
+  "model_path": "storage/model/gpt-oss-20b",
+  "provider": "huggingface",
+  "category": "all"
+}
+
+
+# 프롬프트 추가 /v1/admin/llm/prompts
+
+{
+  "title": "출장계획서_V1",
+  "prompt": "일정: {{일정}}\n작성자: {{작성자}}\n출장지: {{출장지}}\n요청: {{내용 및 요청 사항}}\n위 정보를 바탕으로 ...",
+  "variables": [
+    {"key":"일정", "value":"2025.08.25 ~ 2025.09.25", "type":"text"},
+    {"key":"작성자", "value":"홍길동", "type":"text"},
+    {"key":"출장지", "value":"서울 광진구", "type":"text"},
+    {"key":"내용 및 요청 사항", "value":"texttext...", "type":"text"}
+  ]
+}
+
+# 프롬프트 변경
+{ "category":"doc_gen", "subtask":"출장계획서", "promptId": 123 }
+
+# 파인튜닝 테스트
+
+{
+  "baseModelName": "Qwen2.5-7B-Instruct-1M",
+  "saveModelName": "Qwen2.5-7B-Instruct-1M",
+  "systemPrompt": "위 글을 참고하여 대답해 주세요",
+  "batchSize": 4,
+  "epochs": 3,
+  "learningRate": 0.0002,
+  "overfittingPrevention": true,
+  "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
+  "gradientAccumulationSteps": 8,
+  "tuningType": "QLORA"
+}
+
+baseModelName: str
+saveModelName: str
+systemPrompt: str
+batchSize: int = 4
+epochs: int = 3
+learningRate: float = 2e-4
+overfittingPrevention: bool = True
+trainSetFile: str
+gradientAccumulationSteps: int = 8
+quantizationBits: Optional[int] = Field(
+    default=None,
+    description="QLORA 전용: 양자화 비트 선택 (4 또는 8)",
+)
+tuningType: Optional[str] = Field(
+    default="QLORA",
+    description="파인튜닝 방식: LORA | QLORA | FULL",
+    pattern="^(LORA|QLORA|FULL)$",
+)
+{
+  "baseModelName": "gpt-oss-20b",
+  "saveModelName": "gpt-oss-20b-qa",
+  "systemPrompt": "위 글을 참고하여 대답해 주세요",
+  "batchSize": 4,
+  "epochs": 3,
+  "learningRate": 0.0002,
+  "overfittingPrevention": true,
+  "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
+  "gradientAccumulationSteps": 8,
+  "tuningType": "QLORA"
+}
+=====================================================================================
 POST	/v1/admin/llm/settings	TOPK 조정 – RAG 반환 문서 수 변경	
 📤 요청 본문
 application/json
