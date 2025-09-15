@@ -105,7 +105,7 @@ VALUES (
         'huggingface',
         'gpt_oss_20b',
         0,
-        './service/storage/model/local_gpt_oss_20b',
+        './service/storage/model/gpt-oss-20b',
         'qa',
         '',
         'base',

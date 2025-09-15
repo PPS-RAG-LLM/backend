@@ -28,6 +28,7 @@ logger = logger(__name__)
 #     return model, tokenizer
 
 def stream_chat(messages, **gen_kwargs):  
+    
     logger.info(f"stream_chat: {gen_kwargs}")
 
     model_dir = gen_kwargs.get("model_path")
@@ -35,7 +36,7 @@ def stream_chat(messages, **gen_kwargs):
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
     model, tokenizer = load_hf_llm_model(model_dir)
-    text = build_qwen_prompt(messages)
+    text = build_prompt(messages)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     model_inputs = tokenizer(text, return_tensors="pt", )
@@ -66,7 +67,7 @@ def stream_chat(messages, **gen_kwargs):
     thread.join()
     free_torch_memory()
 
-def build_qwen_prompt(messages):
+def build_prompt(messages):
     prompt = ""
     for msg in messages:
         if msg["role"] == "system":
