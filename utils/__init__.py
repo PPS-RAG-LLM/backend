@@ -4,7 +4,7 @@ from .slug import generate_unique_slug, generate_thread_slug
 from .middleware import ProcessTimeMiddleware
 from .database import get_db, init_db
 from .memory import free_torch_memory
-from .model_load import load_embedding_model, load_hf_llm_model
+from .model_load import load_embedding_model
 __all__ = [
     "logger", 
     "now_kst",
@@ -17,5 +17,4 @@ __all__ = [
     "init_db",
     "free_torch_memory",
     "load_embedding_model",
-    "load_hf_llm_model"
     ]       
