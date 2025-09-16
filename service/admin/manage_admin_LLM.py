@@ -8,6 +8,7 @@ import time
 import gc
 import logging
 import importlib
+from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
@@ -19,16 +20,22 @@ from utils.database import get_db as _get_db
 _DEFAULT_TOPK: int = 5
 
 # ===== Constants =====
-# Force DB to pps_rag.db by default (can be overridden via COREIQ_DB)
-os.environ.setdefault("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
-DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
-STORAGE_ROOT = "/home/work/CoreIQ/backend/storage/model"  # train_qwen_rag.py 와 동일
+# Backend root (상대 경로 기준 루트)
+BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
+SERVICE_ROOT = BASE_BACKEND / "service"
+# 신규 표준 저장소: ./service/storage/model
+STORAGE_ROOT = SERVICE_ROOT / "storage" / "model"
+
+# 레거시 위치(호환용): ./storage/model
+LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "model"
+
+# DB 경로(환경변수로 오버라이드 가능)
+os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
+DB_PATH = os.getenv("COREIQ_DB")
+
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
 ACTIVE_PROMPT_CACHE_PREFIX = "active_prompt:"     # active_prompt:qa:report
 RAG_TOPK_CACHE_KEY = "rag_topk"
-
-# Backend root for portable paths (same approach as LLM_finetuning.py)
-BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))
 
 # ===== Pydantic models (변수명/스키마 고정) =====
 class TopKSettingsBody(BaseModel):
@@ -179,6 +186,15 @@ def _normalize_model_path_input(p: str) -> str:
     if "/storage/model/" in s:
         s = s.split("/storage/model/", 1)[1]
     return s.strip("/")
+
+
+def _sanitize_name(name: str) -> str:
+    return (name or "").strip().replace("-", "_").replace("/", "_")
+
+
+def _std_rel_path_for_name(model_name: str) -> str:
+    # DB에 저장될 규칙 경로 (반드시 ./ 로 시작)
+    return f"./service/storage/model/local_{_sanitize_name(model_name)}"
 
 
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
@@ -381,7 +397,7 @@ class _ModelManager:
 
     def _resolve_candidate(self, name_or_path: str) -> str:
         # Prefer local storage folder under STORAGE_ROOT if it looks like a model dir
-        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
+        fs_path = str(STORAGE_ROOT / name_or_path)
         try:
             if os.path.isfile(os.path.join(fs_path, "config.json")):
                 return fs_path
@@ -495,12 +511,40 @@ _MODEL_MANAGER = _ModelManager()
 _ADAPTER_LOADED: set[str] = set()
 
 def _resolve_model_fs_path(name_or_path: str) -> str:
+    """
+    절대/상대 무엇이든 실제 폴더(config.json) 있는 경로로 환원.
+    우선순위: 규칙 경로 → service root → legacy root → 입력값
+    """
     try:
-        if os.path.isabs(name_or_path):
-            return name_or_path
-        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
-        if os.path.isfile(os.path.join(fs_path, "config.json")):
-            return fs_path
+        s = (name_or_path or "").strip().replace("\\", "/")
+        # 규칙 경로 후보 (service/local_<name>)
+        rule_abs = STORAGE_ROOT / f"local_{_sanitize_name(_strip_category_suffix(os.path.basename(s)))}"
+        if (rule_abs / "config.json").is_file():
+            return str(rule_abs)
+
+        # ./service/... 상대처리
+        if s.startswith("./service/"):
+            cand = (BASE_BACKEND / s.lstrip("./"))
+            if (cand / "config.json").is_file():
+                return str(cand)
+
+        # ./storage/... 상대처리(레거시)
+        if s.startswith("./storage/"):
+            cand = (BASE_BACKEND / s.lstrip("./"))
+            if (cand / "config.json").is_file():
+                return str(cand)
+
+        # 이름만 온 경우: service → legacy
+        cand = STORAGE_ROOT / os.path.basename(s)
+        if (cand / "config.json").is_file():
+            return str(cand)
+        cand = LEGACY_STORAGE_ROOT / os.path.basename(s)
+        if (cand / "config.json").is_file():
+            return str(cand)
+
+        # 절대경로 그대로 확인
+        if os.path.isabs(s) and os.path.isfile(os.path.join(s, "config.json")):
+            return s
     except Exception:
         logging.getLogger(__name__).exception("failed to resolve model fs path")
     return name_or_path
@@ -604,9 +648,8 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
 
     LLM모델 경로로 모델 켜졌는지 조회
     """
-    conn = None
+    conn = _connect()
     try:
-        conn = _connect()
         cur = conn.cursor()
         cur.execute("SELECT model_path FROM llm_models WHERE name=?", (model_name,))
         row = cur.fetchone()
@@ -615,30 +658,33 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
         return None
     finally:
         try:
-            if conn:
-                conn.close()
+            conn.close()
         except Exception:
             pass
 
     if not row:
         return None
-    path_value = (row["model_path"] or "").strip()
-    if not path_value:
+    val = (row["model_path"] or "").strip().replace("\\", "/")
+    if not val:
         return None
-    try:
-        # If relative, assume under STORAGE_ROOT
-        candidate = path_value
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(STORAGE_ROOT, candidate)
-        if os.path.isfile(os.path.join(candidate, "config.json")):
-            return candidate
-        # If absolute in DB but not found, try STORAGE_ROOT/name fallback
-        fallback = os.path.join(STORAGE_ROOT, path_value)
-        if os.path.isfile(os.path.join(fallback, "config.json")):
-            return fallback
-    except Exception:
-        logging.getLogger(__name__).exception("failed while resolving db model_path for %s", model_name)
-    return None
+
+    # Handle standardized relative paths like ./service/storage/model/...
+    if val.startswith("./"):
+        abs_p = (BASE_BACKEND / val.lstrip("./"))
+        if (abs_p / "config.json").is_file():
+            return str(abs_p)
+        # Try standardized service location based on name
+        std_abs = STORAGE_ROOT / f"local_{_sanitize_name(model_name)}"
+        if (std_abs / "config.json").is_file():
+            return str(std_abs)
+        # Legacy fallback using basename
+        leg = LEGACY_STORAGE_ROOT / os.path.basename(val)
+        if (leg / "config.json").is_file():
+            return str(leg)
+        return None
+
+    # Absolute or simple name -> resolve via fs helper
+    return _resolve_model_fs_path(val)
 
 
 def _strip_category_suffix(name: str) -> str:
@@ -659,17 +705,26 @@ def _infer_category_from_name(name: str) -> Optional[str]:
     return None
 
 def _to_rel_under_storage_root(p: str) -> str:
-    """
-    storage/model 하위 상대경로(보통 폴더명)로 저장.
-    절대경로여도 STORAGE_ROOT 기준 상대경로로 환원.
-    """
+    """ 상대 경로 반환 """
     try:
-        rp = os.path.relpath(p, STORAGE_ROOT)
-        if rp in (".", ""):
-            return os.path.basename(p.rstrip("/"))
-        return rp
+        p = str(p)
+        # 새 표준(root=SERVICE_ROOT)
+        try:
+            rp = os.path.relpath(p, str(STORAGE_ROOT))
+            if rp not in (".", ""):
+                return f"./service/storage/model/{rp}".replace("\\", "/")
+        except Exception:
+            pass
+        # 레거시(root=LEGACY_STORAGE_ROOT)
+        try:
+            rp = os.path.relpath(p, str(LEGACY_STORAGE_ROOT))
+            if rp not in (".", ""):
+                return f"./storage/model/{rp}".replace("\\", "/")
+        except Exception:
+            pass
     except Exception:
-        return os.path.basename(p.rstrip("/"))
+        pass
+    return (p or "").replace("\\", "/")
 
 
 def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
@@ -689,91 +744,58 @@ def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
         if p2 and os.path.isfile(os.path.join(p2, "config.json")):
             return p2
     # 3) STORAGE_ROOT/exact
-    cand = os.path.join(STORAGE_ROOT, model_name)
-    if os.path.isfile(os.path.join(cand, "config.json")):
-        return cand
+    cand = STORAGE_ROOT / model_name
+    if (cand / "config.json").is_file():
+        return str(cand)
     # 4) STORAGE_ROOT/base-name
-    cand2 = os.path.join(STORAGE_ROOT, base)
-    if os.path.isfile(os.path.join(cand2, "config.json")):
-        return cand2
+    cand2 = STORAGE_ROOT / base
+    if (cand2 / "config.json").is_file():
+        return str(cand2)
     return None
 
 
 def _preload_via_adapters(model_name: str) -> bool:
-    name = (model_name or "").lower()
     model_path = _db_get_model_path(model_name)
     if not model_path:
-        # Fallback to STORAGE_ROOT if present
-        cand = os.path.join(STORAGE_ROOT, model_name)
+        # STORAGE_ROOT / 레거시에서도 시도
+        cand = _resolve_model_fs_path(model_name)
         if os.path.isfile(os.path.join(cand, "config.json")):
             model_path = cand
         else:
-            # Also try base-name for suffix forms
             base = _strip_category_suffix(model_name)
-            cand2 = os.path.join(STORAGE_ROOT, base)
+            cand2 = _resolve_model_fs_path(base)
             if os.path.isfile(os.path.join(cand2, "config.json")):
                 model_path = cand2
             else:
-                logging.getLogger(__name__).warning("model path not found for %s", model_name)
+                logging.getLogger(__name__).warning("[preload] model path not found: %s", model_name)
                 return False
-
     try:
-        if name.startswith("gpt_oss") or name.startswith("gpt-oss"):
-            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
-            loader = getattr(mod, "load_gpt_oss_20b", None)
-            if callable(loader):
-                logging.getLogger(__name__).info("[gpt-oss] adapter preload start: %s", model_path)
-                loader(model_path)  # lru_cache will retain
-                try:
-                    _ADAPTER_LOADED.add(model_path)
-                    _ADAPTER_LOADED.add(os.path.basename(model_path))
-                except Exception:
-                    logging.getLogger(__name__).exception("[gpt-oss] adapter tracking add failed")
-                logging.getLogger(__name__).info("[gpt-oss] adapter preload done: %s", model_path)
-                return True
+        logging.getLogger(__name__).info("[preload] start name=%s path=%s", model_name, model_path)
+        if not os.path.isfile(os.path.join(model_path, "config.json")):
+            logging.getLogger(__name__).error("[preload] config.json not found at %s", model_path)
             return False
-        if "qwen" in name:
-            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
-            loader = getattr(mod, "load_qwen_instruct_7b", None)
-            if callable(loader):
-                loader(model_path)  # lru_cache will retain
-                try:
-                    _ADAPTER_LOADED.add(model_path)
-                    _ADAPTER_LOADED.add(os.path.basename(model_path))
-                except Exception:
-                    pass
-                return True
-            return False
+        # 안전 로더(최소 인자) 사용 – 커스텀 모델과 충돌하는 kwargs 제거
+        _hf_load_without_quant(model_path)
+        try:
+            _ADAPTER_LOADED.add(model_path)
+            _ADAPTER_LOADED.add(os.path.basename(model_path))
+        except Exception:
+            logging.getLogger(__name__).exception("adapter-like tracking add failed")
+        logging.getLogger(__name__).info("[preload] done name=%s", model_name)
+        return True
     except Exception:
-        logging.getLogger(__name__).exception("adapter preload failed for %s", model_name)
+        logging.getLogger(__name__).exception("adapter-like preload failed for %s", model_name)
         return False
-    return False
 
 
 def _unload_via_adapters(model_name: str) -> bool:
-    name = (model_name or "").lower()
     ok = False
     try:
-        if name.startswith("gpt_oss") or name.startswith("gpt-oss"):
-            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
-            loader = getattr(mod, "load_gpt_oss_20b", None)
-            if hasattr(loader, "cache_clear"):
-                try:
-                    loader.cache_clear()  # type: ignore[attr-defined]
-                    ok = True
-                except Exception:
-                    pass
-        if "qwen" in name:
-            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
-            loader = getattr(mod, "load_qwen_instruct_7b", None)
-            if hasattr(loader, "cache_clear"):
-                try:
-                    loader.cache_clear()  # type: ignore[attr-defined]
-                    ok = True
-                except Exception:
-                    pass
+        if hasattr(_preload_with_utils_model_load, "cache_clear"):
+            _preload_with_utils_model_load.cache_clear()
+            ok = True
     except Exception:
-        logging.getLogger(__name__).exception("adapter unload failed for %s", model_name)
+        logging.getLogger(__name__).exception("adapter-like unload cache_clear failed")
     # remove tracking
     try:
         resolved = _resolve_model_fs_path(model_name)
@@ -825,16 +847,19 @@ def download_model(body: DownloadModelBody) -> Dict[str, Any]:
 def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
     """
     기본 모델 등록(단일 레코드):
-      - 항상 category='all', subcategory=NULL 로 한 행만 저장
-      - model_path는 STORAGE_ROOT 하위 상대경로(폴더명)로 저장
-      - 동일 name 존재 시 upsert
+      - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
+      - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
     """
     _migrate_llm_models_if_needed()
     base_name = body.name.strip()
-    provided = (body.model_path or "").strip()
-    rel_folder = _normalize_model_path_input(provided or base_name)
-    abs_path = os.path.join(STORAGE_ROOT, rel_folder)
-    cfg_ok = os.path.isfile(os.path.join(abs_path, "config.json"))
+    rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
+
+    # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
+    abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
+    cfg_ok = (abs_new / "config.json").is_file()
+    if not cfg_ok:
+        abs_old = LEGACY_STORAGE_ROOT / base_name
+        cfg_ok = (abs_old / "config.json").is_file()
 
     conn = _connect(); cur = conn.cursor()
     try:
@@ -863,7 +888,7 @@ def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    note = "ok" if cfg_ok else "경고: 모델 폴더에 config.json이 보이지 않습니다."
+    note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
     return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
 
 
@@ -1013,10 +1038,14 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         # Set active for category
         _set_active_model_for_category(category, model_name)
 
-        # DB is_active 동기화(동일 경로 전체)
+        # DB is_active 동기화(동일 경로 전체) – 규칙 상대경로 기준
         try:
             row = _lookup_model_by_name(model_name)
-            rel_path = (row["model_path"] if row else None) or _normalize_model_path_input(os.path.basename((_resolve_model_path_for_name(model_name) or model_name)))
+            if row and row["model_path"]:
+                rel_path = row["model_path"]
+            else:
+                resolved = _resolve_model_fs_path(model_name)
+                rel_path = _to_rel_under_storage_root(resolved)
             if rel_path:
                 _db_set_active_by_path(rel_path, True)
         except Exception:

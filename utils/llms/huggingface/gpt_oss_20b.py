@@ -10,6 +10,28 @@ from typing import List, Dict, Any, Generator
 
 logger = logger(__name__)
 
+@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
+def load_gpt_oss_20b(model_dir): 
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir,
+        trust_remote_code = True,   # 모델 코드 신뢰
+        use_fast=False,             # 빠른 토크나이저 사용 여부
+        padding_side = "left"       # 패딩 위치
+        )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, 
+        device_map="auto",          # 모델 분산 처리
+        torch_dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
+        trust_remote_code=True,     # 모델 코드 신뢰
+        low_cpu_mem_usage=True      # 메모리 효율성
+        )
+    model.eval()
+    return model, tokenizer
+
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
     logger.info(f"\n\nstream_chat: {gen_kwargs}\n\n")
     model_dir = gen_kwargs.get("model_path")
