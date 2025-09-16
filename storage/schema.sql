@@ -433,8 +433,8 @@ CREATE INDEX IF NOT EXISTS ix_slk_task_level ON security_level_keywords_task(tas
 CREATE TABLE IF NOT EXISTS rag_settings (
   id            INTEGER PRIMARY KEY CHECK (id = 1),
   search_type   TEXT NOT NULL DEFAULT 'hybrid' CHECK (search_type IN ('hybrid','bm25','vector')),
-  chunk_size    INTEGER NOT NULL DEFAULT 512 CHECK (chunk_size > 0),
-  overlap       INTEGER NOT NULL DEFAULT 64 CHECK (overlap >= 0),
+  chunk_size    INTEGER NOT NULL DEFAULT 512 CHECK (chunk_size >= 1),
+  overlap       INTEGER NOT NULL DEFAULT 64 CHECK (overlap >= 1),
   embedding_key TEXT NOT NULL DEFAULT 'embedding_qwen3_0_6b',
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

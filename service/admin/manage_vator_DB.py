@@ -22,6 +22,13 @@ from datetime import datetime, timezone
 import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
+try:
+    # Milvus 2.4+ Function/BM25 하이브리드
+    from pymilvus import Function, FunctionType
+except Exception:
+    Function = None
+    class FunctionType:
+        BM25 = "BM25"
 from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
@@ -256,9 +263,11 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
 
         new_key = embed_model_key or key_now
         new_st = (search_type or st_now).lower()
-        # 'vector'는 저장 허용(검색 로직에서 semantic과 동일 처리)
-        if new_st not in {"hybrid", "bm25", "vector", "semantic"}:
-            raise ValueError("unsupported searchType; allowed: 'hybrid','bm25','vector','semantic'")
+        # DB 제약과 일치(semantic == vector)
+        if new_st == "semantic":
+            new_st = "vector"
+        if new_st not in {"hybrid", "bm25", "vector"}:
+            raise ValueError("unsupported searchType; allowed: 'hybrid','bm25','vector'")
 
         new_cs = int(chunk_size if chunk_size is not None else cs_now)
         new_ov = int(overlap if overlap is not None else ov_now)
@@ -603,6 +612,30 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
+        # 하이브리드용 텍스트/스파스 필드
+        # text: 본문 청크(분석기 활성), text_sparse: BM25 스파스 벡터
+        try:
+            schema.add_field("text", DataType.VARCHAR, max_length=32768, enable_analyzer=True)
+        except TypeError:
+            schema.add_field("text", DataType.VARCHAR, max_length=32768)
+        try:
+            schema.add_field("text_sparse", DataType.SPARSE_FLOAT_VECTOR)
+        except Exception:
+            logger.warning("[Milvus] SPARSE_FLOAT_VECTOR 미지원 클라이언트입니다. 서버 BM25 하이브리드 사용 불가.")
+
+        # BM25 함수(가능한 경우: text -> text_sparse 자동생성)
+        if Function is not None:
+            try:
+                fn = Function(
+                    name="bm25_text2sparse",
+                    function_type=FunctionType.BM25,
+                    input_field_names=["text"],
+                    output_field_names=["text_sparse"],
+                )
+                schema.add_function(fn)
+                logger.info("[Milvus] BM25 Function 연결 완료 (text -> text_sparse)")
+            except Exception as e:
+                logger.warning(f"[Milvus] BM25 Function 추가 실패: {e}")
         client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
         logger.info(f"[Milvus] 컬렉션 생성 완료: {COLLECTION_NAME}")
 
@@ -613,7 +646,9 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
     if not idx_list:
         logger.info(f"[Milvus] 인덱스 생성 시작: {COLLECTION_NAME} (최대 180초 소요 가능)")
         ip = client.prepare_index_params()
+        # 덴스 벡터: 기본은 FLAT 유지(환경에 따라 HNSW/IVF 등으로 변경 가능)
         ip.add_index("embedding", "FLAT", metric_type=metric, params={})
+        # 스파스 벡터 인덱스는 서버 내부 처리(명시 생략 가능)
         client.create_index(COLLECTION_NAME, ip, timeout=180.0, sync=True)
         logger.info(f"[Milvus] 인덱스 생성 완료: {COLLECTION_NAME}")
 
@@ -837,6 +872,7 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
                     "security_level": lvl,
                     "doc_id": str(doc_id),
                     "version": int(version),
+                    "text": c,
                 })
                 if len(batch) >= 128:
                     client.insert(COLLECTION_NAME, batch)
@@ -945,6 +981,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                 "security_level": lvl,
                 "doc_id": str(doc_id),
                 "version": int(ver),
+                "text": c,
             })
             if len(batch) >= 128:
                 client.insert(COLLECTION_NAME, batch)
@@ -1020,20 +1057,41 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     if COLLECTION_NAME not in client.list_collections():
         return {"error": "컬렉션이 없습니다. 먼저 인제스트를 수행하세요."}
 
-    # 1차: 벡터 검색
-    # hybrid일 때는 후보폭을 넓혀 후처리 리랭크
+    # 공통 파라미터
     base_limit = int(req.top_k)
-    candidate = base_limit if search_type == "bm25" else min(50, base_limit * 4)
+    candidate = min(50, max(base_limit, base_limit * 4))
+    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
 
-    results = client.search(
-        collection_name=COLLECTION_NAME,
-        data=[q_emb.tolist()],
-        anns_field="embedding",
-        limit=int(candidate),
-        search_params={"metric_type": "IP", "params": {}},
-        output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id"],
-        filter=f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}",
-    )
+    def _dense_search(limit=candidate):
+        return client.search(
+            collection_name=COLLECTION_NAME,
+            data=[q_emb.tolist()],
+            anns_field="embedding",
+            limit=int(limit),
+            search_params={"metric_type": "IP", "params": {}},
+            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+            filter=filter_expr,
+        )
+
+    def _sparse_search(query_text: str, limit=candidate):
+        """
+        BM25 Function(text->text_sparse)이 붙어 있으면 서버가 스파스 점수를 계산한다.
+        최신 pymilvus에서는 anns_field='text_sparse', data=['쿼리 문자열'] 형태를 지원.
+        일부 버전에서 미지원이면 예외 발생 → 폴백으로 빈 결과 반환.
+        """
+        try:
+            return client.search(
+                collection_name=COLLECTION_NAME,
+                data=[query_text],
+                anns_field="text_sparse",
+                limit=int(limit),
+                search_params={"params": {}},
+                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+                filter=filter_expr,
+            )
+        except Exception as e:
+            logger.warning(f"[Milvus] sparse search unavailable: {e}")
+            return [[]]
 
     def _load_snippet(path: str, cidx: int, max_tokens: int = 512, overlap: int = 64) -> str:
         try:
@@ -1048,63 +1106,98 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         snippet = " ".join(words[start:start + max_tokens]).strip()
         return snippet or " ".join(words[:max_tokens]).strip()
 
+    # === 분기: 검색 방식 ===
     hits_raw = []
-    for hit in results[0]:
-        if isinstance(hit, dict):
-            ent = hit.get("entity", {})
-            path = ent.get("path")
-            cidx = int(ent.get("chunk_idx", 0))
-            ttype = ent.get("task_type")
-            lvl = int(ent.get("security_level", 1))
-            doc_id = ent.get("doc_id")
-            score_vec = float(hit.get("distance", 0.0))
-        else:
-            path = hit.entity.get("path")
-            cidx = int(hit.entity.get("chunk_idx", 0))
-            ttype = hit.entity.get("task_type")
-            lvl = int(hit.entity.get("security_level", 1))
-            doc_id = hit.entity.get("doc_id")
-            score_vec = float(hit.score)
-        snippet = _load_snippet(path, cidx)
-        hits_raw.append({
-            "path": path, "chunk_idx": cidx, "task_type": ttype,
-            "security_level": lvl, "doc_id": doc_id,
-            "score_vec": score_vec, "snippet": snippet
-        })
+    if search_type == "vector":
+        results = _dense_search(limit=candidate)
+        for hit in results[0]:
+            if isinstance(hit, dict):
+                ent = hit.get("entity", {})
+                path = ent.get("path")
+                cidx = int(ent.get("chunk_idx", 0))
+                ttype = ent.get("task_type")
+                lvl = int(ent.get("security_level", 1))
+                doc_id = ent.get("doc_id")
+                score_vec = float(hit.get("distance", 0.0))
+            else:
+                path = hit.entity.get("path")
+                cidx = int(hit.entity.get("chunk_idx", 0))
+                ttype = hit.entity.get("task_type")
+                lvl = int(hit.entity.get("security_level", 1))
+                doc_id = hit.entity.get("doc_id")
+                score_vec = float(hit.score)
+            snippet = _load_snippet(path, cidx)
+            hits_raw.append({
+                "path": path, "chunk_idx": cidx, "task_type": ttype,
+                "security_level": lvl, "doc_id": doc_id,
+                "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet
+            })
+    else:
+        # hybrid / bm25: 덴스 + 스파스 각각 검색
+        res_dense = _dense_search(limit=candidate)
+        res_sparse = _sparse_search(req.query, limit=candidate)
 
-    # 후처리(검색방식)
+        def _collect(res, is_dense: bool):
+            out = []
+            for hit in (res[0] if res and len(res) > 0 else []):
+                if isinstance(hit, dict):
+                    ent = hit.get("entity", {})
+                    path = ent.get("path")
+                    cidx = int(ent.get("chunk_idx", 0))
+                    ttype = ent.get("task_type")
+                    lvl = int(ent.get("security_level", 1))
+                    doc_id = ent.get("doc_id")
+                    score = float(hit.get("distance", 0.0))
+                else:
+                    path = hit.entity.get("path")
+                    cidx = int(hit.entity.get("chunk_idx", 0))
+                    ttype = hit.entity.get("task_type")
+                    lvl = int(hit.entity.get("security_level", 1))
+                    doc_id = hit.entity.get("doc_id")
+                    score = float(hit.score)
+                out.append(((path, cidx, ttype, lvl, doc_id), score))
+            return out
+
+        dense_list = _collect(res_dense, True)
+        sparse_list = _collect(res_sparse, False)
+
+        # RRF 결합 폴백
+        rrf: dict[tuple, float] = {}
+        K = 60.0
+        for rank, (key, _s) in enumerate(dense_list, start=1):
+            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+        for rank, (key, _s) in enumerate(sparse_list, start=1):
+            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+
+        merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
+        for (path, cidx, ttype, lvl, doc_id), fused in merged:
+            snippet = _load_snippet(path, cidx)
+            s_vec = next((s for (k, s) in dense_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            s_spa = next((s for (k, s) in sparse_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            hits_raw.append({
+                "path": path, "chunk_idx": cidx, "task_type": ttype,
+                "security_level": lvl, "doc_id": doc_id,
+                "score_vec": float(s_vec), "score_sparse": float(s_spa),
+                "score_fused": float(fused),
+                "snippet": snippet
+            })
+
+    # 최종 스코어/정렬
     if search_type == "bm25":
-        # 벡터 결과를 그대로 후보로 쓰되 BM25로 리랭크
         for h in hits_raw:
-            h["score_bm25"] = _bm25_like_score(req.query, h["snippet"])
-            # bm25만 사용할 때는 bm25 점수로 정렬
-            h["score"] = h["score_bm25"]
+            h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
     elif search_type == "hybrid":
-        # 간단 결합: score = 0.7*vec + 0.3*bm25 (정규화)
-        if hits_raw:
-            vecs = [h["score_vec"] for h in hits_raw]
-            vmin, vmax = min(vecs), max(vecs)
+        if any("score_fused" in h for h in hits_raw):
             for h in hits_raw:
-                h["score_bm25"] = _bm25_like_score(req.query, h["snippet"])
-            bms = [h["score_bm25"] for h in hits_raw]
-            bmin, bmax = min(bms), max(bms)
-            def norm(x, lo, hi):
-                return 0.0 if hi == lo else (x - lo) / (hi - lo)
+                h["score"] = h.get("score_fused", 0.0)
+        else:
             for h in hits_raw:
-                nv = norm(h["score_vec"], vmin, vmax)
-                nb = norm(h["score_bm25"], bmin, bmax)
-                h["score"] = 0.7 * nv + 0.3 * nb
+                h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
-    elif search_type in {"semantic", "vector"}:
-        # 순수 벡터만
+    else:  # vector
         for h in hits_raw:
-            h["score"] = h["score_vec"]
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
-    else:
-        # fallback = semantic
-        for h in hits_raw:
-            h["score"] = h["score_vec"]
+            h["score"] = h.get("score_vec", 0.0)
         hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
 
     # 프롬프트 컨텍스트 생성

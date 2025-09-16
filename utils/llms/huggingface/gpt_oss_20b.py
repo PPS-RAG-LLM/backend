@@ -25,7 +25,7 @@ def load_gpt_oss_20b(model_dir):
     model = AutoModelForCausalLM.from_pretrained(
         model_dir, 
         device_map="auto",          # 모델 분산 처리
-        torch_dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype= torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         trust_remote_code=True,     # 모델 코드 신뢰
         low_cpu_mem_usage=True      # 메모리 효율성
         )
