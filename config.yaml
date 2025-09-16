@@ -13,16 +13,16 @@ server:
 
   # 쿠키 보안 설정
   cookie_name: "coreiq_session"
-  cookie_session_max_age: 8*60*60     # 8 hours
-  cookie_httponly: true               # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
-  cookie_secure: true                 # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
-  cookie_samesite: 'lax'              # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어 
-                                      # 필요 시 "strict" 또는 "none"
+  cookie_session_max_age: 8*60*60 # 8 hours
+  cookie_httponly: true # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
+  cookie_secure: true # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
+  cookie_samesite:
+    "lax" # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어
+    # 필요 시 "strict" 또는 "none"
 
 database:
   path: storage/pps_rag.db
-  schema_path: storage/schema.sql
-
+  schema_path: storage/db_models.py
 
 provider:
   openai:
@@ -43,7 +43,7 @@ default:
 workspace:
   chat_history: 20
   query_refusal_response: "There is no information about this topic."
-  top_n : 2
+  top_n: 2
   similarity_threshold: 0.25
   temperature: 0.7
 
@@ -52,7 +52,7 @@ vector_defaults:
   overlap: 50
   top_n: 2
   similarity_threshold: 0.25
-  
+
 user_documents:
   doc_info_dir: storage/documents/documents-info
   vector_cache_dir: storage/documents/vector-cache

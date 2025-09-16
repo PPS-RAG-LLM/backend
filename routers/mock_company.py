@@ -1,10 +1,7 @@
 # routers/mock_company.py 수정
-from fastapi import APIRouter, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel
-import requests, json, bcrypt
-from datetime import datetime, timedelta
-from typing import Dict, Any
+from fastapi import APIRouter, Form
+from fastapi.responses import HTMLResponse
+import bcrypt
 from utils import logger
 from errors import UnauthorizedError
 

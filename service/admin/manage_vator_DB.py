@@ -8,21 +8,30 @@ from __future__ import annotations
 import json
 import os
 import time
-import math
 import logging
-import sqlite3
+# sqlite3 제거
 import shutil
 import threading
 import asyncio
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 from collections import defaultdict, Counter
-from datetime import datetime, timezone
 
 import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
 from transformers import AutoModel, AutoTokenizer
+
+# ORM 추가 임포트
+from utils.database import get_session
+from storage.db_models import (
+    EmbeddingModel,
+    RagSettings,
+    SecurityLevelConfigTask,
+    SecurityLevelKeywordsTask,
+)
+# KST 시간 포맷 유틸
+from utils.time import to_kst_string
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +94,6 @@ class SinglePDFIngestRequest(BaseModel):
 # -------------------------------------------------
 # SQLite 유틸
 # -------------------------------------------------
-def _db_connect() -> sqlite3.Connection:
-    SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(str(SQLITE_DB_PATH))
-
 
 # ====== New helpers ======
 def save_raw_file(filename: str, content: bytes) -> str:
@@ -169,74 +174,65 @@ async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
     return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
     
 def _get_active_embedding_model_name() -> str:
-    conn = _db_connect()
-    try:
-        row = conn.execute(
-            "SELECT name FROM embedding_models WHERE is_active = 1 LIMIT 1"
-        ).fetchone()
-        if row:
-            return row[0]
-        else:
+    """활성화된 임베딩 모델 이름 반환 (없으면 예외)"""
+    with get_session() as session:
+        row = (
+            session.query(EmbeddingModel)
+            .filter(EmbeddingModel.is_active == 1)
+            .order_by(EmbeddingModel.activated_at.desc().nullslast())
+            .first()
+        )
+        if not row:
             raise ValueError("활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요.")
-    finally:
-        conn.close()
+        return str(row.name)
+
 
 def _set_active_embedding_model(name: str):
-    conn = _db_connect()
-    try:
-        with conn:
-            # 모델 존재 없으면 추가
-            conn.execute(
-                "INSERT OR IGNORE INTO embedding_models(name, is_active, activated_at) VALUES(?, 0, CURRENT_TIMESTAMP)",
-                (name,)
-            )
-            # 전부 비활성 → 해당 name만 활성
-            conn.execute("UPDATE embedding_models SET is_active = 0 WHERE is_active = 1")
-            conn.execute(
-                "UPDATE embedding_models SET is_active = 1, activated_at = CURRENT_TIMESTAMP WHERE name = ?",
-                (name,)
-            )
-    finally:
-        conn.close()
+    with get_session() as session:
+        # 존재하지 않으면 생성
+        model = session.query(EmbeddingModel).filter(EmbeddingModel.name == name).first()
+        if not model:
+            model = EmbeddingModel(name=name, is_active=0)
+            session.add(model)
+            session.flush()
+        # 모두 비활성 → 대상만 활성
+        session.query(EmbeddingModel).filter(EmbeddingModel.is_active == 1).update({"is_active": 0, "activated_at": None})
+        model.is_active = 1
+        model.activated_at = to_kst_string()
+        session.commit()
+
 
 def _get_vector_settings_row() -> dict:
-    conn = _db_connect()
-    try:
-        row = conn.execute(
-            "SELECT search_type, chunk_size, overlap FROM vector_settings WHERE id = 1"
-        ).fetchone()
+    """레거시 호환: rag_settings(싱글톤)에서 기본 청크 설정을 읽어온다."""
+    with get_session() as session:
+        row = session.query(RagSettings).filter(RagSettings.id == 1).first()
         if not row:
-            # 안전장치
             return {"search_type": "hybrid", "chunk_size": 512, "overlap": 64}
-        return {"search_type": row[0], "chunk_size": int(row[1]), "overlap": int(row[2])}
-    finally:
-        conn.close()
+        return {
+            "search_type": str(row.search_type or "hybrid"),
+            "chunk_size": int(row.chunk_size or 512),
+            "overlap": int(row.overlap or 64),
+        }
 
 
 def _get_rag_settings_row() -> dict:
-    """Unified RAG settings loader. Returns empty dict if table/row missing."""
-    conn = _db_connect()
-    try:
-        try:
-            row = conn.execute(
-                "SELECT embedding_key, search_type, chunk_size, overlap FROM rag_settings WHERE id=1"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            row = None
+    """RAG 전역 설정 로더. 없으면 빈 dict."""
+    with get_session() as session:
+        row = session.query(RagSettings).filter(RagSettings.id == 1).first()
         if not row:
             return {}
         return {
-            "embedding_key": row[0],
-            "search_type": row[1],
-            "chunk_size": int(row[2]),
-            "overlap": int(row[3]),
+            "embedding_key": row.embedding_key,
+            "search_type": row.search_type,
+            "chunk_size": int(row.chunk_size or 512),
+            "overlap": int(row.overlap or 64),
         }
-    finally:
-        conn.close()
+
 
 def _update_vector_settings(search_type: Optional[str] = None,
                             chunk_size: Optional[int] = None,
                             overlap: Optional[int] = None):
+    """레거시 API 호환: rag_settings(싱글톤) 업데이트"""
     cur = _get_vector_settings_row()
     new_search = (search_type or cur["search_type"]).lower()
     if new_search == "vector":
@@ -248,20 +244,16 @@ def _update_vector_settings(search_type: Optional[str] = None,
     if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
         raise ValueError("invalid chunk/overlap (chunk>0, 0 <= overlap < chunk)")
 
-    conn = _db_connect()
-    try:
-        with conn:
-            conn.execute("""
-                INSERT INTO vector_settings(id, search_type, chunk_size, overlap)
-                VALUES(1, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  search_type=excluded.search_type,
-                  chunk_size=excluded.chunk_size,
-                  overlap=excluded.overlap,
-                  updated_at=CURRENT_TIMESTAMP
-            """, (new_search, new_chunk, new_overlap))
-    finally:
-        conn.close()
+    with get_session() as session:
+        s = session.query(RagSettings).filter(RagSettings.id == 1).first()
+        if not s:
+            s = RagSettings(id=1)
+            session.add(s)
+        s.search_type = new_search
+        s.chunk_size = new_chunk
+        s.overlap = new_overlap
+        s.updated_at = to_kst_string()
+        session.commit()
 
 def _milvus_has_data() -> bool:
     client = _client()
@@ -279,45 +271,35 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
                         search_type: Optional[str] = None,
                         chunk_size: Optional[int] = None,
                         overlap: Optional[int] = None) -> Dict:
-    # Keep legacy behavior but sync rag_settings if present
+    # vector_settings 동작을 rag_settings로 통일
     _update_vector_settings(search_type=search_type, chunk_size=chunk_size, overlap=overlap)
-    conn = _db_connect()
-    try:
-        cur = get_vector_settings()
-        key = embed_model_key or cur.get("embeddingModel")
-        # if model change requested, enforce no data
-        if embed_model_key is not None:
-            if _milvus_has_data():
-                raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
-            _set_active_embedding_model(embed_model_key)
-            _invalidate_embedder_cache()
-            key = embed_model_key
 
-        st_in = (search_type or cur.get("searchType") or "hybrid").lower()
-        st_store = "vector" if st_in in {"vector", "semantic"} else st_in
-        cs = int(chunk_size or cur.get("chunkSize") or 512)
-        ov = int(overlap or cur.get("overlap") or 64)
+    # 모델 변경 처리 및 캐시 무효화
+    cur = get_vector_settings()
+    key = embed_model_key or cur.get("embeddingModel")
+    if embed_model_key is not None:
+        if _milvus_has_data():
+            raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
+        _set_active_embedding_model(embed_model_key)
+        _invalidate_embedder_cache()
+        key = embed_model_key
 
-        try:
-            with conn:
-                conn.execute(
-                    """
-                    INSERT INTO rag_settings(id, embedding_key, search_type, chunk_size, overlap)
-                    VALUES(1, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                      embedding_key=excluded.embedding_key,
-                      search_type=excluded.search_type,
-                      chunk_size=excluded.chunk_size,
-                      overlap=excluded.overlap,
-                      updated_at=CURRENT_TIMESTAMP
-                    """,
-                    (key, st_store, cs, ov)
-                )
-        except sqlite3.OperationalError:
-            # rag_settings 미존재 시 무시(마이그레이션 전)
-            pass
-    finally:
-        conn.close()
+    # rag_settings upsert (모델 키 포함)
+    with get_session() as session:
+        s = session.query(RagSettings).filter(RagSettings.id == 1).first()
+        if not s:
+            s = RagSettings(id=1)
+            session.add(s)
+        s.embedding_key = key
+        # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
+        if search_type is not None:
+            s.search_type = (search_type or "hybrid").lower().replace("vector", "semantic")
+        if chunk_size is not None:
+            s.chunk_size = int(chunk_size)
+        if overlap is not None:
+            s.overlap = int(overlap)
+        s.updated_at = to_kst_string()
+        session.commit()
 
     return get_vector_settings()
 
@@ -332,13 +314,12 @@ def get_vector_settings() -> Dict:
             "chunkSize": rag.get("chunk_size"),
             "overlap": rag.get("overlap"),
         }
-
-    # Fallback to legacy tables
+    # Fallback (기본값)
+    row = _get_vector_settings_row()
     try:
         model = _get_active_embedding_model_name()
-    except ValueError:
-        model = None  # 활성 모델이 없는 경우
-    row = _get_vector_settings_row()
+    except Exception:
+        model = None
     return {
         "embeddingModel": model,
         "searchType": row["search_type"],
@@ -401,55 +382,39 @@ def upsert_security_level_for_task(task_type: str, max_level: int, levels_raw: D
 
     levels_map = _normalize_levels(levels_raw, max_level)
 
-    conn = _db_connect()
-    try:
-        with conn:
-            # 1) UPDATE existing row
-            cur = conn.execute(
-                "UPDATE security_level_config_task SET max_level=?, updated_at=CURRENT_TIMESTAMP WHERE task_type=?",
-                (max_level, task_type),
-            )
-            # 2) If no row was updated, INSERT new row
-            if getattr(cur, "rowcount", 0) == 0:
-                conn.execute(
-                    "INSERT INTO security_level_config_task(task_type, max_level, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    (task_type, max_level),
-                )
-
-            # Replace keywords for this task_type
-            conn.execute("DELETE FROM security_level_keywords_task WHERE task_type = ?", (task_type,))
-            for lv, kws in levels_map.items():
-                for kw in kws:
-                    conn.execute(
-                        "INSERT INTO security_level_keywords_task(task_type, level, keyword) VALUES (?, ?, ?)",
-                        (task_type, int(lv), kw),
-                    )
+    with get_session() as session:
+        # upsert config
+        cfg = session.query(SecurityLevelConfigTask).filter(SecurityLevelConfigTask.task_type == task_type).first()
+        if not cfg:
+            cfg = SecurityLevelConfigTask(task_type=task_type, max_level=int(max_level))
+            session.add(cfg)
+        else:
+            cfg.max_level = int(max_level)
+            cfg.updated_at = to_kst_string()
+        # replace keywords
+        session.query(SecurityLevelKeywordsTask).filter(SecurityLevelKeywordsTask.task_type == task_type).delete()
+        for lv, kws in levels_map.items():
+            for kw in kws:
+                session.add(SecurityLevelKeywordsTask(task_type=task_type, level=int(lv), keyword=str(kw)))
+        session.commit()
         return get_security_level_rules_for_task(task_type)
-    finally:
-        conn.close()
 
 
 def get_security_level_rules_for_task(task_type: str) -> Dict:
-    conn = _db_connect()
-    try:
-        row = conn.execute(
-            "SELECT max_level FROM security_level_config_task WHERE task_type=?",
-            (task_type,)
-        ).fetchone()
-        max_level = int(row[0]) if row else 1
+    with get_session() as session:
+        cfg = session.query(SecurityLevelConfigTask).filter(SecurityLevelConfigTask.task_type == task_type).first()
+        max_level = int(cfg.max_level) if cfg else 1
         res: Dict[str, Any] = {"taskType": task_type, "maxLevel": max_level, "levels": {str(i): [] for i in range(1, max_level + 1)}}
-        for (lv, kw) in conn.execute(
-            """
-            SELECT level, keyword FROM security_level_keywords_task
-            WHERE task_type=? ORDER BY level ASC, keyword ASC
-            """,
-            (task_type,)
-        ).fetchall():
+        rows = (
+            session.query(SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword)
+            .filter(SecurityLevelKeywordsTask.task_type == task_type)
+            .order_by(SecurityLevelKeywordsTask.level.asc(), SecurityLevelKeywordsTask.keyword.asc())
+            .all()
+        )
+        for lv, kw in rows:
             key = str(int(lv))
             res["levels"].setdefault(key, []).append(str(kw))
         return res
-    finally:
-        conn.close()
 
 
 def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
@@ -460,70 +425,53 @@ def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
       "qna": {"maxLevel": 3, "levels": {"2": "@연구", "3": "@개인정보"}}
     }
     """
-    conn = _db_connect()
-    try:
-        with conn:
-            # 전체 삭제 후 재삽입(간결/명확)
-            conn.execute("DELETE FROM security_level_config_task")
-            conn.execute("DELETE FROM security_level_keywords_task")
+    with get_session() as session:
+        # 전체 삭제 후 재삽입(간결/명확)
+        session.query(SecurityLevelConfigTask).delete()
+        session.query(SecurityLevelKeywordsTask).delete()
+        session.flush()
 
-            for task in TASK_TYPES:
-                if task not in config:
-                    # 미제공 시 level=1 only
-                    conn.execute(
-                        "INSERT INTO security_level_config_task(task_type, max_level) VALUES(?, ?)",
-                        (task, 1)
-                    )
+        for task in TASK_TYPES:
+            entry = config.get(task) or {}
+            max_level = int(entry.get("maxLevel", 1))
+            session.add(SecurityLevelConfigTask(task_type=task, max_level=max(1, max_level)))
+            levels = entry.get("levels", {}) or {}
+            for lvl_str, at_str in levels.items():
+                try:
+                    lvl = int(str(lvl_str).strip().replace("level_", ""))
+                except Exception:
                     continue
-                entry = config[task] or {}
-                max_level = int(entry.get("maxLevel", 1))
-                conn.execute(
-                    "INSERT INTO security_level_config_task(task_type, max_level) VALUES(?, ?)",
-                    (task, max(1, max_level))
-                )
-                levels = entry.get("levels", {}) or {}
-                for lvl_str, at_str in levels.items():
-                    try:
-                        lvl = int(str(lvl_str).strip().replace("level_", ""))
-                    except Exception:
-                        continue
-                    if lvl <= 1 or lvl > max_level:
-                        # level 1 키워드는 금지(항상 접근 가능), 범위 밖 레벨은 무시
-                        continue
-                    for kw in _parse_at_string_to_keywords(str(at_str)):
-                        conn.execute(
-                            "INSERT INTO security_level_keywords_task(task_type, level, keyword) VALUES(?, ?, ?)",
-                            (task, lvl, kw)
-                        )
+                if lvl <= 1 or lvl > max_level:
+                    continue
+                for kw in _parse_at_string_to_keywords(str(at_str)):
+                    session.add(SecurityLevelKeywordsTask(task_type=task, level=int(lvl), keyword=str(kw)))
+        session.commit()
         return get_security_level_rules_all()
-    finally:
-        conn.close()
 
 
 def get_security_level_rules_all() -> Dict:
-    conn = _db_connect()
-    try:
+    with get_session() as session:
         # 기본 max_level=1
         max_map = {t: 1 for t in TASK_TYPES}
-        for task, max_level in conn.execute("SELECT task_type, max_level FROM security_level_config_task").fetchall():
+        for task, max_level in session.query(SecurityLevelConfigTask.task_type, SecurityLevelConfigTask.max_level).all():
             max_map[task] = int(max_level)
 
         res: Dict[str, Dict] = {}
         for task in TASK_TYPES:
             res[task] = {"maxLevel": max_map.get(task, 1), "levels": {str(i): [] for i in range(1, max_map.get(task,1)+1)}}
 
-        for task, level, kw in conn.execute(
-            "SELECT task_type, level, keyword FROM security_level_keywords_task ORDER BY task_type, level ASC, keyword ASC"
-        ).fetchall():
+        rows = (
+            session.query(SecurityLevelKeywordsTask.task_type, SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword)
+            .order_by(SecurityLevelKeywordsTask.task_type.asc(), SecurityLevelKeywordsTask.level.asc(), SecurityLevelKeywordsTask.keyword.asc())
+            .all()
+        )
+        for task, level, kw in rows:
             if task in res:
                 lv = str(int(level))
                 if lv not in res[task]["levels"]:
                     res[task]["levels"][lv] = []
                 res[task]["levels"][lv].append(str(kw))
-
         return res
-    finally:
-        conn.close()
 
 
 def _determine_level_for_task(text: str, task_rules: Dict) -> int:
@@ -1253,7 +1201,7 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optiona
         try:
             stat = txt_abs.stat()
             size = stat.st_size
-            indexed_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            indexed_at = to_kst_string()
         except FileNotFoundError:
             size = None
             indexed_at = None

@@ -1,20 +1,17 @@
 from transformers.generation.streamers import TextIteratorStreamer
-from transformers.generation.configuration_utils import GenerationConfig
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from threading import Thread  
 from config import config
-import time, torch, os
-from importlib import import_module
+import torch, os
 from utils import logger, free_torch_memory
 from functools import lru_cache
-from typing import List, Dict, Any, Generator
-from pathlib import Path
+from typing import List, Dict, Generator
 
 logger = logger(__name__)
 
 @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_gpt_oss_20b(model_dir): 
-    model_dir = Path("/home/work/CoreIQ/gpu_use/KT_sever/local_gpt_oss_20b")
+    
 
     # 2) 로컬 디렉터리 존재 확인
     if not os.path.isdir(model_dir):
@@ -39,7 +36,7 @@ def load_gpt_oss_20b(model_dir):
                                     # Triton 커널이 bf16 입력을 전제해(tl.static_assert(x_format == "bf16")) 
                                     # FP16로 로드하면 컴파일/런타임이 깨짐. 
         trust_remote_code=True,     # 모델 코드 신뢰
-        low_cpu_mem_usage=True,      # 메모리 효율성
+        low_cpu_mem_usage=True,     # 메모리 효율성
         local_files_only=True,
         )
     model.eval()

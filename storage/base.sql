@@ -522,3 +522,14 @@ VALUES (
         '2025-08-13 13:54:55',
         '2025-08-13 13:54:55'
     );
+
+INSERT INTO
+    "rag_settings"
+VALUES (
+        1,
+        'hybrid',
+        512,
+        64,
+        'embedding_qwen3_0_6b',
+        '2025-08-13 13:54:55'
+    )

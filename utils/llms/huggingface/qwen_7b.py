@@ -12,7 +12,7 @@ logger = logger(__name__)
 
 @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_qwen_instruct_7b(model_dir): 
-    model_dir = "/home/work/CoreIQ/gpu_use/KT_sever/Qwen_7b_instruct_1m"
+    
     logger.info(f"load qwen-7b-instruct from `{model_dir}`")
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, 

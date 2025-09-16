@@ -4,7 +4,7 @@ import torch, tiktoken, fitz, io, json, uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import UploadFile
-from utils import logger, now_kst, free_torch_memory
+from utils import logger, free_torch_memory, now_kst
 from config import config
 from repository.documents import (
     insert_workspace_document,
@@ -12,6 +12,7 @@ from repository.documents import (
 )
 from repository.users.workspace import get_workspace_id_by_slug_for_user
 from config import config
+from utils.time import now_kst
 
 logger = logger(__name__)
 
@@ -252,7 +253,7 @@ async def upload_document(
         for slug in slugs:
             workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
             if not workspace_id:
-                logger.warning(f"workspace slug not found: {slug}")
+                logger.info(f"workspace slug not found save only temporarily")
                 continue
             if inserted_workspace:
                 logger.info(f"doc_id already linked to a workspace, skip additional link : {slug}")

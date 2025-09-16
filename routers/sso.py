@@ -1,14 +1,13 @@
 # routers/sso.py (완전 버전)
 from fastapi import APIRouter, Response, Cookie
 from pydantic import BaseModel
-from utils import get_db, now_kst, now_kst_string
-import secrets, hashlib
-from datetime import datetime, timedelta
+from utils import get_db, now_kst_string
 from typing import Optional, Dict, Any
 from errors import SessionNotFound, NotFoundError, UnauthorizedError
 from service.users.session import create_session
 from utils import logger
 from config import config
+from utils.time import now_kst
 
 logger = logger(__name__)
 
@@ -83,7 +82,7 @@ def list_active_sessions():
     """활성 세션 목록 (관리용)"""
     from repository.users.session import list_all_sessions_from_db, delete_session_from_db
     sessions = list_all_sessions_from_db()
-    current_kst = now_kst_string()
+    current_kst = now_kst()
     active = []
     expired = []
     for s in sessions:
