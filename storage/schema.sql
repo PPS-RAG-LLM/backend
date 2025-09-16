@@ -408,18 +408,6 @@ WHERE
 -- INSERT OR IGNORE INTO embedding_models(name, provider, model_path, is_active, activated_at)
 -- VALUES ('qwen3_0_6b', 'local', NULL, 1, CURRENT_TIMESTAMP);
 
--- =========================
--- Vector settings (검색/청크)
--- =========================
-CREATE TABLE IF NOT EXISTS vector_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    search_type TEXT NOT NULL DEFAULT 'hybrid' CHECK (
-        search_type IN ('hybrid', 'semantic', 'bm25')
-    ),
-    chunk_size INTEGER NOT NULL DEFAULT 512,
-    overlap INTEGER NOT NULL DEFAULT 64,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 
 -- =========================
 -- Security level rules (작업유형별)
@@ -447,7 +435,7 @@ CREATE TABLE IF NOT EXISTS rag_settings (
   search_type   TEXT NOT NULL DEFAULT 'hybrid' CHECK (search_type IN ('hybrid','bm25','vector')),
   chunk_size    INTEGER NOT NULL DEFAULT 512 CHECK (chunk_size > 0),
   overlap       INTEGER NOT NULL DEFAULT 64 CHECK (overlap >= 0),
-  embedding_key TEXT NOT NULL DEFAULT 'embedding_bge_m3',
+  embedding_key TEXT NOT NULL DEFAULT 'embedding_qwen3_0_6b',
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

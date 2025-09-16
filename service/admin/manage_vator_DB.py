@@ -59,12 +59,12 @@ _CURRENT_OVERLAP = 64
 # 인제스트 파라미터 설정
 # -------------------------------------------------
 def set_ingest_params(chunk_size: int | None = None, overlap: int | None = None):
-    # 이제 전역 대신 vector_settings에 저장
-    _update_vector_settings(chunk_size=chunk_size, overlap=overlap)
+    # rag_settings 단일 소스로 저장
+    set_vector_settings(chunk_size=chunk_size, overlap=overlap)
 
 def get_ingest_params():
-    row = _get_vector_settings_row()
-    return {"chunkSize": row["chunk_size"], "overlap": row["overlap"]}
+    row = get_vector_settings()
+    return {"chunkSize": row["chunkSize"], "overlap": row["overlap"]}
 # -------------------------------------------------
 # Pydantic 스키마
 # -------------------------------------------------
@@ -199,18 +199,7 @@ def _set_active_embedding_model(name: str):
     finally:
         conn.close()
 
-def _get_vector_settings_row() -> dict:
-    conn = _db_connect()
-    try:
-        row = conn.execute(
-            "SELECT search_type, chunk_size, overlap FROM vector_settings WHERE id = 1"
-        ).fetchone()
-        if not row:
-            # 안전장치
-            return {"search_type": "hybrid", "chunk_size": 512, "overlap": 64}
-        return {"search_type": row[0], "chunk_size": int(row[1]), "overlap": int(row[2])}
-    finally:
-        conn.close()
+# vector_settings 레거시 경로 제거: rag_settings만 사용
 
 
 def _get_rag_settings_row() -> dict:
@@ -234,34 +223,7 @@ def _get_rag_settings_row() -> dict:
     finally:
         conn.close()
 
-def _update_vector_settings(search_type: Optional[str] = None,
-                            chunk_size: Optional[int] = None,
-                            overlap: Optional[int] = None):
-    cur = _get_vector_settings_row()
-    new_search = (search_type or cur["search_type"]).lower()
-    if new_search == "vector":
-        new_search = "semantic"
-    if new_search not in {"hybrid", "semantic", "bm25"}:
-        raise ValueError("unsupported searchType; allowed: 'hybrid','semantic','bm25' (or 'vector' alias)")
-    new_chunk = int(chunk_size if chunk_size is not None else cur["chunk_size"])
-    new_overlap = int(overlap if overlap is not None else cur["overlap"])
-    if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
-        raise ValueError("invalid chunk/overlap (chunk>0, 0 <= overlap < chunk)")
-
-    conn = _db_connect()
-    try:
-        with conn:
-            conn.execute("""
-                INSERT INTO vector_settings(id, search_type, chunk_size, overlap)
-                VALUES(1, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  search_type=excluded.search_type,
-                  chunk_size=excluded.chunk_size,
-                  overlap=excluded.overlap,
-                  updated_at=CURRENT_TIMESTAMP
-            """, (new_search, new_chunk, new_overlap))
-    finally:
-        conn.close()
+# vector_settings 업데이트 제거
 
 def _milvus_has_data() -> bool:
     client = _client()
@@ -279,43 +241,50 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
                         search_type: Optional[str] = None,
                         chunk_size: Optional[int] = None,
                         overlap: Optional[int] = None) -> Dict:
-    # Keep legacy behavior but sync rag_settings if present
-    _update_vector_settings(search_type=search_type, chunk_size=chunk_size, overlap=overlap)
+    """
+    rag_settings 단일 소스로 설정 저장.
+    - 임베딩 모델 변경 시 기존 데이터 존재하면 차단, 활성 모델 갱신 및 캐시 무효화
+    - search_type/청크/오버랩은 rag_settings에만 반영
+    """
     conn = _db_connect()
     try:
         cur = get_vector_settings()
-        key = embed_model_key or cur.get("embeddingModel")
-        # if model change requested, enforce no data
+        key_now = cur.get("embeddingModel")
+        st_now = (cur.get("searchType") or "hybrid").lower()
+        cs_now = int(cur.get("chunkSize") or 512)
+        ov_now = int(cur.get("overlap") or 64)
+
+        new_key = embed_model_key or key_now
+        new_st = (search_type or st_now).lower()
+        # 'vector'는 저장 허용(검색 로직에서 semantic과 동일 처리)
+        if new_st not in {"hybrid", "bm25", "vector", "semantic"}:
+            raise ValueError("unsupported searchType; allowed: 'hybrid','bm25','vector','semantic'")
+
+        new_cs = int(chunk_size if chunk_size is not None else cs_now)
+        new_ov = int(overlap if overlap is not None else ov_now)
+        if new_cs <= 0 or new_ov < 0 or new_ov >= new_cs:
+            raise ValueError("invalid chunk/overlap (chunk>0, 0 <= overlap < chunk)")
+
         if embed_model_key is not None:
             if _milvus_has_data():
                 raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
             _set_active_embedding_model(embed_model_key)
             _invalidate_embedder_cache()
-            key = embed_model_key
 
-        st_in = (search_type or cur.get("searchType") or "hybrid").lower()
-        st_store = "vector" if st_in in {"vector", "semantic"} else st_in
-        cs = int(chunk_size or cur.get("chunkSize") or 512)
-        ov = int(overlap or cur.get("overlap") or 64)
-
-        try:
-            with conn:
-                conn.execute(
-                    """
-                    INSERT INTO rag_settings(id, embedding_key, search_type, chunk_size, overlap)
-                    VALUES(1, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                      embedding_key=excluded.embedding_key,
-                      search_type=excluded.search_type,
-                      chunk_size=excluded.chunk_size,
-                      overlap=excluded.overlap,
-                      updated_at=CURRENT_TIMESTAMP
-                    """,
-                    (key, st_store, cs, ov)
-                )
-        except sqlite3.OperationalError:
-            # rag_settings 미존재 시 무시(마이그레이션 전)
-            pass
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO rag_settings(id, embedding_key, search_type, chunk_size, overlap)
+                VALUES(1, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  embedding_key=excluded.embedding_key,
+                  search_type=excluded.search_type,
+                  chunk_size=excluded.chunk_size,
+                  overlap=excluded.overlap,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (new_key, new_st, new_cs, new_ov)
+            )
     finally:
         conn.close()
 
@@ -323,27 +292,24 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
 
 
 def get_vector_settings() -> Dict:
-    # Prefer unified rag_settings if present
     rag = _get_rag_settings_row()
-    if rag:
+    if not rag:
+        # 안전 기본값
+        try:
+            model = _get_active_embedding_model_name()
+        except ValueError:
+            model = None
         return {
-            "embeddingModel": rag.get("embedding_key"),
-            "searchType": rag.get("search_type"),
-            "chunkSize": rag.get("chunk_size"),
-            "overlap": rag.get("overlap"),
+            "embeddingModel": model,
+            "searchType": "hybrid",
+            "chunkSize": 512,
+            "overlap": 64,
         }
-
-    # Fallback to legacy tables
-    try:
-        model = _get_active_embedding_model_name()
-    except ValueError:
-        model = None  # 활성 모델이 없는 경우
-    row = _get_vector_settings_row()
     return {
-        "embeddingModel": model,
-        "searchType": row["search_type"],
-        "chunkSize": row["chunk_size"],
-        "overlap": row["overlap"],
+        "embeddingModel": rag.get("embedding_key"),
+        "searchType": rag.get("search_type"),
+        "chunkSize": rag.get("chunk_size"),
+        "overlap": rag.get("overlap"),
     }
 
 
@@ -796,10 +762,10 @@ def _parse_doc_version(stem: str) -> Tuple[str, int]:
 #   - 작업유형별로 동일 청크를 각각 저장(task_type, security_level 분리)
 # -------------------------------------------------
 async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None = None, overlap: int | None = None, target_tasks: list[str] | None = None):
-    # vector_settings 우선
-    params = _get_vector_settings_row()
-    MAX_TOKENS = int(params["chunk_size"])
-    OVERLAP = int(params["overlap"])
+    # rag_settings 단일 소스
+    s = get_vector_settings()
+    MAX_TOKENS = int(s["chunkSize"])
+    OVERLAP = int(s["overlap"])
 
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 PDF 추출을 수행하세요."}
@@ -946,7 +912,8 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
-    MAX_TOKENS, OVERLAP = 512, 64
+    s = get_vector_settings()
+    MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split(); chunks: List[str] = []
         start = 0
