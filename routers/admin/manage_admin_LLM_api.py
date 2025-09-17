@@ -91,7 +91,7 @@ def get_prompts(
 @router.post("/prompts", summary="프롬프트 생성(카테고리/서브테스크별)")
 def create_prompt_route(
     category: str = Query(..., description="doc_gen | summary | qa"),
-    subtask: str | None = Query(None, description="doc_gen 전용"),
+    subtask: str | None = Query(None, description="doc_gen 전용: report | travel_plan | meeting_minutes 등"),
     body: CreatePromptBody = ...,
 ):
     return create_prompt(category, subtask, body)

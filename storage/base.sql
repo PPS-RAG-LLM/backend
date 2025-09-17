@@ -105,8 +105,8 @@ VALUES (
         'huggingface',
         'gpt_oss_20b',
         0,
-        './service/storage/model/gpt-oss-20b',
-        'qa',
+        './service/storage/model/gpt_oss_20b',
+        'all',
         '',
         'base',
         0,
@@ -123,7 +123,7 @@ VALUES (
         'qwen_2.5_7b_instruct',
         0,
         './service/storage/model/Qwen2.5-7B-Instruct-1M',
-        'qa',
+        'all',
         '',
         'base',
         1,
@@ -131,6 +131,7 @@ VALUES (
         '2025-09-03 07:52:05',
         '2025-09-03 07:52:05'
     );
+
 
 INSERT INTO
     "system_prompt_template"

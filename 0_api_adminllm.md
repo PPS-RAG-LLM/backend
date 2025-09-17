@@ -47,24 +47,6 @@
   "tuningType": "QLORA"
 }
 
-baseModelName: str
-saveModelName: str
-systemPrompt: str
-batchSize: int = 4
-epochs: int = 3
-learningRate: float = 2e-4
-overfittingPrevention: bool = True
-trainSetFile: str
-gradientAccumulationSteps: int = 8
-quantizationBits: Optional[int] = Field(
-    default=None,
-    description="QLORA 전용: 양자화 비트 선택 (4 또는 8)",
-)
-tuningType: Optional[str] = Field(
-    default="QLORA",
-    description="파인튜닝 방식: LORA | QLORA | FULL",
-    pattern="^(LORA|QLORA|FULL)$",
-)
 {
   "baseModelName": "gpt-oss-20b",
   "saveModelName": "gpt-oss-20b-qa",
@@ -80,9 +62,11 @@ tuningType: Optional[str] = Field(
 =====================================================================================
 POST	/v1/admin/llm/settings	TOPK 조정 – RAG 반환 문서 수 변경	
 📤 요청 본문
-application/json
 {
-  "topK": 5
+  "embeddingModel": "string",
+  "searchType": "hybrid",
+  "chunkSize": 128,
+  "overlap": 64
 }
 
 📨 응답
