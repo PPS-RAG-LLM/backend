@@ -9,6 +9,7 @@ import json
 import os
 import time
 import logging
+
 # sqlite3 제거
 import shutil
 import threading
@@ -30,8 +31,9 @@ from storage.db_models import (
     SecurityLevelConfigTask,
     SecurityLevelKeywordsTask,
 )
+
 # KST 시간 포맷 유틸
-from utils.time import to_kst_string
+from utils.time import now_kst, now_kst_string
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +41,11 @@ logger = logging.getLogger(__name__)
 # 경로 상수
 # -------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
-PROJECT_ROOT = BASE_DIR.parent.parent       # .../backend
+PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
 STORAGE_DIR = PROJECT_ROOT / "storage"
 USER_DATA_ROOT = STORAGE_DIR / "user_data"
 RAW_DATA_DIR = USER_DATA_ROOT / "row_data"
-LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"   # 유지(폴더 구조 호환)
+LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"  # 유지(폴더 구조 호환)
 RESOURCE_DIR = (BASE_DIR / "resources").resolve()
 EXTRACTED_TEXT_DIR = RESOURCE_DIR / "extracted_texts"
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
@@ -64,6 +66,7 @@ _CURRENT_SEARCH_TYPE = "hybrid"
 _CURRENT_CHUNK_SIZE = 512
 _CURRENT_OVERLAP = 64
 
+
 # -------------------------------------------------
 # 인제스트 파라미터 설정
 # -------------------------------------------------
@@ -71,9 +74,12 @@ def set_ingest_params(chunk_size: int | None = None, overlap: int | None = None)
     # 이제 전역 대신 vector_settings에 저장
     _update_vector_settings(chunk_size=chunk_size, overlap=overlap)
 
+
 def get_ingest_params():
     row = _get_vector_settings_row()
     return {"chunkSize": row["chunk_size"], "overlap": row["overlap"]}
+
+
 # -------------------------------------------------
 # Pydantic 스키마
 # -------------------------------------------------
@@ -94,6 +100,7 @@ class SinglePDFIngestRequest(BaseModel):
 # -------------------------------------------------
 # SQLite 유틸
 # -------------------------------------------------
+
 
 # ====== New helpers ======
 def save_raw_file(filename: str, content: bytes) -> str:
@@ -120,16 +127,19 @@ def save_raw_to_row_data(f):
     except Exception:
         return dst.name
 
+
 # === Embedding cache(singleton) ===
-_EMBED_CACHE: dict[str, tuple[any, any, any]] = {}   # key -> (tok, model, device)
+_EMBED_CACHE: dict[str, tuple[any, any, any]] = {}  # key -> (tok, model, device)
 _EMBED_ACTIVE_KEY: Optional[str] = None
 _EMBED_LOCK = threading.Lock()
+
 
 def _invalidate_embedder_cache():
     global _EMBED_CACHE, _EMBED_ACTIVE_KEY
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
         _EMBED_ACTIVE_KEY = None
+
 
 def _get_or_load_embedder(model_key: str, preload: bool = False):
     """
@@ -139,7 +149,9 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
     """
     global _EMBED_CACHE, _EMBED_ACTIVE_KEY
     if not model_key:
-        raise ValueError("활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요.")
+        raise ValueError(
+            "활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요."
+        )
 
     with _EMBED_LOCK:
         if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
@@ -150,6 +162,7 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
         _EMBED_CACHE[model_key] = (tok, model, device)
         _EMBED_ACTIVE_KEY = model_key
         return _EMBED_CACHE[model_key]
+
 
 def warmup_active_embedder(logger_func=print):
     """
@@ -164,6 +177,7 @@ def warmup_active_embedder(logger_func=print):
     except Exception as e:
         logger_func(f"[warmup] 로딩 실패(지연 로딩으로 복구 예정): {e}")
 
+
 async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
     """
     비동기 래퍼: blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
@@ -172,7 +186,8 @@ async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
     loop = asyncio.get_running_loop()
     # blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
     return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
-    
+
+
 def _get_active_embedding_model_name() -> str:
     """활성화된 임베딩 모델 이름 반환 (없으면 예외)"""
     with get_session() as session:
@@ -183,22 +198,28 @@ def _get_active_embedding_model_name() -> str:
             .first()
         )
         if not row:
-            raise ValueError("활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요.")
+            raise ValueError(
+                "활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요."
+            )
         return str(row.name)
 
 
 def _set_active_embedding_model(name: str):
     with get_session() as session:
         # 존재하지 않으면 생성
-        model = session.query(EmbeddingModel).filter(EmbeddingModel.name == name).first()
+        model = (
+            session.query(EmbeddingModel).filter(EmbeddingModel.name == name).first()
+        )
         if not model:
             model = EmbeddingModel(name=name, is_active=0)
             session.add(model)
             session.flush()
         # 모두 비활성 → 대상만 활성
-        session.query(EmbeddingModel).filter(EmbeddingModel.is_active == 1).update({"is_active": 0, "activated_at": None})
+        session.query(EmbeddingModel).filter(EmbeddingModel.is_active == 1).update(
+            {"is_active": 0, "activated_at": None}
+        )
         model.is_active = 1
-        model.activated_at = to_kst_string()
+        model.activated_at = now_kst()
         session.commit()
 
 
@@ -229,16 +250,20 @@ def _get_rag_settings_row() -> dict:
         }
 
 
-def _update_vector_settings(search_type: Optional[str] = None,
-                            chunk_size: Optional[int] = None,
-                            overlap: Optional[int] = None):
+def _update_vector_settings(
+    search_type: Optional[str] = None,
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
+):
     """레거시 API 호환: rag_settings(싱글톤) 업데이트"""
     cur = _get_vector_settings_row()
     new_search = (search_type or cur["search_type"]).lower()
     if new_search == "vector":
         new_search = "semantic"
     if new_search not in {"hybrid", "semantic", "bm25"}:
-        raise ValueError("unsupported searchType; allowed: 'hybrid','semantic','bm25' (or 'vector' alias)")
+        raise ValueError(
+            "unsupported searchType; allowed: 'hybrid','semantic','bm25' (or 'vector' alias)"
+        )
     new_chunk = int(chunk_size if chunk_size is not None else cur["chunk_size"])
     new_overlap = int(overlap if overlap is not None else cur["overlap"])
     if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
@@ -252,34 +277,44 @@ def _update_vector_settings(search_type: Optional[str] = None,
         s.search_type = new_search
         s.chunk_size = new_chunk
         s.overlap = new_overlap
-        s.updated_at = to_kst_string()
+        s.updated_at = now_kst()
         session.commit()
+
 
 def _milvus_has_data() -> bool:
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
         return False
     try:
-        rows = client.query(collection_name=COLLECTION_NAME, output_fields=["pk"], limit=1)
+        rows = client.query(
+            collection_name=COLLECTION_NAME, output_fields=["pk"], limit=1
+        )
         return len(rows) > 0
     except Exception:
         # 인덱스/로드 전이라면 컬렉션 있게만 체크
         return True
 
+
 # ---------------- Vector Settings ----------------
-def set_vector_settings(embed_model_key: Optional[str] = None,
-                        search_type: Optional[str] = None,
-                        chunk_size: Optional[int] = None,
-                        overlap: Optional[int] = None) -> Dict:
+def set_vector_settings(
+    embed_model_key: Optional[str] = None,
+    search_type: Optional[str] = None,
+    chunk_size: Optional[int] = None,
+    overlap: Optional[int] = None,
+) -> Dict:
     # vector_settings 동작을 rag_settings로 통일
-    _update_vector_settings(search_type=search_type, chunk_size=chunk_size, overlap=overlap)
+    _update_vector_settings(
+        search_type=search_type, chunk_size=chunk_size, overlap=overlap
+    )
 
     # 모델 변경 처리 및 캐시 무효화
     cur = get_vector_settings()
     key = embed_model_key or cur.get("embeddingModel")
     if embed_model_key is not None:
         if _milvus_has_data():
-            raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
+            raise RuntimeError(
+                "Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요."
+            )
         _set_active_embedding_model(embed_model_key)
         _invalidate_embedder_cache()
         key = embed_model_key
@@ -293,12 +328,14 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         s.embedding_key = key
         # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
         if search_type is not None:
-            s.search_type = (search_type or "hybrid").lower().replace("vector", "semantic")
+            s.search_type = (
+                (search_type or "hybrid").lower().replace("vector", "semantic")
+            )
         if chunk_size is not None:
             s.chunk_size = int(chunk_size)
         if overlap is not None:
             s.overlap = int(overlap)
-        s.updated_at = to_kst_string()
+        s.updated_at = now_kst()
         session.commit()
 
     return get_vector_settings()
@@ -359,7 +396,9 @@ def _normalize_keywords(val: Any) -> List[str]:
     return out
 
 
-def _normalize_levels(levels_raw: Dict[str, Any], max_level: int) -> Dict[int, List[str]]:
+def _normalize_levels(
+    levels_raw: Dict[str, Any], max_level: int
+) -> Dict[int, List[str]]:
     norm: Dict[int, List[str]] = {}
     for k, v in (levels_raw or {}).items():
         try:
@@ -374,7 +413,9 @@ def _normalize_levels(levels_raw: Dict[str, Any], max_level: int) -> Dict[int, L
     return norm
 
 
-def upsert_security_level_for_task(task_type: str, max_level: int, levels_raw: Dict[str, Any]) -> Dict:
+def upsert_security_level_for_task(
+    task_type: str, max_level: int, levels_raw: Dict[str, Any]
+) -> Dict:
     if task_type not in TASK_TYPES:
         raise ValueError(f"invalid task_type: {task_type}")
     if max_level < 1:
@@ -384,31 +425,54 @@ def upsert_security_level_for_task(task_type: str, max_level: int, levels_raw: D
 
     with get_session() as session:
         # upsert config
-        cfg = session.query(SecurityLevelConfigTask).filter(SecurityLevelConfigTask.task_type == task_type).first()
+        cfg = (
+            session.query(SecurityLevelConfigTask)
+            .filter(SecurityLevelConfigTask.task_type == task_type)
+            .first()
+        )
         if not cfg:
             cfg = SecurityLevelConfigTask(task_type=task_type, max_level=int(max_level))
             session.add(cfg)
         else:
             cfg.max_level = int(max_level)
-            cfg.updated_at = to_kst_string()
+            cfg.updated_at = now_kst()
         # replace keywords
-        session.query(SecurityLevelKeywordsTask).filter(SecurityLevelKeywordsTask.task_type == task_type).delete()
+        session.query(SecurityLevelKeywordsTask).filter(
+            SecurityLevelKeywordsTask.task_type == task_type
+        ).delete()
         for lv, kws in levels_map.items():
             for kw in kws:
-                session.add(SecurityLevelKeywordsTask(task_type=task_type, level=int(lv), keyword=str(kw)))
+                session.add(
+                    SecurityLevelKeywordsTask(
+                        task_type=task_type, level=int(lv), keyword=str(kw)
+                    )
+                )
         session.commit()
         return get_security_level_rules_for_task(task_type)
 
 
 def get_security_level_rules_for_task(task_type: str) -> Dict:
     with get_session() as session:
-        cfg = session.query(SecurityLevelConfigTask).filter(SecurityLevelConfigTask.task_type == task_type).first()
+        cfg = (
+            session.query(SecurityLevelConfigTask)
+            .filter(SecurityLevelConfigTask.task_type == task_type)
+            .first()
+        )
         max_level = int(cfg.max_level) if cfg else 1
-        res: Dict[str, Any] = {"taskType": task_type, "maxLevel": max_level, "levels": {str(i): [] for i in range(1, max_level + 1)}}
+        res: Dict[str, Any] = {
+            "taskType": task_type,
+            "maxLevel": max_level,
+            "levels": {str(i): [] for i in range(1, max_level + 1)},
+        }
         rows = (
-            session.query(SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword)
+            session.query(
+                SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword
+            )
             .filter(SecurityLevelKeywordsTask.task_type == task_type)
-            .order_by(SecurityLevelKeywordsTask.level.asc(), SecurityLevelKeywordsTask.keyword.asc())
+            .order_by(
+                SecurityLevelKeywordsTask.level.asc(),
+                SecurityLevelKeywordsTask.keyword.asc(),
+            )
             .all()
         )
         for lv, kw in rows:
@@ -434,7 +498,9 @@ def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
         for task in TASK_TYPES:
             entry = config.get(task) or {}
             max_level = int(entry.get("maxLevel", 1))
-            session.add(SecurityLevelConfigTask(task_type=task, max_level=max(1, max_level)))
+            session.add(
+                SecurityLevelConfigTask(task_type=task, max_level=max(1, max_level))
+            )
             levels = entry.get("levels", {}) or {}
             for lvl_str, at_str in levels.items():
                 try:
@@ -444,7 +510,11 @@ def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
                 if lvl <= 1 or lvl > max_level:
                     continue
                 for kw in _parse_at_string_to_keywords(str(at_str)):
-                    session.add(SecurityLevelKeywordsTask(task_type=task, level=int(lvl), keyword=str(kw)))
+                    session.add(
+                        SecurityLevelKeywordsTask(
+                            task_type=task, level=int(lvl), keyword=str(kw)
+                        )
+                    )
         session.commit()
         return get_security_level_rules_all()
 
@@ -453,16 +523,29 @@ def get_security_level_rules_all() -> Dict:
     with get_session() as session:
         # 기본 max_level=1
         max_map = {t: 1 for t in TASK_TYPES}
-        for task, max_level in session.query(SecurityLevelConfigTask.task_type, SecurityLevelConfigTask.max_level).all():
+        for task, max_level in session.query(
+            SecurityLevelConfigTask.task_type, SecurityLevelConfigTask.max_level
+        ).all():
             max_map[task] = int(max_level)
 
         res: Dict[str, Dict] = {}
         for task in TASK_TYPES:
-            res[task] = {"maxLevel": max_map.get(task, 1), "levels": {str(i): [] for i in range(1, max_map.get(task,1)+1)}}
+            res[task] = {
+                "maxLevel": max_map.get(task, 1),
+                "levels": {str(i): [] for i in range(1, max_map.get(task, 1) + 1)},
+            }
 
         rows = (
-            session.query(SecurityLevelKeywordsTask.task_type, SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword)
-            .order_by(SecurityLevelKeywordsTask.task_type.asc(), SecurityLevelKeywordsTask.level.asc(), SecurityLevelKeywordsTask.keyword.asc())
+            session.query(
+                SecurityLevelKeywordsTask.task_type,
+                SecurityLevelKeywordsTask.level,
+                SecurityLevelKeywordsTask.keyword,
+            )
+            .order_by(
+                SecurityLevelKeywordsTask.task_type.asc(),
+                SecurityLevelKeywordsTask.level.asc(),
+                SecurityLevelKeywordsTask.keyword.asc(),
+            )
             .all()
         )
         for task, level, kw in rows:
@@ -502,7 +585,7 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
         nm = p.name.lower()
         res = [nm]
         if nm.startswith("embedding_"):
-            res.append(nm[len("embedding_"):])
+            res.append(nm[len("embedding_") :])
         return res
 
     # 우선 exact/alias
@@ -524,23 +607,35 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
 def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, model_dir = _resolve_model_input(model_key)
-    need_files = [model_dir/"tokenizer_config.json", model_dir/"tokenizer.json", model_dir/"config.json"]
-    
+    need_files = [
+        model_dir / "tokenizer_config.json",
+        model_dir / "tokenizer.json",
+        model_dir / "config.json",
+    ]
+
     # 모델 파일 누락 빠른 실패
     missing_files = [f for f in need_files if not f.exists()]
     if missing_files:
         logger.error(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-        logger.error(f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}")
+        logger.error(
+            f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}"
+        )
         raise FileNotFoundError(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-    
+
     logger.info(f"[Embedding Model] 모델 로딩 시작: {model_key} from {model_dir}")
-    tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True, local_files_only=True)
-    model = (AutoModel.from_pretrained(
-        str(model_dir),
-        trust_remote_code=True,
-        local_files_only=True,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    ).to(device).eval())
+    tok = AutoTokenizer.from_pretrained(
+        str(model_dir), trust_remote_code=True, local_files_only=True
+    )
+    model = (
+        AutoModel.from_pretrained(
+            str(model_dir),
+            trust_remote_code=True,
+            local_files_only=True,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        )
+        .to(device)
+        .eval()
+    )
     logger.info(f"[Embedding Model] 모델 로딩 완료: {model_key}")
     return tok, model, device
 
@@ -554,10 +649,18 @@ def _mean_pooling(outputs, mask):
 
 
 def _embed_text(tok, model, device, text: str, max_len: int = 512):
-    inputs = tok(text, truncation=True, padding="longest", max_length=max_len, return_tensors="pt").to(device)
+    inputs = tok(
+        text,
+        truncation=True,
+        padding="longest",
+        max_length=max_len,
+        return_tensors="pt",
+    ).to(device)
     with torch.no_grad():
         outs = model(**inputs)
-    vec = _mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
+    vec = (
+        _mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
+    )
     return vec
 
 
@@ -571,17 +674,23 @@ def _client() -> MilvusClient:
     return MilvusClient(**kwargs)
 
 
-def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str = "IP"):
+def _ensure_collection_and_index(
+    client: MilvusClient, emb_dim: int, metric: str = "IP"
+):
     logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 시작: {COLLECTION_NAME}")
     cols = client.list_collections()
     if COLLECTION_NAME not in cols:
         logger.info(f"[Milvus] 컬렉션 생성: {COLLECTION_NAME}")
-        schema = client.create_schema(auto_id=True, enable_dynamic_field=False, description="PDF chunks (pro)")
+        schema = client.create_schema(
+            auto_id=True, enable_dynamic_field=False, description="PDF chunks (pro)"
+        )
         schema.add_field("pk", DataType.INT64, is_primary=True)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=int(emb_dim))
         schema.add_field("path", DataType.VARCHAR, max_length=500)
         schema.add_field("chunk_idx", DataType.INT64)
-        schema.add_field("task_type", DataType.VARCHAR, max_length=16)  # 'doc_gen'|'summary'|'qna'
+        schema.add_field(
+            "task_type", DataType.VARCHAR, max_length=16
+        )  # 'doc_gen'|'summary'|'qna'
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
@@ -589,11 +698,15 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         logger.info(f"[Milvus] 컬렉션 생성 완료: {COLLECTION_NAME}")
 
     try:
-        idx_list = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
+        idx_list = client.list_indexes(
+            collection_name=COLLECTION_NAME, field_name="embedding"
+        )
     except Exception:
         idx_list = []
     if not idx_list:
-        logger.info(f"[Milvus] 인덱스 생성 시작: {COLLECTION_NAME} (최대 180초 소요 가능)")
+        logger.info(
+            f"[Milvus] 인덱스 생성 시작: {COLLECTION_NAME} (최대 180초 소요 가능)"
+        )
         ip = client.prepare_index_params()
         ip.add_index("embedding", "FLAT", metric_type=metric, params={})
         client.create_index(COLLECTION_NAME, ip, timeout=180.0, sync=True)
@@ -604,7 +717,7 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         logger.info(f"[Milvus] 컬렉션 로드 완료: {COLLECTION_NAME}")
     except Exception:
         logger.warning(f"[Milvus] 컬렉션 로드 실패 (이미 로드됨): {COLLECTION_NAME}")
-    
+
     logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 완료: {COLLECTION_NAME}")
 
 
@@ -647,7 +760,7 @@ async def extract_pdfs():
         return base, date_num
 
     pdf_paths = list(RAW_DATA_DIR.rglob("*.pdf"))
-    grouped: Dict[str, List[Tuple[Path,int]]] = defaultdict(list)
+    grouped: Dict[str, List[Tuple[Path, int]]] = defaultdict(list)
     for p in pdf_paths:
         base, date_num = _extract_base_and_date(p)
         grouped[base].append((p, date_num))
@@ -657,7 +770,7 @@ async def extract_pdfs():
         lst_sorted = sorted(lst, key=lambda x: (x[1], len(x[0].name)))
         keep = lst_sorted[-1]
         kept.append(keep[0])
-        for old in [p for p,d in lst_sorted[:-1]]:
+        for old in [p for p, d in lst_sorted[:-1]]:
             try:
                 old.unlink(missing_ok=True)
                 removed.append(str(old.relative_to(RAW_DATA_DIR)))
@@ -665,8 +778,11 @@ async def extract_pdfs():
                 logger.exception("Failed to remove duplicate: %s", old)
 
     if not kept:
-        return {"message": "처리할 PDF가 없습니다.", "meta_path": str(META_JSON_PATH),
-                "deduplicated": {"removedCount": len(removed), "removed": removed}}
+        return {
+            "message": "처리할 PDF가 없습니다.",
+            "meta_path": str(META_JSON_PATH),
+            "deduplicated": {"removedCount": len(removed), "removed": removed},
+        }
 
     new_meta: Dict[str, Dict] = {}
     for pdf_path in tqdm(kept, desc="PDF 전처리"):
@@ -678,7 +794,7 @@ async def extract_pdfs():
             # 작업유형별 보안레벨 계산
             sec_map: Dict[str, int] = {}
             for task in TASK_TYPES:
-                rules = all_rules.get(task, {"maxLevel":1, "levels":{}})
+                rules = all_rules.get(task, {"maxLevel": 1, "levels": {}})
                 sec_map[task] = _determine_level_for_task(pdf_text, rules)
 
             # 폴더 배치: 3종 중 최대 레벨 폴더로 복사(기존 구조 유지)
@@ -706,10 +822,12 @@ async def extract_pdfs():
             info = {
                 "chars": len(pdf_text),
                 "lines": len(pdf_text.splitlines()),
-                "preview": (pdf_text[:200].replace("\n", " ") + "…") if pdf_text else "",
-                "security_levels": sec_map,      # 작업유형별 보안레벨
+                "preview": (
+                    (pdf_text[:200].replace("\n", " ") + "…") if pdf_text else ""
+                ),
+                "security_levels": sec_map,  # 작업유형별 보안레벨
                 "doc_id": doc_id,
-                "version": version
+                "version": version,
             }
             new_meta[str(dest_rel_pdf)] = info
 
@@ -722,12 +840,14 @@ async def extract_pdfs():
             except Exception:
                 new_meta[pdf_path.name] = {"error": str(e)}
 
-    META_JSON_PATH.write_text(json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    META_JSON_PATH.write_text(
+        json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {
         "message": "PDF 추출 완료",
         "pdf_count": len(kept),
         "meta_path": str(META_JSON_PATH),
-        "deduplicated": {"removedCount": len(removed), "removed": removed}
+        "deduplicated": {"removedCount": len(removed), "removed": removed},
     }
 
 
@@ -743,7 +863,12 @@ def _parse_doc_version(stem: str) -> Tuple[str, int]:
 # 2) 인제스트 (bulk)
 #   - 작업유형별로 동일 청크를 각각 저장(task_type, security_level 분리)
 # -------------------------------------------------
-async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None = None, overlap: int | None = None, target_tasks: list[str] | None = None):
+async def ingest_embeddings(
+    model_key: str | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
+    target_tasks: list[str] | None = None,
+):
     # vector_settings 우선
     params = _get_vector_settings_row()
     MAX_TOKENS = int(params["chunk_size"])
@@ -755,7 +880,7 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     # 모델/검색 설정 로드(모델키 우선순위: 인자 > settings)
     settings = get_vector_settings()
     eff_model_key = model_key or settings["embeddingModel"]
-    
+
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
     emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
 
@@ -797,7 +922,10 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
 
         # 이전 동일 doc_id/version 데이터 삭제(작업유형 전체)
         try:
-            client.delete(COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {int(version)}")
+            client.delete(
+                COLLECTION_NAME,
+                filter=f"doc_id == '{doc_id}' && version <= {int(version)}",
+            )
         except Exception:
             pass
 
@@ -811,15 +939,17 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
             lvl = int(sec_map.get(task, 1))
             for idx, c in enumerate(chunks):
                 vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_txt),
-                    "chunk_idx": int(idx),
-                    "task_type": task,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(version),
-                })
+                batch.append(
+                    {
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt),
+                        "chunk_idx": int(idx),
+                        "task_type": task,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(version),
+                    }
+                )
                 if len(batch) >= 128:
                     client.insert(COLLECTION_NAME, batch)
                     total_inserted += len(batch)
@@ -833,7 +963,9 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     except Exception:
         pass
     _ensure_collection_and_index(client, emb_dim, metric="IP")
-    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    META_JSON_PATH.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {"message": "Ingest 완료(Milvus Server)", "inserted_chunks": total_inserted}
 
 
@@ -842,6 +974,7 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
 # -------------------------------------------------
 async def ingest_single_pdf(req: SinglePDFIngestRequest):
     import fitz  # type: ignore
+
     try:
         from repository.documents import insert_workspace_document
     except Exception:
@@ -862,8 +995,12 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         text_all = "\n\n".join(p.get_text("text").strip() for p in doc)
 
     all_rules = get_security_level_rules_all()
-    sec_map = {task: _determine_level_for_task(text_all, all_rules.get(task, {"maxLevel":1,"levels":{}}))
-               for task in TASK_TYPES}
+    sec_map = {
+        task: _determine_level_for_task(
+            text_all, all_rules.get(task, {"maxLevel": 1, "levels": {}})
+        )
+        for task in TASK_TYPES
+    }
     max_sec = max(sec_map.values()) if sec_map else 1
     sec_folder = f"securityLevel{int(max_sec)}"
 
@@ -879,13 +1016,15 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     meta[str(rel_pdf)] = {
         "chars": len(text_all),
         "lines": len(text_all.splitlines()),
-        "preview": (text_all[:200].replace("\n"," ") + "…") if text_all else "",
+        "preview": (text_all[:200].replace("\n", " ") + "…") if text_all else "",
         "security_levels": sec_map,
         "doc_id": doc_id,
         "version": ver,
     }
     META_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    META_JSON_PATH.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     # 인제스트(선택 작업유형)
     settings = get_vector_settings()
@@ -895,19 +1034,24 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
     MAX_TOKENS, OVERLAP = 512, 64
+
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split(); chunks: List[str] = []
+        words = text.split()
+        chunks: List[str] = []
         start = 0
         while start < len(words):
             end = min(start + max_tokens, len(words))
             chunk = " ".join(words[start:end]).strip()
-            if chunk: chunks.append(chunk)
+            if chunk:
+                chunks.append(chunk)
             start += max_tokens - overlap
         return chunks
 
     # 기존 삭제
     try:
-        client.delete(COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
+        client.delete(
+            COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}"
+        )
     except Exception:
         pass
 
@@ -918,15 +1062,17 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         lvl = int(sec_map.get(task, 1))
         for idx, c in enumerate(chunks):
             vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
-            batch.append({
-                "embedding": vec.tolist(),
-                "path": str(rel_pdf.with_suffix(".txt")),
-                "chunk_idx": int(idx),
-                "task_type": task,
-                "security_level": lvl,
-                "doc_id": str(doc_id),
-                "version": int(ver),
-            })
+            batch.append(
+                {
+                    "embedding": vec.tolist(),
+                    "path": str(rel_pdf.with_suffix(".txt")),
+                    "chunk_idx": int(idx),
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(ver),
+                }
+            )
             if len(batch) >= 128:
                 client.insert(COLLECTION_NAME, batch)
                 cnt += len(batch)
@@ -942,7 +1088,11 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                 filename=rel_pdf.name,
                 docpath=str(rel_pdf),
                 workspace_id=int(req.workspace_id),
-                metadata={"securityLevels": sec_map, "chunks": int(cnt), "isUserUpload": True},
+                metadata={
+                    "securityLevels": sec_map,
+                    "chunks": int(cnt),
+                    "isUserUpload": True,
+                },
             )
         except Exception:
             pass
@@ -953,7 +1103,12 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         pass
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
-    return {"message": "단일 PDF 인제스트 완료(Milvus Server)", "doc_id": doc_id, "version": ver, "chunks": cnt}
+    return {
+        "message": "단일 PDF 인제스트 완료(Milvus Server)",
+        "doc_id": doc_id,
+        "version": ver,
+        "chunks": cnt,
+    }
 
 
 # -------------------------------------------------
@@ -984,15 +1139,19 @@ def _bm25_like_score(query: str, doc: str, k1: float = 1.2, b: float = 0.75) -> 
     return float(score)
 
 
-async def search_documents(req: RAGSearchRequest, search_type_override: Optional[str] = None) -> Dict:
+async def search_documents(
+    req: RAGSearchRequest, search_type_override: Optional[str] = None
+) -> Dict:
     t0 = time.perf_counter()
     if req.task_type not in TASK_TYPES:
-        return {"error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"}
+        return {
+            "error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"
+        }
 
     settings = get_vector_settings()
     model_key = req.model or settings["embeddingModel"]
     search_type = (search_type_override or settings["searchType"]).lower()
-    
+
     tok, model, device = await _get_or_load_embedder_async(model_key)
     q_emb = _embed_text(tok, model, device, req.query)
     client = _client()
@@ -1016,7 +1175,9 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         filter=f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}",
     )
 
-    def _load_snippet(path: str, cidx: int, max_tokens: int = 512, overlap: int = 64) -> str:
+    def _load_snippet(
+        path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
+    ) -> str:
         try:
             full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
         except Exception:
@@ -1026,7 +1187,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             return ""
         start = cidx * (max_tokens - overlap)
         # 보존: 추출 시와 동일 슬라이딩 윈도우는 아니지만 근사 스니펫 제공
-        snippet = " ".join(words[start:start + max_tokens]).strip()
+        snippet = " ".join(words[start : start + max_tokens]).strip()
         return snippet or " ".join(words[:max_tokens]).strip()
 
     hits_raw = []
@@ -1047,11 +1208,17 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             doc_id = hit.entity.get("doc_id")
             score_vec = float(hit.score)
         snippet = _load_snippet(path, cidx)
-        hits_raw.append({
-            "path": path, "chunk_idx": cidx, "task_type": ttype,
-            "security_level": lvl, "doc_id": doc_id,
-            "score_vec": score_vec, "snippet": snippet
-        })
+        hits_raw.append(
+            {
+                "path": path,
+                "chunk_idx": cidx,
+                "task_type": ttype,
+                "security_level": lvl,
+                "doc_id": doc_id,
+                "score_vec": score_vec,
+                "snippet": snippet,
+            }
+        )
 
     # 후처리(검색방식)
     if search_type == "bm25":
@@ -1060,7 +1227,9 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             h["score_bm25"] = _bm25_like_score(req.query, h["snippet"])
             # bm25만 사용할 때는 bm25 점수로 정렬
             h["score"] = h["score_bm25"]
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[
+            :base_limit
+        ]
     elif search_type == "hybrid":
         # 간단 결합: score = 0.7*vec + 0.3*bm25 (정규화)
         if hits_raw:
@@ -1070,23 +1239,31 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 h["score_bm25"] = _bm25_like_score(req.query, h["snippet"])
             bms = [h["score_bm25"] for h in hits_raw]
             bmin, bmax = min(bms), max(bms)
+
             def norm(x, lo, hi):
                 return 0.0 if hi == lo else (x - lo) / (hi - lo)
+
             for h in hits_raw:
                 nv = norm(h["score_vec"], vmin, vmax)
                 nb = norm(h["score_bm25"], bmin, bmax)
                 h["score"] = 0.7 * nv + 0.3 * nb
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[
+            :base_limit
+        ]
     elif search_type in {"semantic", "vector"}:
         # 순수 벡터만
         for h in hits_raw:
             h["score"] = h["score_vec"]
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[
+            :base_limit
+        ]
     else:
         # fallback = semantic
         for h in hits_raw:
             h["score"] = h["score_vec"]
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[
+            :base_limit
+        ]
 
     # 프롬프트 컨텍스트 생성
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
@@ -1107,20 +1284,28 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 "security_level": int(h["security_level"]),
                 "doc_id": h.get("doc_id"),
                 "snippet": h["snippet"],
-            } for h in hits_sorted
+            }
+            for h in hits_sorted
         ],
-        "prompt": prompt
+        "prompt": prompt,
     }
 
 
-async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
-                         source_filter: Optional[List[str]] = None,
-                         task_type: str = "qna",
-                         model_key: Optional[str] = None,
-                         search_type: Optional[str] = None) -> Dict:
+async def execute_search(
+    question: str,
+    top_k: int = 5,
+    security_level: int = 1,
+    source_filter: Optional[List[str]] = None,
+    task_type: str = "qna",
+    model_key: Optional[str] = None,
+    search_type: Optional[str] = None,
+) -> Dict:
     req = RAGSearchRequest(
-        query=question, top_k=top_k, user_level=security_level,
-        task_type=task_type, model=model_key
+        query=question,
+        top_k=top_k,
+        user_level=security_level,
+        task_type=task_type,
+        model=model_key,
     )
     res = await search_documents(req, search_type_override=search_type)
     # Build check_file BEFORE optional source_filter so it reflects original candidates
@@ -1152,7 +1337,7 @@ async def execute_search(question: str, top_k: int = 5, security_level: int = 1,
 async def delete_db():
     # 모델 캐시 클리어
     _invalidate_embedder_cache()
-    
+
     client = _client()
     cols = client.list_collections()
     for c in cols:
@@ -1160,8 +1345,12 @@ async def delete_db():
     return {"message": "삭제 완료(Milvus Server)", "dropped_collections": cols}
 
 
-async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optional[str] = None,
-                             task_type: Optional[str] = None):
+async def list_indexed_files(
+    limit: int = 16384,
+    offset: int = 0,
+    query: Optional[str] = None,
+    task_type: Optional[str] = None,
+):
     limit = max(1, min(limit, 16384))
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
@@ -1187,7 +1376,10 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optiona
     for r in rows:
         path = r.get("path") if isinstance(r, dict) else r["path"]
         ttype = r.get("task_type") if isinstance(r, dict) else r["task_type"]
-        lvl = int((r.get("security_level") if isinstance(r, dict) else r["security_level"]) or 1)
+        lvl = int(
+            (r.get("security_level") if isinstance(r, dict) else r["security_level"])
+            or 1
+        )
         key = (path, ttype)
         counts[key] += 1
         level_map.setdefault(key, lvl)
@@ -1201,19 +1393,21 @@ async def list_indexed_files(limit: int = 16384, offset: int = 0, query: Optiona
         try:
             stat = txt_abs.stat()
             size = stat.st_size
-            indexed_at = to_kst_string()
+            indexed_at = now_kst_string()
         except FileNotFoundError:
             size = None
             indexed_at = None
-        items.append({
-            "taskType": ttype,
-            "fileName": file_name,
-            "filePath": str(pdf_rel),
-            "chunkCount": int(cnt),
-            "indexedAt": indexed_at,
-            "fileSize": size,
-            "securityLevel": int(level_map.get((path, ttype), 1)),
-        })
+        items.append(
+            {
+                "taskType": ttype,
+                "fileName": file_name,
+                "filePath": str(pdf_rel),
+                "chunkCount": int(cnt),
+                "indexedAt": indexed_at,
+                "fileSize": size,
+                "securityLevel": int(level_map.get((path, ttype), 1)),
+            }
+        )
 
     if query:
         q = str(query)
@@ -1246,7 +1440,11 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
     task_filter = ""
     if task_type:
         if task_type not in TASK_TYPES:
-            return {"deleted": 0, "requested": len(file_names), "error": f"invalid taskType: {task_type}"}
+            return {
+                "deleted": 0,
+                "requested": len(file_names),
+                "error": f"invalid taskType: {task_type}",
+            }
         task_filter = f" && task_type == '{task_type}'"
 
     deleted_total = 0
@@ -1294,11 +1492,11 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
             deleted_sql = None
 
     return {
-        "deleted": deleted_total,         # 요청 파일 기준 성공 건수(작업유형 기준 단순 카운트)
+        "deleted": deleted_total,  # 요청 파일 기준 성공 건수(작업유형 기준 단순 카운트)
         "deleted_sql": deleted_sql,
         "requested": len(file_names),
         "taskType": task_type,
-        "perFile": per_file,              # 파일별 처리현황
+        "perFile": per_file,  # 파일별 처리현황
     }
 
 
@@ -1309,5 +1507,7 @@ async def list_indexed_files_overview():
     for it in items:
         agg[it["taskType"]][int(it["securityLevel"])] += it["chunkCount"]
     # 보기 좋게 변환
-    overview = {t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()}
+    overview = {
+        t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()
+    }
     return {"overview": overview, "items": items}

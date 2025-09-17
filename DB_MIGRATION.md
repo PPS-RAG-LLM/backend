@@ -119,7 +119,7 @@ CREATE TABLE vector_settings (
 ```python
 # service/admin/system_settings.py
 from storage.db_models import VectorSettings, RagSettings
-from utils.time import now_kst_string
+from utils.time import now_kst
 
 def update_vector_settings(search_type: str, chunk_size: int, overlap: int) -> bool:
     """
@@ -134,7 +134,7 @@ def update_vector_settings(search_type: str, chunk_size: int, overlap: int) -> b
             settings.search_type = search_type
             settings.chunk_size = chunk_size
             settings.overlap = overlap
-            settings.updated_at = now_kst_string()
+            settings.updated_at = now_kst()
         else:
             # 새 레코드 생성 (id=1 강제)
             settings = VectorSettings(
@@ -170,7 +170,7 @@ def update_rag_settings(search_type: str, chunk_size: int, overlap: int, embeddi
             settings.chunk_size = chunk_size
             settings.overlap = overlap
             settings.embedding_key = embedding_key
-            settings.updated_at = now_kst_string()
+            settings.updated_at = now_kst()
         else:
             settings = RagSettings(
                 id=1,
@@ -223,7 +223,7 @@ def activate_embedding_model(model_id: int) -> bool:
             EmbeddingModel.id == model_id
         ).update({
             "is_active": 1,
-            "activated_at": now_kst_string()
+            "activated_at": now_kst()
         })
 
         session.commit()

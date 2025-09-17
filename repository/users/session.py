@@ -1,21 +1,23 @@
 from utils import logger
 from utils.database import get_session
-from utils.time import to_kst_string
 from typing import Optional
 from zoneinfo import ZoneInfo
 from storage.db_models import UserSession, User
 from sqlalchemy import select, delete
 from utils.time import now_kst, to_kst_string
 from datetime import timedelta, datetime
+
 logger = logger(__name__)
 
 
 def create_new_session(user_id: int) -> str:
     """새 세션 생성 및 저장"""
     import secrets
+
     session_id = secrets.token_urlsafe(32)
     save_session_to_db(session_id, user_id)
     return session_id
+
 
 # 메모리 세션 대신 DB 세션 사용
 def save_session_to_db(session_id: str, user_id: int):
@@ -42,8 +44,10 @@ def _parse_legacy_kst_string_to_utc(value) -> Optional[datetime]:
         return value
     if isinstance(value, str):
         try:
-            dt_kst = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
-            return dt_kst.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            dt_kst = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=ZoneInfo("Asia/Seoul")
+            )
+            return dt_kst.astimezone(ZoneInfo("UTC"))
         except Exception:
             return None
     return None
@@ -79,7 +83,9 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
         now_kst = now_kst()
         if not expires_kst or expires_kst <= now_kst:
             # 만료된 세션 삭제
-            session.execute(delete(UserSession).where(UserSession.session_id == session_id))
+            session.execute(
+                delete(UserSession).where(UserSession.session_id == session_id)
+            )
             session.commit()
             logger.info(f"delete expired session: {session_id}")
             return None
@@ -98,46 +104,69 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
 def list_all_sessions_from_db() -> list[dict]:
     """DB에 저장된 모든 세션 정보를 조회합니다."""
     with get_session() as session:
-        stmt = (
-            select(
-                UserSession.session_id,
-                User.id,
-                User.username,
-                User.name,
-                User.department,
-                User.position,
-                User.security_level,
-                UserSession.created_at,
-                UserSession.expires_at,
-            )
-            .join(User, User.id == UserSession.user_id)
-        )
+        stmt = select(
+            UserSession.session_id,
+            User.id,
+            User.username,
+            User.name,
+            User.department,
+            User.position,
+            User.security_level,
+            UserSession.created_at,
+            UserSession.expires_at,
+        ).join(User, User.id == UserSession.user_id)
         rows = session.execute(stmt).all()
         items = []
         for row in rows:
-            session_id, user_id, username, name, department, position, security_level, created_at, expires_at = row
-            created_str = to_kst_string(created_at) if isinstance(created_at, datetime) else str(created_at)
+            (
+                session_id,
+                user_id,
+                username,
+                name,
+                department,
+                position,
+                security_level,
+                created_at,
+                expires_at,
+            ) = row
+            created_str = (
+                to_kst_string(created_at)
+                if isinstance(created_at, datetime)
+                else str(created_at)
+            )
             # 레거시 문자열 대비
             exp_utc = _parse_legacy_kst_string_to_utc(expires_at)
-            exp_str = to_kst_string(exp_utc) if isinstance(exp_utc, datetime) else (to_kst_string(expires_at) if isinstance(expires_at, datetime) else str(expires_at))
-            items.append({
-                "session_id": session_id,
-                "user_id": user_id,
-                "username": username,
-                "name": name,
-                "department": department,
-                "position": position,
-                "security_level": security_level,
-                "created_at": created_str,
-                "expires_at": exp_str,
-            })
+            exp_str = (
+                to_kst_string(exp_utc)
+                if isinstance(exp_utc, datetime)
+                else (
+                    to_kst_string(expires_at)
+                    if isinstance(expires_at, datetime)
+                    else str(expires_at)
+                )
+            )
+            items.append(
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "username": username,
+                    "name": name,
+                    "department": department,
+                    "position": position,
+                    "security_level": security_level,
+                    "created_at": created_str,
+                    "expires_at": exp_str,
+                }
+            )
         return items
 
 
 def delete_session_from_db(session_id: str) -> bool:
     """DB에서 세션 삭제"""
     with get_session() as session:
-        result = session.execute(delete(UserSession).where(UserSession.session_id == session_id))
+        result = session.execute(
+            delete(UserSession).where(UserSession.session_id == session_id)
+        )
         session.commit()
         # 삭제 확인
         return result.rowcount > 0
@@ -166,7 +195,13 @@ def cleanup_expired_sessions() -> int:
             if exp_utc and exp_utc <= now_dt:
                 expired_session_ids.append(session_id)
         if expired_session_ids:
-            session.execute(delete(UserSession).where(UserSession.session_id.in_(expired_session_ids)))
+            session.execute(
+                delete(UserSession).where(
+                    UserSession.session_id.in_(expired_session_ids)
+                )
+            )
             session.commit()
-            logger.info(f"clean up expired sessions: {len(expired_session_ids)} sessions")
+            logger.info(
+                f"clean up expired sessions: {len(expired_session_ids)} sessions"
+            )
         return len(expired_session_ids)

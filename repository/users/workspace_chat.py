@@ -7,11 +7,12 @@ from sqlalchemy.exc import IntegrityError
 from storage.db_models import WorkspaceChat
 from errors import DatabaseError
 
-
 logger = logger(__name__)
 
 
-def get_chat_history_by_workspace_id(user_id: int, workspace_id: int, limit: int | None = None) -> list[dict]:
+def get_chat_history_by_workspace_id(
+    user_id: int, workspace_id: int, limit: int | None = None
+) -> list[dict]:
     with get_session() as session:
         stmt = (
             select(
@@ -37,18 +38,22 @@ def get_chat_history_by_workspace_id(user_id: int, workspace_id: int, limit: int
         for row in rows:
             m = row._mapping
             created = m["created_at"]
-            items.append({
-                "id": m["id"],
-                "category": m["category"],
-                "thread_id": m["thread_id"],
-                "prompt": m["prompt"],
-                "response": m["response"],
-                "created_at": to_kst_string(created) if isinstance(created, datetime) else str(created),
-            })
+            items.append(
+                {
+                    "id": m["id"],
+                    "category": m["category"],
+                    "thread_id": m["thread_id"],
+                    "prompt": m["prompt"],
+                    "response": m["response"],
+                    "created_at": to_kst_string(created),
+                }
+            )
         return items
 
 
-def get_chat_history_by_thread_id(user_id: int, thread_id: int, limit: int) -> list[dict]:
+def get_chat_history_by_thread_id(
+    user_id: int, thread_id: int, limit: int
+) -> list[dict]:
     with get_session() as session:
         stmt = (
             select(
@@ -70,20 +75,26 @@ def get_chat_history_by_thread_id(user_id: int, thread_id: int, limit: int) -> l
         for row in rows:
             m = row._mapping
             created = m["created_at"]
-            items.append({
-                "prompt": m["prompt"],
-                "response": m["response"],
-                "created_at": to_kst_string(created) if isinstance(created, datetime) else str(created),
-            })
+            items.append(
+                {
+                    "prompt": m["prompt"],
+                    "response": m["response"],
+                    "created_at": to_kst_string(created),
+                }
+            )
         return items
 
 
 def insert_chat_history(
-    user_id: int, category: str, workspace_id: int, prompt: str, response: str, thread_id: int | None = None
-) -> int:
+    user_id: int,
+    category: str,
+    workspace_id: int,
+    prompt: str,
+    response: str,
+    thread_id: int | None = None,
+):
     with get_session() as session:
         try:
-            current_kst_string = now_kst()
             obj = WorkspaceChat(
                 user_id=user_id,
                 category=category,
@@ -91,15 +102,13 @@ def insert_chat_history(
                 prompt=prompt,
                 response=response,
                 thread_id=thread_id,
-                created_at=current_kst_string,
-                updated_at=current_kst_string,
+                created_at=now_kst(),
+                updated_at=now_kst(),
             )
             session.add(obj)
             session.commit()
             session.refresh(obj)
-            return int(obj.id)
+            return logger.info(f"insert_chat_history success: id={obj.id}")
         except IntegrityError as exc:
             logger.error(f"insert_chat_history failed: {exc}")
             raise DatabaseError(str(exc))
-
-
