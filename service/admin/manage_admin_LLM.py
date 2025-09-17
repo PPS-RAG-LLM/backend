@@ -970,7 +970,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         if category == "all":
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path
+                SELECT id, name, type, category, model_path, created_at
                 FROM llm_models
                 WHERE is_active=1 AND category='all'
                 ORDER BY trained_at DESC, id DESC
@@ -979,7 +979,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         else:
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path
+                SELECT id, name, type, category, model_path, created_at
                 FROM llm_models
                 WHERE is_active=1 AND (category=? OR category='all')
                 ORDER BY trained_at DESC, id DESC
@@ -1014,7 +1014,8 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "id": r["id"],
             "name": name,
             "loaded": bool(loaded_flag),
-            "active": (name == active_name) and bool(loaded_flag),
+                "active": (name == active_name) and bool(loaded_flag),
+                "createdAt": r["created_at"],
         })
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
