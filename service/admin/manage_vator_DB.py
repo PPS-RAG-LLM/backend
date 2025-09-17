@@ -639,24 +639,43 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
         logger.info(f"[Milvus] 컬렉션 생성 완료: {COLLECTION_NAME}")
 
+    # 1) 덴스 벡터 인덱스(embedding)
     try:
-        idx_list = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
+        idx_dense = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
     except Exception:
-        idx_list = []
-    if not idx_list:
-        logger.info(f"[Milvus] 인덱스 생성 시작: {COLLECTION_NAME} (최대 180초 소요 가능)")
+        idx_dense = []
+    if not idx_dense:
+        logger.info(f"[Milvus] (embedding) 인덱스 생성 시작")
         ip = client.prepare_index_params()
         # 덴스 벡터: 기본은 FLAT 유지(환경에 따라 HNSW/IVF 등으로 변경 가능)
         ip.add_index("embedding", "FLAT", metric_type=metric, params={})
-        # 스파스 벡터 인덱스는 서버 내부 처리(명시 생략 가능)
         client.create_index(COLLECTION_NAME, ip, timeout=180.0, sync=True)
-        logger.info(f"[Milvus] 인덱스 생성 완료: {COLLECTION_NAME}")
+        logger.info(f"[Milvus] (embedding) 인덱스 생성 완료")
 
+    # 2) 스파스 벡터 인덱스(text_sparse)
     try:
-        client.load_collection(collection_name=COLLECTION_NAME)
-        logger.info(f"[Milvus] 컬렉션 로드 완료: {COLLECTION_NAME}")
+        idx_sparse = client.list_indexes(collection_name=COLLECTION_NAME, field_name="text_sparse")
     except Exception:
-        logger.warning(f"[Milvus] 컬렉션 로드 실패 (이미 로드됨): {COLLECTION_NAME}")
+        idx_sparse = []
+    if not idx_sparse:
+        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 시작")
+        ip2 = client.prepare_index_params()
+        try:
+            # 최신 PyMilvus: metric_type 없이도 동작
+            ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", params={})
+        except TypeError:
+            # 일부 버전은 metric_type이 필요할 수 있음
+            ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", metric_type="BM25", params={})
+        client.create_index(COLLECTION_NAME, ip2, timeout=180.0, sync=True)
+        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 완료")
+
+    # 인덱스 준비 후 로드(이미 로드되어 있으면 내렸다가 다시 올림)
+    try:
+        client.release_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        pass
+    client.load_collection(collection_name=COLLECTION_NAME)
+    logger.info(f"[Milvus] 컬렉션 로드 완료: {COLLECTION_NAME}")
     
     logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 완료: {COLLECTION_NAME}")
 
@@ -1055,7 +1074,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     _ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP")
 
     if COLLECTION_NAME not in client.list_collections():
-        return {"error": "컬렉션이 없습니다. 먼저 인제스트를 수행하세요."}
+        return {"error": "컬렉션이 없습니다. 먼저 데이터 저장(인제스트)을을 수행하세요."}
 
     # 공통 파라미터
     base_limit = int(req.top_k)
@@ -1353,6 +1372,12 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
         if delete_workspace_documents_by_filenames:
             deleted_sql = delete_workspace_documents_by_filenames(file_names)
         return {"deleted": 0, "deleted_sql": deleted_sql, "requested": len(file_names)}
+
+    # 로드 보장
+    try:
+        client.load_collection(collection_name=COLLECTION_NAME)
+    except Exception:
+        pass
 
     # 유효한 task_type 인지 검증
     task_filter = ""

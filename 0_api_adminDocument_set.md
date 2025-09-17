@@ -7,7 +7,7 @@
   "overlap": 64
 }
 
-
+"hybrid", "semantic", "bm25"
 
 
 /v1/admin/vector/security-levels
@@ -30,7 +30,7 @@
     "string"
   ],
   "taskType": "doc_gen",
-  "searchMode": "hybrid"
+  "searchMode": "semantic"
 }
 
 {
@@ -41,7 +41,7 @@
     "string"
   ],
   "taskType": "doc_gen",
-  "searchMode": "hybrid"
+  "searchMode": "bm25"
 }
 
 ```
