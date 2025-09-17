@@ -63,10 +63,8 @@ def model_list(category: str = Query(..., description="base | qa | doc_gen | sum
 @router.post("/settings/model-load", summary="모델명을 기준으로 로드 (베이스 모델은 모든 카테고리에 로드로 간주)")
 def model_load(body: ModelLoadBody = ...):
     from service.admin import manage_admin_LLM as svc
-    load_by_name = getattr(svc, "load_model_by_name", None)
-    if callable(load_by_name):
-        return load_by_name(body.modelName)
-    return svc.load_model("qa", body.modelName)
+    cat = svc._infer_category_from_name(body.modelName)
+    return svc.load_model(cat, body.modelName)
 
 @router.post("/settings/model-unload", summary="모델명을 기준으로 명시적 언로드")
 def model_unload(body: ModelLoadBody = ...):

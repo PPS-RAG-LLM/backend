@@ -420,10 +420,7 @@ class _ModelManager:
                 from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
                 import torch  # type: ignore
 
-                # gpt-oss는 어댑터 전용 경로로 처리 (HF BitsAndBytes 경로 차단)
-                base_key = os.path.basename(key).lower()
-                if base_key.startswith("gpt-oss") or base_key.startswith("gpt_oss"):
-                    raise RuntimeError("gpt-oss should be loaded via adapter only")
+                # (변경) gpt-oss도 HF 로더로 직접 로드 허용
 
                 # Optional quantization (disable via env LLM_DISABLE_BNB=1)
                 bnb_config = None
@@ -595,10 +592,7 @@ def _clear_local_cache_entries(model_name: str) -> None:
 
 def _load_local_model(model_name_or_path: str):
     try:
-        # Prefer adapter-based for OSS/gpt_oss to avoid HF AutoModel path
-        lower = (model_name_or_path or "").lower()
-        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-            return None
+        # (변경) gpt-oss도 매니저 경유 HF 로더 사용 허용
         # Prefer manager cache
         key = _MODEL_MANAGER._resolve_candidate(model_name_or_path)
         if key in _MODEL_CACHE:
@@ -623,7 +617,7 @@ def _simple_generate(prompt_text: str, model_name_or_path: str, max_tokens: int 
     tok, mdl = pair
     import torch
     messages = [
-        {"role": "system", "content": "You are Qwen, a helpful assistant."},
+        {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": prompt_text},
     ]
     full = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -755,57 +749,87 @@ def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
 
 
 def _preload_via_adapters(model_name: str) -> bool:
-    model_path = _db_get_model_path(model_name)
-    if not model_path:
-        # STORAGE_ROOT / 레거시에서도 시도
-        cand = _resolve_model_fs_path(model_name)
-        if os.path.isfile(os.path.join(cand, "config.json")):
-            model_path = cand
-        else:
-            base = _strip_category_suffix(model_name)
-            cand2 = _resolve_model_fs_path(base)
-            if os.path.isfile(os.path.join(cand2, "config.json")):
-                model_path = cand2
-            else:
-                logging.getLogger(__name__).warning("[preload] model path not found: %s", model_name)
-                return False
+    """
+    Admin 경로용 프리로드:
+      - DB/FS에서 model_path만 해석
+      - gpt-oss 계열은 전용 로더로, 그 외는 HF Auto로 로드
+      - 성공 시 _ADAPTER_LOADED에 추적 키 추가
+    """
     try:
-        logging.getLogger(__name__).info("[preload] start name=%s path=%s", model_name, model_path)
-        if not os.path.isfile(os.path.join(model_path, "config.json")):
-            logging.getLogger(__name__).error("[preload] config.json not found at %s", model_path)
+        model_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
+        if not (model_path and os.path.isfile(os.path.join(model_path, "config.json"))):
+            logging.getLogger(__name__).warning("[preload] config.json not found: %s", model_path)
             return False
-        # 안전 로더(최소 인자) 사용 – 커스텀 모델과 충돌하는 kwargs 제거
-        _hf_load_without_quant(model_path)
-        try:
-            _ADAPTER_LOADED.add(model_path)
-            _ADAPTER_LOADED.add(os.path.basename(model_path))
-        except Exception:
-            logging.getLogger(__name__).exception("adapter-like tracking add failed")
-        logging.getLogger(__name__).info("[preload] done name=%s", model_name)
+
+        lower = (model_name or "").lower()
+        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
+            # gpt-oss 전용 로더
+            try:
+                from utils.llms.huggingface.gpt_oss_20b import load_gpt_oss_20b
+                load_gpt_oss_20b(model_path)  # lru_cache로 1회 로드
+            except Exception:
+                logging.getLogger(__name__).exception("gpt-oss preload failed")
+                return False
+        else:
+            # 일반 HF 경로
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM
+                import torch
+                tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+                if tok.pad_token_id is None:
+                    if getattr(tok, "eos_token_id", None) is not None:
+                        tok.pad_token_id = tok.eos_token_id
+                    else:
+                        tok.add_special_tokens({"pad_token": "<|pad|>"})
+                        tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
+                try:
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        model_path,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        local_files_only=True,
+                        # bnb는 환경에 따라 깨지니 일단 제외. 필요시 옵션화
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                    )
+                except Exception:
+                    # 마지막 보루: dtype만 바꿔 재시도
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        model_path,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        local_files_only=True,
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                    )
+                # 굳이 _MODEL_MANAGER에 넣을 필요는 없음(프리로드 목적)
+            except Exception:
+                logging.getLogger(__name__).exception("HF preload failed")
+                return False
+
+        # 추적키 추가
+        _ADAPTER_LOADED.add(model_path)
+        _ADAPTER_LOADED.add(os.path.basename(model_path))
+        logging.getLogger(__name__).info("[preload] ok: %s (%s)", model_name, model_path)
         return True
     except Exception:
-        logging.getLogger(__name__).exception("adapter-like preload failed for %s", model_name)
+        logging.getLogger(__name__).exception("[preload] unexpected failure")
         return False
 
 
 def _unload_via_adapters(model_name: str) -> bool:
-    ok = False
-    try:
-        if hasattr(_preload_with_utils_model_load, "cache_clear"):
-            _preload_with_utils_model_load.cache_clear()
-            ok = True
-    except Exception:
-        logging.getLogger(__name__).exception("adapter-like unload cache_clear failed")
-    # remove tracking
+    """
+    Admin 경로용 언로드:
+      - _ADAPTER_LOADED 추적만 지우고, 메모리 정리만 수행
+      - (특정 캐시 클리어 함수 호출 제거)
+    """
     try:
         resolved = _resolve_model_fs_path(model_name)
         _ADAPTER_LOADED.discard(resolved)
         _ADAPTER_LOADED.discard(os.path.basename(resolved))
     except Exception:
         pass
-    # Best-effort GPU/CPU cleanup
+    # GPU/CPU 캐시 정리
     try:
-        import torch  # type: ignore
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -815,7 +839,7 @@ def _unload_via_adapters(model_name: str) -> bool:
         gc.collect()
     except Exception:
         logging.getLogger(__name__).exception("gc collect failed after adapter unload")
-    return ok
+    return True
 
 # ================================================================
 # External script helpers (download / training)
@@ -1009,28 +1033,19 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
 
         # If not loaded, load it
         if not _is_model_loaded(model_name):
+            lower = (model_name or "").lower()
             try:
-                lower = (model_name or "").lower()
                 if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-                    # gpt-oss: 어댑터 경로만 사용
-                    pre_ok = _preload_via_adapters(model_name)
-                    if not pre_ok:
-                        raise RuntimeError("adapter preload also failed")
+                    if not _preload_via_adapters(model_name):
+                        raise RuntimeError("adapter preload failed")
                 else:
+                    candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
                     try:
-                        # Resolve best candidate path
-                        candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
                         _MODEL_MANAGER.load(candidate)
                     except Exception:
-                        logging.getLogger(__name__).exception("manager load failed, trying adapter preload")
-                        # Prefer central adapters.preload_adapter_model if available
-                        try:
-                            from utils.llms.adapters import preload_adapter_model  # type: ignore
-                            pre_ok = preload_adapter_model(model_name)
-                        except Exception:
-                            pre_ok = _preload_via_adapters(model_name)
-                        if not pre_ok:
-                            raise RuntimeError("adapter preload also failed")
+                        logging.getLogger(__name__).exception("manager load failed, trying adapter-style preload")
+                        if not _preload_via_adapters(model_name):
+                            raise
             except Exception:
                 logger.exception("failed to load model: %s", model_name)
                 return {"success": False, "message": f"모델 로드 실패: {model_name}", "category": category, "modelName": model_name}
@@ -1465,11 +1480,18 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     body = body or {}
     variables = body.get("variables", {}) or {}
     category = body.get("category") or "summary"
-    model_name = body.get("modelName") or _active_model_name_for_category(category) or "Qwen2.5-7B-Instruct-1M"
     max_tokens = int(body.get("max_tokens", 512))
     temperature = float(body.get("temperature", 0.7))
 
     tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
+    subtask = tmpl["subtask"] if (isinstance(tmpl, dict) or hasattr(tmpl, "__getitem__")) else getattr(tmpl, "subtask", None)
+
+    if body.get("modelName"):
+        model_name = body["modelName"]
+    else:
+        model_name = select_model_for_task(category, subtask)
+        if not model_name:
+            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
     required = json.loads(tmpl["required_vars"] or "[]")
     # 필수 변수 체크(간단)
     missing = [k for k in required if k not in variables]

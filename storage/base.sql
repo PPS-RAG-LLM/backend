@@ -105,11 +105,11 @@ VALUES (
         'huggingface',
         'gpt_oss_20b',
         0,
-        './service/storage/model/gpt_oss_20b',
+        './service/storage/model/gpt-oss-20b',
         'all',
         '',
         'base',
-        0,
+        1,
         1,
         '2025-09-03 07:52:05',
         '2025-09-03 07:52:05'
