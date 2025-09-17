@@ -21,18 +21,21 @@ logger = logger(__name__)
 def get_default_llm_model(category: str) -> Optional[Dict[str, str]]:
     """카테고리별 기본 LLM 모델 조회"""
     with get_session() as session:
-        stmt = (
-            select(LlmModel.provider, LlmModel.name)
-            .where(
-                LlmModel.category == category,
-                LlmModel.is_default == True,
-                LlmModel.is_active == True,
-            )
-            .order_by(LlmModel.id.desc())
-            .limit(1)
-        )
 
-        result = session.execute(stmt).first()
+        def _pick(cat: str):
+            stmt = (
+                select(LlmModel.provider, LlmModel.name)
+                .where(
+                    LlmModel.category == cat,
+                    LlmModel.is_default == True,
+                    LlmModel.is_active == True,
+                )
+                .order_by(LlmModel.id.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).first()
+
+        result = _pick(category) or _pick("all")
         if not result:
             logger.warning(f"No default llm model for category={category}")
             return None
