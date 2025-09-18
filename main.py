@@ -155,12 +155,8 @@ app.include_router(llm_finetuning_router)
 app.include_router(admin_llm_router)
 app.include_router(sso_router)
 app.include_router(mock_company_router)
-<<<<<<< HEAD
-app.include_router(docgen_simple_router)
-=======
 app.include_router(summary_router)
 app.include_router(doc_gen_templates_router)
->>>>>>> develop2
 # app.include_router(admin_router)
 # app.include_router(document_router)
 
