@@ -9,7 +9,7 @@ from service.admin.manage_admin_LLM import (
     UpdatePromptBody,
     CompareModelsBody,
     ActivePromptBody,
-    set_topk_settings,
+    # set_topk_settings,
     get_model_list,
     load_model,
     compare_models,
@@ -19,12 +19,12 @@ from service.admin.manage_admin_LLM import (
     update_prompt,
     delete_prompt,
     test_prompt,
-    DownloadModelBody,
+    # DownloadModelBody,
     InferBody,
-    download_model,
+    # download_model,
     infer_local,
-    InsertBaseModelBody,
-    insert_base_model,
+    # InsertBaseModelBody,
+    # insert_base_model,
     unload_model_for_category,
     get_active_prompt,
     set_active_prompt,
@@ -38,13 +38,9 @@ router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM"], responses={200: {
 
 # === New routes ===
 
-@router.post("/model/download", summary="HuggingFace 저장소에서 모델 다운로드 (오프라인 환경에서는 미사용)")
-def download_model_route(body: DownloadModelBody):
-    return download_model(body)
-
-@router.post("/model/insert-base", summary="오프라인 환경용 베이스 모델 메타 등록(qa/doc_gen/summary/qna)")
-def insert_base_model_route(body: InsertBaseModelBody):
-    return insert_base_model(body)
+# @router.post("/model/insert-base", summary="오프라인 환경용 베이스 모델 메타 등록(qa/doc_gen/summary/qna)")
+# def insert_base_model_route(body: InsertBaseModelBody):
+#     return insert_base_model(body)
 
 # 파인튜닝 관련 API는 routers/admin/LLM_finetuning_api.py 에서 제공합니다.
 
@@ -52,9 +48,9 @@ def insert_base_model_route(body: InsertBaseModelBody):
 def infer_route(body: InferBody):
     return infer_local(body)
 
-@router.post("/settings", summary="RAG에서 반환할 문서 수(topK) 설정")
-def set_settings(body: TopKSettingsBody):
-    return set_topk_settings(body.topK)
+# @router.post("/settings", summary="RAG에서 반환할 문서 수(topK) 설정")
+# def set_settings(body: TopKSettingsBody):
+#     return set_topk_settings(body.topK)
 
 @router.get("/settings/model-list", summary="모델 목록과 로드/활성 상태 조회 (카테고리별 또는 base 전용)")
 def model_list(category: str = Query(..., description="base | qa | doc_gen | summary | all")):

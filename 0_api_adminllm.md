@@ -44,7 +44,7 @@
   "overfittingPrevention": true,
   "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
   "gradientAccumulationSteps": 8,
-  "tuningType": "QLORA"
+  "tuningType": "LORA"
 }
 
 {
@@ -59,6 +59,22 @@
   "gradientAccumulationSteps": 8,
   "tuningType": "QLORA"
 }
+
+{
+  "baseModelName": "gpt-oss-20b",
+  "saveModelName": "gpt-oss-20b-summary",
+  "systemPrompt": "위 글을 참고하여 대답해 주세요",
+  "batchSize": 4,
+  "epochs": 3,
+  "learningRate": 0.0002,
+  "overfittingPrevention": true,
+  "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
+  "gradientAccumulationSteps": 8,
+  "tuningType": "FULL"
+}
+
+
+
 =====================================================================================
 POST	/v1/admin/llm/settings	TOPK 조정 – RAG 반환 문서 수 변경	
 📤 요청 본문

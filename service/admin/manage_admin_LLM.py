@@ -72,9 +72,9 @@ class CompareModelsBody(BaseModel):
 
 # === NEW: model download / train / infer request bodies ===
 
-class DownloadModelBody(BaseModel):
-    repo: str = Field(..., description="HuggingFace repo id, e.g. Qwen/Qwen2.5-7B-Instruct-1M")
-    name: str = Field(..., description="Local folder name to store under STORAGE_ROOT")
+# class DownloadModelBody(BaseModel):
+#     repo: str = Field(..., description="HuggingFace repo id, e.g. Qwen/Qwen2.5-7B-Instruct-1M")
+#     name: str = Field(..., description="Local folder name to store under STORAGE_ROOT")
 
 
 class TrainModelBody(BaseModel):
@@ -845,8 +845,7 @@ def _unload_via_adapters(model_name: str) -> bool:
 # External script helpers (download / training)
 # ================================================================
 
-_DOWNLOAD_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/download_qwen_model.py"
-_TRAIN_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/train_qwen_rag.py"
+
 
 
 def _run_command(cmd: list[str]) -> Tuple[int, str]:
@@ -860,89 +859,55 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 
 # ===== Public service functions =====
 
-def download_model(body: DownloadModelBody) -> Dict[str, Any]:
-    cmd = ["python", _DOWNLOAD_SCRIPT, "--repo", body.repo, "--name", body.name]
-    code, out = _run_command(cmd)
-    if code != 0:
-        return {"success": False, "message": "download failed", "log": out}
-    return {"success": True, "message": "download completed", "log": out}
+# def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
+#     """
+#     기본 모델 등록(단일 레코드):
+#       - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
+#       - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
+#     """
+#     _migrate_llm_models_if_needed()
+#     base_name = body.name.strip()
+#     rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
+
+#     # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
+#     abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
+#     cfg_ok = (abs_new / "config.json").is_file()
+#     if not cfg_ok:
+#         abs_old = LEGACY_STORAGE_ROOT / base_name
+#         cfg_ok = (abs_old / "config.json").is_file()
+
+#     conn = _connect(); cur = conn.cursor()
+#     try:
+#         cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
+#         row = cur.fetchone()
+#         if row:
+#             cur.execute(
+#                 """
+#                 UPDATE llm_models
+#                    SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
+#                  WHERE id=?
+#                 """,
+#                 (body.provider, rel_folder, int(row[0]))
+#             )
+#             mdl_id = int(row[0]); existed = True
+#         else:
+#             cur.execute(
+#                 """
+#                 INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
+#                 VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
+#                 """,
+#                 (body.provider, base_name, 0, rel_folder)
+#             )
+#             mdl_id = int(cur.lastrowid); existed = False
+#         conn.commit()
+#     finally:
+#         conn.close()
+
+#     note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
+#     return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
 
 
-def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
-    """
-    기본 모델 등록(단일 레코드):
-      - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
-      - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
-    """
-    _migrate_llm_models_if_needed()
-    base_name = body.name.strip()
-    rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
 
-    # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
-    abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
-    cfg_ok = (abs_new / "config.json").is_file()
-    if not cfg_ok:
-        abs_old = LEGACY_STORAGE_ROOT / base_name
-        cfg_ok = (abs_old / "config.json").is_file()
-
-    conn = _connect(); cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
-        row = cur.fetchone()
-        if row:
-            cur.execute(
-                """
-                UPDATE llm_models
-                   SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
-                 WHERE id=?
-                """,
-                (body.provider, rel_folder, int(row[0]))
-            )
-            mdl_id = int(row[0]); existed = True
-        else:
-            cur.execute(
-                """
-                INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
-                VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
-                """,
-                (body.provider, base_name, 0, rel_folder)
-            )
-            mdl_id = int(cur.lastrowid); existed = False
-        conn.commit()
-    finally:
-        conn.close()
-
-    note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
-    return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
-
-
-def train_model(body: TrainModelBody) -> Dict[str, Any]:
-    output_dir = os.path.join(STORAGE_ROOT, body.ft_name)
-    cmd = [
-        "python", _TRAIN_SCRIPT,
-        "--csv", body.csv,
-        "--base_name", body.base_name,
-        "--ft_name", body.ft_name,
-        "--epochs", str(body.epochs),
-        "--batch_size", str(body.batch_size),
-        "--lr", str(body.lr),
-    ]
-    # 비동기로 실행 – 파이썬 백그라운드 프로세스 & job record 추가
-    import subprocess, json as _jsonlib
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    # fine_tune_jobs row 생성
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO fine_tune_jobs(provider_job_id, dataset_id, hyperparameters, status, started_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (f"pid:{proc.pid}", None, _json(body.dict()), "running"))
-    job_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    return {"success": True, "jobId": job_id, "pid": proc.pid}
 
 
 def infer_local(body: InferBody) -> Dict[str, Any]:
@@ -952,11 +917,11 @@ def infer_local(body: InferBody) -> Dict[str, Any]:
 
 
 # ===== Service functions (구현) =====
-def set_topk_settings(topk: int) -> Dict[str, Any]:
-    global _DEFAULT_TOPK  # noqa: PLW0603
-    _DEFAULT_TOPK = int(topk)
-    _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
-    return {"success": True}
+# def set_topk_settings(topk: int) -> Dict[str, Any]:
+#     global _DEFAULT_TOPK  # noqa: PLW0603
+#     _DEFAULT_TOPK = int(topk)
+#     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
+#     return {"success": True}
 
 
 def get_model_list(category: str) -> Dict[str, Any]:
@@ -967,7 +932,17 @@ def get_model_list(category: str) -> Dict[str, Any]:
     conn = _connect()
     try:
         cur = conn.cursor()
-        if category == "all":
+        if category == "base":
+            # 모든 카테고리의 활성 모델 표시
+            cur.execute(
+                """
+                SELECT id, name, type, category, model_path, created_at
+                FROM llm_models
+                WHERE is_active=1
+                ORDER BY trained_at DESC, id DESC
+                """
+            )
+        elif category == "all":
             cur.execute(
                 """
                 SELECT id, name, type, category, model_path, created_at
@@ -999,14 +974,24 @@ def get_model_list(category: str) -> Dict[str, Any]:
         logging.getLogger(__name__).exception("failed to gather loaded keys")
         loaded_keys = set()
 
-    active_name = _active_model_name_for_category(category)
+    # 활성 모델 이름 집합 계산
+    if category == "base":
+        active_names = {
+            _active_model_name_for_category("qa"),
+            _active_model_name_for_category("doc_gen"),
+            _active_model_name_for_category("summary"),
+        } - {None}
+    else:
+        active_name = _active_model_name_for_category(category)
+        active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # base 중복 방지: type='base'이며 category!='all'이면 화면에서 숨김
-        row_type = str((r["type"] or "")).lower()
-        row_cat  = str((r["category"] or "")).lower()
-        if (row_type == "base") and (row_cat != "all"):
-            continue
+        # 일반 카테고리 요청 시: base 중복 방지
+        if category != "base":
+            row_type = str((r["type"] or "")).lower()
+            row_cat  = str((r["category"] or "")).lower()
+            if (row_type == "base") and (row_cat != "all"):
+                continue
         name = r["name"]
         cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
@@ -1014,7 +999,8 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "id": r["id"],
             "name": name,
             "loaded": bool(loaded_flag),
-                "active": (name == active_name) and bool(loaded_flag),
+            "active": (name in active_names) and bool(loaded_flag),
+            "category": r["category"],
                 "createdAt": r["created_at"],
         })
     if not models:
