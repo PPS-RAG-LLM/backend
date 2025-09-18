@@ -11,6 +11,7 @@ router = APIRouter(tags=["summary"], prefix="/v1/summary")
 class TemplateListItem(BaseModel):
     id: int
     name: str
+    content: str
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateListItem]
@@ -20,10 +21,10 @@ class TemplateContentResponse(BaseModel):
     name: str
     content: str
 
-@router.get("/templates", response_model=TemplateListResponse, summary="요약용 템플릿 목록")
+@router.get("/templates", response_model=TemplateListResponse, summary="요약용 템플릿 전체 목록(상세 포함)")
 def list_summary_templates_route():
     items = list_summary_templates()
-    return {"templates": [{"id": r["id"], "name": r["name"]} for r in items]}
+    return {"templates": items}
 
 @router.get("/template/{template_id}", response_model=TemplateContentResponse, summary="선택 템플릿 콘텐츠 조회")
 def get_summary_template_route(template_id: int):

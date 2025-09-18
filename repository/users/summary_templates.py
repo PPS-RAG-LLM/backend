@@ -7,7 +7,11 @@ from storage.db_models import SystemPromptTemplate
 def repo_list_summary_templates() -> List[Dict[str, str]]:
     with get_session() as session:
         stmt = (
-            select(SystemPromptTemplate.id, SystemPromptTemplate.name)
+            select(
+                SystemPromptTemplate.id,
+                SystemPromptTemplate.name,
+                SystemPromptTemplate.content,
+            )
             .where(
                 SystemPromptTemplate.category == "summary",
                 SystemPromptTemplate.is_active == True,
@@ -15,7 +19,7 @@ def repo_list_summary_templates() -> List[Dict[str, str]]:
             .order_by(SystemPromptTemplate.id.desc())
         )
         rows = session.execute(stmt).all()
-        return [{"id": r.id, "name": r.name} for r in rows]
+        return [{"id": r.id, "name": r.name, "content": r.content} for r in rows]
 
 def repo_get_summary_template_by_id(template_id: int) -> Optional[Dict[str, str]]:
     with get_session() as session:
