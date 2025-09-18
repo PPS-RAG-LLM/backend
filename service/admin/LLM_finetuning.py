@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import get_db, logger
 from errors.exceptions import BadRequestError, InternalServerError
 logger = logger(__name__)
@@ -35,6 +35,16 @@ import os as _os
 _os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
 STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
+
+# ===== SQLAlchemy ORM (Session) =====
+from sqlalchemy import create_engine, select, func
+from sqlalchemy.orm import sessionmaker
+from storage.db_models import (
+    LlmModel, FineTuneDataset, FineTuneJob as ORMJob, FineTunedModel
+)
+DB_URL = f"sqlite:///{os.environ.get('COREIQ_DB', str(BASE_BACKEND / 'storage' / 'pps_rag.db'))}"
+_engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
 # ---- Portable path helper ----
 def _to_rel(p: str) -> str:
@@ -103,6 +113,10 @@ def _resolve_train_path(p: str) -> str:
 
 # ===== Schemas =====
 class FineTuneRequest(BaseModel):
+    # === 공통 태그(필수) ===
+    category: str = Field(..., description="qa | doc_gen | summary")
+    subcategory: Optional[str] = Field(None, description="세부 테스크. 현재 주로 doc_gen에서 사용")
+
     baseModelName: str
     saveModelName: str
     systemPrompt: str
@@ -113,14 +127,38 @@ class FineTuneRequest(BaseModel):
     trainSetFile: str
     gradientAccumulationSteps: int = 8
     quantizationBits: Optional[int] = Field(
-        default=None,
-        description="QLORA 전용: 양자화 비트 선택 (4 또는 8)",
+        default=None, description="QLORA 전용: 양자화 비트 (4 또는 8)",
     )
     tuningType: Optional[str] = Field(
         default="QLORA",
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
     )
+
+    @field_validator("category")
+    @classmethod
+    def _v_category(cls, v: str) -> str:
+        allowed = {"qa", "doc_gen", "summary"}
+        vv = (v or "").strip().lower()
+        if vv not in allowed:
+            raise ValueError(f"category must be one of {sorted(allowed)}")
+        return vv
+
+    @field_validator("quantizationBits")
+    @classmethod
+    def _v_qbits_range(cls, v: Optional[int]):
+        if v is None:
+            return v
+        if v not in (4, 8):
+            raise ValueError("quantizationBits must be 4 or 8 when provided")
+        return v
+
+    @model_validator(mode="after")
+    def _v_qbits_required_for_qlora(self):
+        if (self.tuningType or "").upper() == "QLORA":
+            if self.quantizationBits not in (4, 8):
+                raise ValueError("QLORA requires quantizationBits=4 or 8")
+        return self
 
 @dataclass
 class FineTuneJob:
@@ -327,27 +365,27 @@ def list_train_data_dirs() -> Dict[str, Any]:
 
 # ===== DB ops =====
 def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
+    # ==== ORM 버전 ====
     rel_path = _to_rel(path)
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM fine_tune_datasets WHERE path=?", (rel_path,))
-    row = cur.fetchone()
-    if row:
-        return int(row["id"])
-    try:
-        cur.execute("""
-            INSERT INTO fine_tune_datasets(name, category, path, record_count)
-            VALUES(?, ?, ?, NULL)
-        """, (os.path.basename(path), category, rel_path))
-    except Exception:
-        cur.execute("""
-            INSERT INTO fine_tune_datasets(name, path, record_count)
-            VALUES(?, ?, NULL)
-        """, (os.path.basename(path), rel_path))
-    conn.commit()
-    return int(cur.lastrowid)
+    with SessionLocal() as s:
+        exist = s.execute(
+            select(FineTuneDataset).where(FineTuneDataset.path == rel_path)
+        ).scalar_one_or_none()
+        if exist:
+            return int(exist.id)
+        row = FineTuneDataset(
+            name=os.path.basename(path),
+            category=category,
+            path=rel_path,
+            record_count=None,
+        )
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+        return int(row.id)
 
 def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int) -> int:
-    cur = conn.cursor()
+    # ==== ORM 버전 ====
     reserve_now = _now_local_str()
     train_path = _resolve_train_path(req.trainSetFile)
     train_rel_path = _to_rel(train_path)
@@ -363,21 +401,22 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "trainSetFile": train_rel_path,
         "reserveDate": reserve_now,
         "category": category,
+        "subcategory": (req.subcategory or None),
         "gradientAccumulationSteps": req.gradientAccumulationSteps,
         "quantizationBits": req.quantizationBits,
     }
-    try:
-        cur.execute("""
-            INSERT INTO fine_tune_jobs(provider_job_id, dataset_id, hyperparameters, status, started_at)
-            VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (job_id, dataset_id, json.dumps(hyper, ensure_ascii=False), "queued"))
-    except Exception:
-        cur.execute("""
-            INSERT INTO fine_tune_jobs(provider_job_id, dataset_id, metrics, status, started_at)
-            VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (job_id, dataset_id, json.dumps({"hyperparameters": hyper}, ensure_ascii=False), "queued"))
-    conn.commit()
-    return int(cur.lastrowid)
+    with SessionLocal() as s:
+        row = ORMJob(
+            provider_job_id=job_id,
+            dataset_id=dataset_id,
+            status="queued",
+            started_at=datetime.utcnow(),
+            metrics=json.dumps({"hyperparameters": hyper}, ensure_ascii=False),
+        )
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+        return int(row.id)
 
 def _update_job_status(conn, job_id: str, status: str, progress: int | None = None, rough: int | None = None, extras: dict | None = None, _retries: int = 3):
     """
@@ -463,47 +502,58 @@ def _ensure_ftm_rouge_column(conn):
         # ignore if cannot add (older sqlite)
         pass
 
-def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str, final_rouge: Optional[float] = None):
-    cur = conn.cursor()
-    cur.execute("UPDATE fine_tune_jobs SET status=?, finished_at=CURRENT_TIMESTAMP WHERE provider_job_id=?",
-                ("succeeded", job_id))
-    # llm_models upsert-ish
-    cur.execute("SELECT id FROM llm_models WHERE name=?", (model_name,))
-    row = cur.fetchone()
-    if row:
-        model_id = int(row["id"])
-    else:
-        mdl_type = "lora" if tuning_type.upper() in ("LORA", "QLORA") else "full"
-        cur.execute("""
-            INSERT INTO llm_models(provider, name, revision, model_path, category, type, is_active)
-            VALUES(?,?,?,?,?,?,1)
-        """, ("hf", model_name, 0, _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name)), category, mdl_type))
-        model_id = int(cur.lastrowid)
-    # set trained_at now
-    try:
-        cur.execute("UPDATE llm_models SET trained_at=CURRENT_TIMESTAMP WHERE id=?", (model_id,))
-    except Exception:
-        pass
-
-    # fine_tuned_models
-    cur.execute("SELECT id FROM fine_tune_jobs WHERE provider_job_id=?", (job_id,))
-    job_row = cur.fetchone()
-    if job_row:
-        ft_job_pk = int(job_row["id"])
-        lora_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name)) if tuning_type.upper() in ("LORA", "QLORA") else None
-        # ensure rouge column if available
-        _ensure_ftm_rouge_column(conn)
-        if _has_column(conn, "fine_tuned_models", "rouge1_f1"):
-            cur.execute("""
-                INSERT INTO fine_tuned_models(model_id, job_id, provider_model_id, lora_weights_path, type, is_active, rouge1_f1)
-                VALUES(?, ?, ?, ?, ?, 1, ?)
-            """, (model_id, ft_job_pk, model_name, lora_path, ("lora" if lora_path else "full"), (final_rouge if final_rouge is not None else None)))
+def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str, final_rouge: Optional[float] = None, subcategory: Optional[str]=None):
+    # ==== ORM 버전 ====
+    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
+    mdl_type = "lora" if tuning_type.upper() in ("LORA", "QLORA") else "full"
+    with SessionLocal() as s:
+        # job 상태 업데이트
+        job_row = s.execute(select(ORMJob).where(ORMJob.provider_job_id == job_id)).scalar_one_or_none()
+        if job_row:
+            job_row.status = "succeeded"
+            job_row.finished_at = datetime.utcnow()
+            s.add(job_row)
+        # llm_models upsert (name unique)
+        m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
+        if m:
+            m.trained_at = datetime.utcnow()
+            m.category = category
+            m.subcategory = subcategory
+            m.type = mdl_type
+            m.model_path = rel_model_path
+            m.is_active = True
         else:
-            cur.execute("""
-                INSERT INTO fine_tuned_models(model_id, job_id, provider_model_id, lora_weights_path, type, is_active)
-                VALUES(?, ?, ?, ?, ?, 1)
-            """, (model_id, ft_job_pk, model_name, lora_path, ("lora" if lora_path else "full")))
-    conn.commit()
+            m = LlmModel(
+                provider="hf",
+                name=model_name,
+                revision=0,
+                model_path=rel_model_path,
+                category=category,
+                subcategory=subcategory,
+                type=mdl_type,
+                is_default=False,
+                is_active=True,
+                trained_at=datetime.utcnow(),
+            )
+        s.add(m)
+        s.flush()  # get m.id
+        # fine_tuned_models insert (최종 ROUGE 저장)
+        lora_path = rel_model_path if mdl_type == "lora" else None
+        ftm = FineTunedModel(
+            model_id=m.id,
+            job_id=job_row.id if job_row else None,
+            provider_model_id=model_name,
+            lora_weights_path=lora_path,
+            type=mdl_type,
+            is_active=True,
+        )
+        # rouge1_f1 컬럼이 스키마에 존재하는 버전 고려
+        try:
+            setattr(ftm, "rouge1_f1", (final_rouge if final_rouge is not None else None))
+        except Exception:
+            pass
+        s.add(ftm)
+        s.commit()
 
 def _resolve_out_dir_by_job(conn, job_id: str) -> Optional[str]:
     cur = conn.cursor()
@@ -577,7 +627,16 @@ def _simulate_training(job: FineTuneJob, save_name_with_suffix: str):
             time.sleep(0.1)
             if p % 5 == 0:
                 _append_log(log_path, f"[{datetime.now().isoformat()}] progress {p}%")
-        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, ttype)
+                # Heartbeat to avoid false failure while simulating long runs
+                try:
+                    c = get_db()
+                    try:
+                        _update_job_status(c, job.job_id, "running")
+                    finally:
+                        c.close()
+                except Exception:
+                    logger.exception("failed to update heartbeat status (simulate)")
+        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, ttype, subcategory=job.request.get("subcategory"))
         logger.info(
             f"Fine-tuning succeeded (SIM) jobId={job.job_id} save={save_name_with_suffix} type={ttype}"
         )
@@ -927,6 +986,17 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 if logs and "loss" in logs:
                     _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
+        class HeartbeatCallback(TrainerCallback):  # type: ignore[misc]
+            def on_step_end(self, args, state, control, **kwargs):
+                try:
+                    c = get_db()
+                    try:
+                        _update_job_status(c, job.job_id, "running")
+                    finally:
+                        c.close()
+                except Exception:
+                    logger.exception("failed to update heartbeat status (on_step_end)")
+
         # === Periodic progress callback (interval-based) ===
         # Remove periodic DB progress updates entirely
 
@@ -937,7 +1007,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 tokenizer=tokenizer,
-                callbacks=[LogCallback()],
+                callbacks=[LogCallback(), HeartbeatCallback()],
             )
 
         trainer=_build_trainer()
@@ -978,8 +1048,15 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
-        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, tuning_type)
-        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, tuning_type, final_rouge)
+        _finish_job_success(
+            conn,
+            job.job_id,
+            save_name_with_suffix,
+            job.category,
+            tuning_type,
+            final_rouge,
+            subcategory=job.request.get("subcategory"),
+        )
         logger.info(
             f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}"
         )
@@ -1020,6 +1097,8 @@ def _log_to_save_name(save_name_with_suffix: str, message: str):
         pass
 
 def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
+    # body.category를 최종 신뢰(하위호환을 위해 인수 category는 fallback)
+    category = (body.category or category).lower()
     suffix = (body.tuningType or "QLORA").upper()
     # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
     save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"

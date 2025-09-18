@@ -53,8 +53,12 @@ def infer_route(body: InferBody):
 #     return set_topk_settings(body.topK)
 
 @router.get("/settings/model-list", summary="모델 목록과 로드/활성 상태 조회 (카테고리별 또는 base 전용)")
-def model_list(category: str = Query(..., description="base | qa | doc_gen | summary | all")):
-    return get_model_list(category)
+def model_list(
+    category: str = Query(..., description="base | qa | doc_gen | summary | all (또는 'doc_gen:report' 형식 지원)"),
+    subcategory: str | None = Query(None, description="서브카테고리. 지정 시 category와 결합하여 'cat:subcat'으로 전달"),
+):
+    cat_key = f"{category}:{subcategory}" if subcategory else category
+    return get_model_list(cat_key)
 
 @router.post("/settings/model-load", summary="모델명을 기준으로 로드 (베이스 모델은 모든 카테고리에 로드로 간주)")
 def model_load(body: ModelLoadBody = ...):
@@ -68,8 +72,21 @@ def model_unload(body: ModelLoadBody = ...):
     return unload_model(body.modelName)
 
 @router.get("/compare-models", summary="최근 평가 결과 기준 모델 비교 목록")
-def compare_models_list(category: str = Query(...)):
-    return compare_models(CompareModelsBody(category=category))
+def compare_models_list(
+    category: str = Query(..., description="qa | doc_gen | summary"),
+    subcategory: str | None = Query(None, description="세부 테스크 (doc_gen 확장 포함)"),
+    modelId: int | None = Query(None),
+    promptId: int | None = Query(None),
+    prompt: str | None = Query(None, description="치환 완료된 프롬프트 원문(옵션)"),
+):
+    payload = CompareModelsBody(
+        category=category,
+        subcategory=subcategory,
+        modelId=modelId,
+        promptId=promptId,
+        prompt=prompt,
+    )
+    return compare_models(payload)
 
 # ---------- 프롬프트(6개 구조) ----------
 # 카테고리: doc_gen | summary | qna(=qa)
