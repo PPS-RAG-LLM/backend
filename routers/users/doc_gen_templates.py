@@ -19,6 +19,7 @@ class TemplateListItem(BaseModel):
     id: int
     name: str
     content: str
+    sub_content: str | None = None
     variables: List[VariableItem]
 
 class TemplateListResponse(BaseModel):
@@ -28,6 +29,7 @@ class TemplateContentResponse(BaseModel):
     id: int
     name: str
     content: str
+    sub_content: str | None = None
     variables: List[VariableItem]
 
 @router.get("/templates", response_model=TemplateListResponse, summary="문서생성용 템플릿 전체 목록(상세+변수 포함)")

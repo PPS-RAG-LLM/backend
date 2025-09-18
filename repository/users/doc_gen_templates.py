@@ -11,6 +11,7 @@ def repo_list_doc_gen_templates() -> List[Dict[str, object]]:
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
                 SystemPromptTemplate.content,
+                SystemPromptTemplate.sub_content,
             )
             .where(
                 SystemPromptTemplate.category == "doc_gen",
@@ -48,6 +49,7 @@ def repo_list_doc_gen_templates() -> List[Dict[str, object]]:
                 "id": r.id,
                 "name": r.name,
                 "content": r.content,
+                "sub_content": r.sub_content,
                 "variables": by_tid.get(r.id, []),
             })
         return out
@@ -59,6 +61,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
                 SystemPromptTemplate.content,
+                SystemPromptTemplate.sub_content,
             )
             .where(
                 SystemPromptTemplate.id == template_id,
@@ -92,5 +95,6 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
             "id": tmpl.id,
             "name": tmpl.name,
             "content": tmpl.content,
+            "sub_content": tmpl.sub_content,
             "variables": variables,
         }
