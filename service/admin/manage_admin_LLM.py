@@ -934,31 +934,30 @@ def get_model_list(category: str) -> Dict[str, Any]:
     conn = _connect()
     try:
         cur = conn.cursor()
+        # ✅ is_active 필터를 제거하여 '등록된 모든 모델'을 보여준다.
         if category == "base":
-            # 모든 카테고리의 활성 모델 표시
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1
                 ORDER BY trained_at DESC, id DESC
                 """
             )
         elif category == "all":
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1 AND category='all'
+                WHERE category='all'
                 ORDER BY trained_at DESC, id DESC
                 """
             )
         else:
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1 AND (category=? OR category='all')
+                WHERE (category=? OR category='all')
                 ORDER BY trained_at DESC, id DESC
                 """,
                 (category,)
@@ -988,7 +987,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # 일반 카테고리 요청 시: base 중복 방지
+        # 일반 카테고리 요청 시: base 중복 방지는 유지
         if category != "base":
             row_type = str((r["type"] or "")).lower()
             row_cat  = str((r["category"] or "")).lower()
@@ -1003,7 +1002,9 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "loaded": bool(loaded_flag),
             "active": (name in active_names) and bool(loaded_flag),
             "category": r["category"],
-                "createdAt": r["created_at"],
+            "subcategory": r["subcategory"],
+            "isActive": bool(r["is_active"]),
+            "createdAt": r["created_at"],
         })
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
