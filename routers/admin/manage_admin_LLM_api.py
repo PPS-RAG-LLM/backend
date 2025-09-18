@@ -9,7 +9,7 @@ from service.admin.manage_admin_LLM import (
     UpdatePromptBody,
     CompareModelsBody,
     ActivePromptBody,
-    set_topk_settings,
+    # set_topk_settings,
     get_model_list,
     load_model,
     compare_models,
@@ -19,12 +19,12 @@ from service.admin.manage_admin_LLM import (
     update_prompt,
     delete_prompt,
     test_prompt,
-    DownloadModelBody,
+    # DownloadModelBody,
     InferBody,
-    download_model,
+    # download_model,
     infer_local,
-    InsertBaseModelBody,
-    insert_base_model,
+    # InsertBaseModelBody,
+    # insert_base_model,
     unload_model_for_category,
     get_active_prompt,
     set_active_prompt,
@@ -38,13 +38,9 @@ router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM"], responses={200: {
 
 # === New routes ===
 
-@router.post("/model/download", summary="HuggingFace 저장소에서 모델 다운로드 (오프라인 환경에서는 미사용)")
-def download_model_route(body: DownloadModelBody):
-    return download_model(body)
-
-@router.post("/model/insert-base", summary="오프라인 환경용 베이스 모델 메타 등록(qa/doc_gen/summary/qna)")
-def insert_base_model_route(body: InsertBaseModelBody):
-    return insert_base_model(body)
+# @router.post("/model/insert-base", summary="오프라인 환경용 베이스 모델 메타 등록(qa/doc_gen/summary/qna)")
+# def insert_base_model_route(body: InsertBaseModelBody):
+#     return insert_base_model(body)
 
 # 파인튜닝 관련 API는 routers/admin/LLM_finetuning_api.py 에서 제공합니다.
 
@@ -52,21 +48,23 @@ def insert_base_model_route(body: InsertBaseModelBody):
 def infer_route(body: InferBody):
     return infer_local(body)
 
-@router.post("/settings", summary="RAG에서 반환할 문서 수(topK) 설정")
-def set_settings(body: TopKSettingsBody):
-    return set_topk_settings(body.topK)
+# @router.post("/settings", summary="RAG에서 반환할 문서 수(topK) 설정")
+# def set_settings(body: TopKSettingsBody):
+#     return set_topk_settings(body.topK)
 
 @router.get("/settings/model-list", summary="모델 목록과 로드/활성 상태 조회 (카테고리별 또는 base 전용)")
-def model_list(category: str = Query(..., description="base | qa | doc_gen | summary | all")):
-    return get_model_list(category)
+def model_list(
+    category: str = Query(..., description="base | qa | doc_gen | summary | all (또는 'doc_gen:report' 형식 지원)"),
+    subcategory: str | None = Query(None, description="서브카테고리. 지정 시 category와 결합하여 'cat:subcat'으로 전달"),
+):
+    cat_key = f"{category}:{subcategory}" if subcategory else category
+    return get_model_list(cat_key)
 
 @router.post("/settings/model-load", summary="모델명을 기준으로 로드 (베이스 모델은 모든 카테고리에 로드로 간주)")
 def model_load(body: ModelLoadBody = ...):
     from service.admin import manage_admin_LLM as svc
-    load_by_name = getattr(svc, "load_model_by_name", None)
-    if callable(load_by_name):
-        return load_by_name(body.modelName)
-    return svc.load_model("qa", body.modelName)
+    cat = svc._infer_category_from_name(body.modelName)
+    return svc.load_model(cat, body.modelName)
 
 @router.post("/settings/model-unload", summary="모델명을 기준으로 명시적 언로드")
 def model_unload(body: ModelLoadBody = ...):
@@ -74,8 +72,21 @@ def model_unload(body: ModelLoadBody = ...):
     return unload_model(body.modelName)
 
 @router.get("/compare-models", summary="최근 평가 결과 기준 모델 비교 목록")
-def compare_models_list(category: str = Query(...)):
-    return compare_models(CompareModelsBody(category=category))
+def compare_models_list(
+    category: str = Query(..., description="qa | doc_gen | summary"),
+    subcategory: str | None = Query(None, description="세부 테스크 (doc_gen 확장 포함)"),
+    modelId: int | None = Query(None),
+    promptId: int | None = Query(None),
+    prompt: str | None = Query(None, description="치환 완료된 프롬프트 원문(옵션)"),
+):
+    payload = CompareModelsBody(
+        category=category,
+        subcategory=subcategory,
+        modelId=modelId,
+        promptId=promptId,
+        prompt=prompt,
+    )
+    return compare_models(payload)
 
 # ---------- 프롬프트(6개 구조) ----------
 # 카테고리: doc_gen | summary | qna(=qa)
@@ -91,7 +102,7 @@ def get_prompts(
 @router.post("/prompts", summary="프롬프트 생성(카테고리/서브테스크별)")
 def create_prompt_route(
     category: str = Query(..., description="doc_gen | summary | qa"),
-    subtask: str | None = Query(None, description="doc_gen 전용"),
+    subtask: str | None = Query(None, description="doc_gen 전용: report | travel_plan | meeting_minutes 등"),
     body: CreatePromptBody = ...,
 ):
     return create_prompt(category, subtask, body)

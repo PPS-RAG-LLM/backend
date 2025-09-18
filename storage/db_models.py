@@ -218,9 +218,10 @@ class SystemPromptTemplate(Base):
     __tablename__ = "system_prompt_template"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(Text, nullable=False)
+    name = Column(Text, nullable=False) # Business_Trip_Plan, Meeting_Minutes, Business_Trip_Report
     category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
-    content = Column(Text, nullable=False)
+    content = Column(Text, nullable=False) # 시스템 프롬프트 
+    sub_content = Column(Text) # 유저 프롬프트
     required_vars = Column(Text)  # JSON 배열
     is_default = Column(Boolean, server_default=text("false"))
     is_active = Column(Boolean, server_default=text("true"))
@@ -231,7 +232,7 @@ class PromptMapping(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     template_id = Column(Integer, ForeignKey("system_prompt_template.id", ondelete="CASCADE"), nullable=False)
-    variable_id = Column(Integer, ForeignKey("system_prompt_variables.id", ondelete="CASCADE"), nullable=False)
+    variable_id = Column(Integer, ForeignKey("system_prompt_variables.id", ondelete="CASCADE"), nullable=False) # 변하는 프롬프트트
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     updated_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False) 
 

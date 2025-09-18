@@ -1,6 +1,6 @@
 from functools import lru_cache
 from utils import logger
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from sentence_transformers import SentenceTransformer
 from config import config as _cfg
 import torch

@@ -8,6 +8,7 @@ import time
 import gc
 import logging
 import importlib
+from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
@@ -19,16 +20,22 @@ from utils.database import get_db as _get_db
 _DEFAULT_TOPK: int = 5
 
 # ===== Constants =====
-# Force DB to pps_rag.db by default (can be overridden via COREIQ_DB)
-os.environ.setdefault("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
-DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
-STORAGE_ROOT = "/home/work/CoreIQ/backend/storage/model"  # train_qwen_rag.py 와 동일
+# Backend root (상대 경로 기준 루트)
+BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
+SERVICE_ROOT = BASE_BACKEND / "service"
+# 신규 표준 저장소: ./service/storage/model
+STORAGE_ROOT = SERVICE_ROOT / "storage" / "model"
+
+# 레거시 위치(호환용): ./storage/model
+LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "model"
+
+# DB 경로(환경변수로 오버라이드 가능)
+os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
+DB_PATH = os.getenv("COREIQ_DB")
+
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
 ACTIVE_PROMPT_CACHE_PREFIX = "active_prompt:"     # active_prompt:qa:report
 RAG_TOPK_CACHE_KEY = "rag_topk"
-
-# Backend root for portable paths (same approach as LLM_finetuning.py)
-BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))
 
 # ===== Pydantic models (변수명/스키마 고정) =====
 class TopKSettingsBody(BaseModel):
@@ -65,9 +72,9 @@ class CompareModelsBody(BaseModel):
 
 # === NEW: model download / train / infer request bodies ===
 
-class DownloadModelBody(BaseModel):
-    repo: str = Field(..., description="HuggingFace repo id, e.g. Qwen/Qwen2.5-7B-Instruct-1M")
-    name: str = Field(..., description="Local folder name to store under STORAGE_ROOT")
+# class DownloadModelBody(BaseModel):
+#     repo: str = Field(..., description="HuggingFace repo id, e.g. Qwen/Qwen2.5-7B-Instruct-1M")
+#     name: str = Field(..., description="Local folder name to store under STORAGE_ROOT")
 
 
 class TrainModelBody(BaseModel):
@@ -179,6 +186,15 @@ def _normalize_model_path_input(p: str) -> str:
     if "/storage/model/" in s:
         s = s.split("/storage/model/", 1)[1]
     return s.strip("/")
+
+
+def _sanitize_name(name: str) -> str:
+    return (name or "").strip().replace("-", "_").replace("/", "_")
+
+
+def _std_rel_path_for_name(model_name: str) -> str:
+    # DB에 저장될 규칙 경로 (반드시 ./ 로 시작)
+    return f"./service/storage/model/local_{_sanitize_name(model_name)}"
 
 
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
@@ -381,7 +397,7 @@ class _ModelManager:
 
     def _resolve_candidate(self, name_or_path: str) -> str:
         # Prefer local storage folder under STORAGE_ROOT if it looks like a model dir
-        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
+        fs_path = str(STORAGE_ROOT / name_or_path)
         try:
             if os.path.isfile(os.path.join(fs_path, "config.json")):
                 return fs_path
@@ -401,20 +417,24 @@ class _ModelManager:
             if key in self._cache:
                 return self._cache[key]
             try:
-                from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig  # type: ignore
+                from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
                 import torch  # type: ignore
 
-                # gpt-oss는 어댑터 전용 경로로 처리 (HF BitsAndBytes 경로 차단)
-                base_key = os.path.basename(key).lower()
-                if base_key.startswith("gpt-oss") or base_key.startswith("gpt_oss"):
-                    raise RuntimeError("gpt-oss should be loaded via adapter only")
+                # (변경) gpt-oss도 HF 로더로 직접 로드 허용
 
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                )
+                # Optional quantization (disable via env LLM_DISABLE_BNB=1)
+                bnb_config = None
+                try:
+                    if os.getenv("LLM_DISABLE_BNB", "0") not in ("1", "true", "TRUE", "True"):
+                        from transformers import BitsAndBytesConfig  # type: ignore
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                        )
+                except Exception:
+                    bnb_config = None
                 tok = AutoTokenizer.from_pretrained(key, trust_remote_code=True, local_files_only=True)
                 if tok.pad_token_id is None:
                     if getattr(tok, "eos_token_id", None) is not None:
@@ -422,13 +442,23 @@ class _ModelManager:
                     else:
                         tok.add_special_tokens({"pad_token": "<|pad|>"})
                         tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
-                mdl = AutoModelForCausalLM.from_pretrained(
-                    key,
-                    trust_remote_code=True,
-                    device_map="auto",
-                    quantization_config=bnb_config,
-                    local_files_only=True,
-                )
+                try:
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        key,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        quantization_config=bnb_config,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    # Fallback: reload without quantization if bnb/triton not available
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        key,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                        local_files_only=True,
+                    )
                 self._cache[key] = (tok, mdl)
                 return tok, mdl
             except Exception:
@@ -478,12 +508,40 @@ _MODEL_MANAGER = _ModelManager()
 _ADAPTER_LOADED: set[str] = set()
 
 def _resolve_model_fs_path(name_or_path: str) -> str:
+    """
+    절대/상대 무엇이든 실제 폴더(config.json) 있는 경로로 환원.
+    우선순위: 규칙 경로 → service root → legacy root → 입력값
+    """
     try:
-        if os.path.isabs(name_or_path):
-            return name_or_path
-        fs_path = os.path.join(STORAGE_ROOT, name_or_path)
-        if os.path.isfile(os.path.join(fs_path, "config.json")):
-            return fs_path
+        s = (name_or_path or "").strip().replace("\\", "/")
+        # 규칙 경로 후보 (service/local_<name>)
+        rule_abs = STORAGE_ROOT / f"local_{_sanitize_name(_strip_category_suffix(os.path.basename(s)))}"
+        if (rule_abs / "config.json").is_file():
+            return str(rule_abs)
+
+        # ./service/... 상대처리
+        if s.startswith("./service/"):
+            cand = (BASE_BACKEND / s.lstrip("./"))
+            if (cand / "config.json").is_file():
+                return str(cand)
+
+        # ./storage/... 상대처리(레거시)
+        if s.startswith("./storage/"):
+            cand = (BASE_BACKEND / s.lstrip("./"))
+            if (cand / "config.json").is_file():
+                return str(cand)
+
+        # 이름만 온 경우: service → legacy
+        cand = STORAGE_ROOT / os.path.basename(s)
+        if (cand / "config.json").is_file():
+            return str(cand)
+        cand = LEGACY_STORAGE_ROOT / os.path.basename(s)
+        if (cand / "config.json").is_file():
+            return str(cand)
+
+        # 절대경로 그대로 확인
+        if os.path.isabs(s) and os.path.isfile(os.path.join(s, "config.json")):
+            return s
     except Exception:
         logging.getLogger(__name__).exception("failed to resolve model fs path")
     return name_or_path
@@ -534,10 +592,7 @@ def _clear_local_cache_entries(model_name: str) -> None:
 
 def _load_local_model(model_name_or_path: str):
     try:
-        # Prefer adapter-based for OSS/gpt_oss to avoid HF AutoModel path
-        lower = (model_name_or_path or "").lower()
-        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-            return None
+        # (변경) gpt-oss도 매니저 경유 HF 로더 사용 허용
         # Prefer manager cache
         key = _MODEL_MANAGER._resolve_candidate(model_name_or_path)
         if key in _MODEL_CACHE:
@@ -562,7 +617,7 @@ def _simple_generate(prompt_text: str, model_name_or_path: str, max_tokens: int 
     tok, mdl = pair
     import torch
     messages = [
-        {"role": "system", "content": "You are Qwen, a helpful assistant."},
+        {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": prompt_text},
     ]
     full = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -587,9 +642,8 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
 
     LLM모델 경로로 모델 켜졌는지 조회
     """
-    conn = None
+    conn = _connect()
     try:
-        conn = _connect()
         cur = conn.cursor()
         cur.execute("SELECT model_path FROM llm_models WHERE name=?", (model_name,))
         row = cur.fetchone()
@@ -598,30 +652,33 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
         return None
     finally:
         try:
-            if conn:
-                conn.close()
+            conn.close()
         except Exception:
             pass
 
     if not row:
         return None
-    path_value = (row["model_path"] or "").strip()
-    if not path_value:
+    val = (row["model_path"] or "").strip().replace("\\", "/")
+    if not val:
         return None
-    try:
-        # If relative, assume under STORAGE_ROOT
-        candidate = path_value
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(STORAGE_ROOT, candidate)
-        if os.path.isfile(os.path.join(candidate, "config.json")):
-            return candidate
-        # If absolute in DB but not found, try STORAGE_ROOT/name fallback
-        fallback = os.path.join(STORAGE_ROOT, path_value)
-        if os.path.isfile(os.path.join(fallback, "config.json")):
-            return fallback
-    except Exception:
-        logging.getLogger(__name__).exception("failed while resolving db model_path for %s", model_name)
-    return None
+
+    # Handle standardized relative paths like ./service/storage/model/...
+    if val.startswith("./"):
+        abs_p = (BASE_BACKEND / val.lstrip("./"))
+        if (abs_p / "config.json").is_file():
+            return str(abs_p)
+        # Try standardized service location based on name
+        std_abs = STORAGE_ROOT / f"local_{_sanitize_name(model_name)}"
+        if (std_abs / "config.json").is_file():
+            return str(std_abs)
+        # Legacy fallback using basename
+        leg = LEGACY_STORAGE_ROOT / os.path.basename(val)
+        if (leg / "config.json").is_file():
+            return str(leg)
+        return None
+
+    # Absolute or simple name -> resolve via fs helper
+    return _resolve_model_fs_path(val)
 
 
 def _strip_category_suffix(name: str) -> str:
@@ -642,17 +699,26 @@ def _infer_category_from_name(name: str) -> Optional[str]:
     return None
 
 def _to_rel_under_storage_root(p: str) -> str:
-    """
-    storage/model 하위 상대경로(보통 폴더명)로 저장.
-    절대경로여도 STORAGE_ROOT 기준 상대경로로 환원.
-    """
+    """ 상대 경로 반환 """
     try:
-        rp = os.path.relpath(p, STORAGE_ROOT)
-        if rp in (".", ""):
-            return os.path.basename(p.rstrip("/"))
-        return rp
+        p = str(p)
+        # 새 표준(root=SERVICE_ROOT)
+        try:
+            rp = os.path.relpath(p, str(STORAGE_ROOT))
+            if rp not in (".", ""):
+                return f"./service/storage/model/{rp}".replace("\\", "/")
+        except Exception:
+            pass
+        # 레거시(root=LEGACY_STORAGE_ROOT)
+        try:
+            rp = os.path.relpath(p, str(LEGACY_STORAGE_ROOT))
+            if rp not in (".", ""):
+                return f"./storage/model/{rp}".replace("\\", "/")
+        except Exception:
+            pass
     except Exception:
-        return os.path.basename(p.rstrip("/"))
+        pass
+    return (p or "").replace("\\", "/")
 
 
 def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
@@ -672,101 +738,98 @@ def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
         if p2 and os.path.isfile(os.path.join(p2, "config.json")):
             return p2
     # 3) STORAGE_ROOT/exact
-    cand = os.path.join(STORAGE_ROOT, model_name)
-    if os.path.isfile(os.path.join(cand, "config.json")):
-        return cand
+    cand = STORAGE_ROOT / model_name
+    if (cand / "config.json").is_file():
+        return str(cand)
     # 4) STORAGE_ROOT/base-name
-    cand2 = os.path.join(STORAGE_ROOT, base)
-    if os.path.isfile(os.path.join(cand2, "config.json")):
-        return cand2
+    cand2 = STORAGE_ROOT / base
+    if (cand2 / "config.json").is_file():
+        return str(cand2)
     return None
 
 
 def _preload_via_adapters(model_name: str) -> bool:
-    name = (model_name or "").lower()
-    model_path = _db_get_model_path(model_name)
-    if not model_path:
-        # Fallback to STORAGE_ROOT if present
-        cand = os.path.join(STORAGE_ROOT, model_name)
-        if os.path.isfile(os.path.join(cand, "config.json")):
-            model_path = cand
+    """
+    Admin 경로용 프리로드:
+      - DB/FS에서 model_path만 해석
+      - gpt-oss 계열은 전용 로더로, 그 외는 HF Auto로 로드
+      - 성공 시 _ADAPTER_LOADED에 추적 키 추가
+    """
+    try:
+        model_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
+        if not (model_path and os.path.isfile(os.path.join(model_path, "config.json"))):
+            logging.getLogger(__name__).warning("[preload] config.json not found: %s", model_path)
+            return False
+
+        lower = (model_name or "").lower()
+        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
+            # gpt-oss 전용 로더
+            try:
+                from utils.llms.huggingface.gpt_oss_20b import load_gpt_oss_20b
+                load_gpt_oss_20b(model_path)  # lru_cache로 1회 로드
+            except Exception:
+                logging.getLogger(__name__).exception("gpt-oss preload failed")
+                return False
         else:
-            # Also try base-name for suffix forms
-            base = _strip_category_suffix(model_name)
-            cand2 = os.path.join(STORAGE_ROOT, base)
-            if os.path.isfile(os.path.join(cand2, "config.json")):
-                model_path = cand2
-            else:
-                logging.getLogger(__name__).warning("model path not found for %s", model_name)
+            # 일반 HF 경로
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM
+                import torch
+                tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+                if tok.pad_token_id is None:
+                    if getattr(tok, "eos_token_id", None) is not None:
+                        tok.pad_token_id = tok.eos_token_id
+                    else:
+                        tok.add_special_tokens({"pad_token": "<|pad|>"})
+                        tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
+                try:
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        model_path,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        local_files_only=True,
+                        # bnb는 환경에 따라 깨지니 일단 제외. 필요시 옵션화
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                    )
+                except Exception:
+                    # 마지막 보루: dtype만 바꿔 재시도
+                    mdl = AutoModelForCausalLM.from_pretrained(
+                        model_path,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        local_files_only=True,
+                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                    )
+                # 굳이 _MODEL_MANAGER에 넣을 필요는 없음(프리로드 목적)
+            except Exception:
+                logging.getLogger(__name__).exception("HF preload failed")
                 return False
 
-    try:
-        if name.startswith("gpt_oss") or name.startswith("gpt-oss"):
-            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
-            loader = getattr(mod, "load_gpt_oss_20b", None)
-            if callable(loader):
-                logging.getLogger(__name__).info("[gpt-oss] adapter preload start: %s", model_path)
-                loader(model_path)  # lru_cache will retain
-                try:
-                    _ADAPTER_LOADED.add(model_path)
-                    _ADAPTER_LOADED.add(os.path.basename(model_path))
-                except Exception:
-                    logging.getLogger(__name__).exception("[gpt-oss] adapter tracking add failed")
-                logging.getLogger(__name__).info("[gpt-oss] adapter preload done: %s", model_path)
-                return True
-            return False
-        if "qwen" in name:
-            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
-            loader = getattr(mod, "load_qwen_instruct_7b", None)
-            if callable(loader):
-                loader(model_path)  # lru_cache will retain
-                try:
-                    _ADAPTER_LOADED.add(model_path)
-                    _ADAPTER_LOADED.add(os.path.basename(model_path))
-                except Exception:
-                    pass
-                return True
-            return False
+        # 추적키 추가
+        _ADAPTER_LOADED.add(model_path)
+        _ADAPTER_LOADED.add(os.path.basename(model_path))
+        logging.getLogger(__name__).info("[preload] ok: %s (%s)", model_name, model_path)
+        return True
     except Exception:
-        logging.getLogger(__name__).exception("adapter preload failed for %s", model_name)
+        logging.getLogger(__name__).exception("[preload] unexpected failure")
         return False
-    return False
 
 
 def _unload_via_adapters(model_name: str) -> bool:
-    name = (model_name or "").lower()
-    ok = False
-    try:
-        if name.startswith("gpt_oss") or name.startswith("gpt-oss"):
-            mod = importlib.import_module("utils.llms.huggingface.gpt_oss_20b")
-            loader = getattr(mod, "load_gpt_oss_20b", None)
-            if hasattr(loader, "cache_clear"):
-                try:
-                    loader.cache_clear()  # type: ignore[attr-defined]
-                    ok = True
-                except Exception:
-                    pass
-        if "qwen" in name:
-            mod = importlib.import_module("utils.llms.huggingface.qwen_7b")
-            loader = getattr(mod, "load_qwen_instruct_7b", None)
-            if hasattr(loader, "cache_clear"):
-                try:
-                    loader.cache_clear()  # type: ignore[attr-defined]
-                    ok = True
-                except Exception:
-                    pass
-    except Exception:
-        logging.getLogger(__name__).exception("adapter unload failed for %s", model_name)
-    # remove tracking
+    """
+    Admin 경로용 언로드:
+      - _ADAPTER_LOADED 추적만 지우고, 메모리 정리만 수행
+      - (특정 캐시 클리어 함수 호출 제거)
+    """
     try:
         resolved = _resolve_model_fs_path(model_name)
         _ADAPTER_LOADED.discard(resolved)
         _ADAPTER_LOADED.discard(os.path.basename(resolved))
     except Exception:
         pass
-    # Best-effort GPU/CPU cleanup
+    # GPU/CPU 캐시 정리
     try:
-        import torch  # type: ignore
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -776,14 +839,13 @@ def _unload_via_adapters(model_name: str) -> bool:
         gc.collect()
     except Exception:
         logging.getLogger(__name__).exception("gc collect failed after adapter unload")
-    return ok
+    return True
 
 # ================================================================
 # External script helpers (download / training)
 # ================================================================
 
-_DOWNLOAD_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/download_qwen_model.py"
-_TRAIN_SCRIPT = "/home/work/CoreIQ/gpu_use/Qwen/custom_scripts/train_qwen_rag.py"
+
 
 
 def _run_command(cmd: list[str]) -> Tuple[int, str]:
@@ -797,86 +859,55 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 
 # ===== Public service functions =====
 
-def download_model(body: DownloadModelBody) -> Dict[str, Any]:
-    cmd = ["python", _DOWNLOAD_SCRIPT, "--repo", body.repo, "--name", body.name]
-    code, out = _run_command(cmd)
-    if code != 0:
-        return {"success": False, "message": "download failed", "log": out}
-    return {"success": True, "message": "download completed", "log": out}
+# def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
+#     """
+#     기본 모델 등록(단일 레코드):
+#       - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
+#       - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
+#     """
+#     _migrate_llm_models_if_needed()
+#     base_name = body.name.strip()
+#     rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
+
+#     # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
+#     abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
+#     cfg_ok = (abs_new / "config.json").is_file()
+#     if not cfg_ok:
+#         abs_old = LEGACY_STORAGE_ROOT / base_name
+#         cfg_ok = (abs_old / "config.json").is_file()
+
+#     conn = _connect(); cur = conn.cursor()
+#     try:
+#         cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
+#         row = cur.fetchone()
+#         if row:
+#             cur.execute(
+#                 """
+#                 UPDATE llm_models
+#                    SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
+#                  WHERE id=?
+#                 """,
+#                 (body.provider, rel_folder, int(row[0]))
+#             )
+#             mdl_id = int(row[0]); existed = True
+#         else:
+#             cur.execute(
+#                 """
+#                 INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
+#                 VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
+#                 """,
+#                 (body.provider, base_name, 0, rel_folder)
+#             )
+#             mdl_id = int(cur.lastrowid); existed = False
+#         conn.commit()
+#     finally:
+#         conn.close()
+
+#     note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
+#     return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
 
 
-def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
-    """
-    기본 모델 등록(단일 레코드):
-      - 항상 category='all', subcategory=NULL 로 한 행만 저장
-      - model_path는 STORAGE_ROOT 하위 상대경로(폴더명)로 저장
-      - 동일 name 존재 시 upsert
-    """
-    _migrate_llm_models_if_needed()
-    base_name = body.name.strip()
-    provided = (body.model_path or "").strip()
-    rel_folder = _normalize_model_path_input(provided or base_name)
-    abs_path = os.path.join(STORAGE_ROOT, rel_folder)
-    cfg_ok = os.path.isfile(os.path.join(abs_path, "config.json"))
 
-    conn = _connect(); cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
-        row = cur.fetchone()
-        if row:
-            cur.execute(
-                """
-                UPDATE llm_models
-                   SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
-                 WHERE id=?
-                """,
-                (body.provider, rel_folder, int(row[0]))
-            )
-            mdl_id = int(row[0]); existed = True
-        else:
-            cur.execute(
-                """
-                INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
-                VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
-                """,
-                (body.provider, base_name, 0, rel_folder)
-            )
-            mdl_id = int(cur.lastrowid); existed = False
-        conn.commit()
-    finally:
-        conn.close()
-
-    note = "ok" if cfg_ok else "경고: 모델 폴더에 config.json이 보이지 않습니다."
-    return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
-
-
-def train_model(body: TrainModelBody) -> Dict[str, Any]:
-    output_dir = os.path.join(STORAGE_ROOT, body.ft_name)
-    cmd = [
-        "python", _TRAIN_SCRIPT,
-        "--csv", body.csv,
-        "--base_name", body.base_name,
-        "--ft_name", body.ft_name,
-        "--epochs", str(body.epochs),
-        "--batch_size", str(body.batch_size),
-        "--lr", str(body.lr),
-    ]
-    # 비동기로 실행 – 파이썬 백그라운드 프로세스 & job record 추가
-    import subprocess, json as _jsonlib
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    # fine_tune_jobs row 생성
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO fine_tune_jobs(provider_job_id, dataset_id, hyperparameters, status, started_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (f"pid:{proc.pid}", None, _json(body.dict()), "running"))
-    job_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    return {"success": True, "jobId": job_id, "pid": proc.pid}
 
 
 def infer_local(body: InferBody) -> Dict[str, Any]:
@@ -886,11 +917,11 @@ def infer_local(body: InferBody) -> Dict[str, Any]:
 
 
 # ===== Service functions (구현) =====
-def set_topk_settings(topk: int) -> Dict[str, Any]:
-    global _DEFAULT_TOPK  # noqa: PLW0603
-    _DEFAULT_TOPK = int(topk)
-    _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
-    return {"success": True}
+# def set_topk_settings(topk: int) -> Dict[str, Any]:
+#     global _DEFAULT_TOPK  # noqa: PLW0603
+#     _DEFAULT_TOPK = int(topk)
+#     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
+#     return {"success": True}
 
 
 def get_model_list(category: str) -> Dict[str, Any]:
@@ -901,10 +932,20 @@ def get_model_list(category: str) -> Dict[str, Any]:
     conn = _connect()
     try:
         cur = conn.cursor()
-        if category == "all":
+        if category == "base":
+            # 모든 카테고리의 활성 모델 표시
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path
+                SELECT id, name, type, category, model_path, created_at
+                FROM llm_models
+                WHERE is_active=1
+                ORDER BY trained_at DESC, id DESC
+                """
+            )
+        elif category == "all":
+            cur.execute(
+                """
+                SELECT id, name, type, category, model_path, created_at
                 FROM llm_models
                 WHERE is_active=1 AND category='all'
                 ORDER BY trained_at DESC, id DESC
@@ -913,7 +954,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         else:
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path
+                SELECT id, name, type, category, model_path, created_at
                 FROM llm_models
                 WHERE is_active=1 AND (category=? OR category='all')
                 ORDER BY trained_at DESC, id DESC
@@ -933,14 +974,24 @@ def get_model_list(category: str) -> Dict[str, Any]:
         logging.getLogger(__name__).exception("failed to gather loaded keys")
         loaded_keys = set()
 
-    active_name = _active_model_name_for_category(category)
+    # 활성 모델 이름 집합 계산
+    if category == "base":
+        active_names = {
+            _active_model_name_for_category("qa"),
+            _active_model_name_for_category("doc_gen"),
+            _active_model_name_for_category("summary"),
+        } - {None}
+    else:
+        active_name = _active_model_name_for_category(category)
+        active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # base 중복 방지: type='base'이며 category!='all'이면 화면에서 숨김
-        row_type = str((r["type"] or "")).lower()
-        row_cat  = str((r["category"] or "")).lower()
-        if (row_type == "base") and (row_cat != "all"):
-            continue
+        # 일반 카테고리 요청 시: base 중복 방지
+        if category != "base":
+            row_type = str((r["type"] or "")).lower()
+            row_cat  = str((r["category"] or "")).lower()
+            if (row_type == "base") and (row_cat != "all"):
+                continue
         name = r["name"]
         cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
@@ -948,7 +999,9 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "id": r["id"],
             "name": name,
             "loaded": bool(loaded_flag),
-            "active": (name == active_name) and bool(loaded_flag),
+            "active": (name in active_names) and bool(loaded_flag),
+            "category": r["category"],
+                "createdAt": r["created_at"],
         })
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
@@ -967,23 +1020,19 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
 
         # If not loaded, load it
         if not _is_model_loaded(model_name):
+            lower = (model_name or "").lower()
             try:
-                lower = (model_name or "").lower()
                 if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-                    # gpt-oss: 어댑터 경로만 사용
-                    pre_ok = _preload_via_adapters(model_name)
-                    if not pre_ok:
-                        raise RuntimeError("adapter preload also failed")
+                    if not _preload_via_adapters(model_name):
+                        raise RuntimeError("adapter preload failed")
                 else:
+                    candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
                     try:
-                        # Resolve best candidate path
-                        candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
                         _MODEL_MANAGER.load(candidate)
                     except Exception:
-                        logging.getLogger(__name__).exception("manager load failed, trying adapter preload")
-                        pre_ok = _preload_via_adapters(model_name)
-                        if not pre_ok:
-                            raise RuntimeError("adapter preload also failed")
+                        logging.getLogger(__name__).exception("manager load failed, trying adapter-style preload")
+                        if not _preload_via_adapters(model_name):
+                            raise
             except Exception:
                 logger.exception("failed to load model: %s", model_name)
                 return {"success": False, "message": f"모델 로드 실패: {model_name}", "category": category, "modelName": model_name}
@@ -991,10 +1040,14 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         # Set active for category
         _set_active_model_for_category(category, model_name)
 
-        # DB is_active 동기화(동일 경로 전체)
+        # DB is_active 동기화(동일 경로 전체) – 규칙 상대경로 기준
         try:
             row = _lookup_model_by_name(model_name)
-            rel_path = (row["model_path"] if row else None) or _normalize_model_path_input(os.path.basename((_resolve_model_path_for_name(model_name) or model_name)))
+            if row and row["model_path"]:
+                rel_path = row["model_path"]
+            else:
+                resolved = _resolve_model_fs_path(model_name)
+                rel_path = _to_rel_under_storage_root(resolved)
             if rel_path:
                 _db_set_active_by_path(rel_path, True)
         except Exception:
@@ -1414,11 +1467,18 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     body = body or {}
     variables = body.get("variables", {}) or {}
     category = body.get("category") or "summary"
-    model_name = body.get("modelName") or _active_model_name_for_category(category) or "Qwen2.5-7B-Instruct-1M"
     max_tokens = int(body.get("max_tokens", 512))
     temperature = float(body.get("temperature", 0.7))
 
     tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
+    subtask = tmpl["subtask"] if (isinstance(tmpl, dict) or hasattr(tmpl, "__getitem__")) else getattr(tmpl, "subtask", None)
+
+    if body.get("modelName"):
+        model_name = body["modelName"]
+    else:
+        model_name = select_model_for_task(category, subtask)
+        if not model_name:
+            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
     required = json.loads(tmpl["required_vars"] or "[]")
     # 필수 변수 체크(간단)
     missing = [k for k in required if k not in variables]

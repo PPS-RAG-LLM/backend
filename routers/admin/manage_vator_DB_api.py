@@ -56,10 +56,10 @@ class VectorSettingsBody(BaseModel):
         description="검색 방식 (hybrid | semantic | bm25)"
     )
     chunkSize: Optional[int] = Field(
-        None, ge=512, description="청크 토큰 크기 (기본 512)"
+        None, ge=1, description="청크 토큰 크기 (기본 512)"
     )
     overlap: Optional[int] = Field(
-        None, ge=64, description="청크 간 오버랩 토큰 수 (기본 64)"
+        None, ge=0, description="청크 간 오버랩 토큰 수 (기본 64)"
     )
 
 

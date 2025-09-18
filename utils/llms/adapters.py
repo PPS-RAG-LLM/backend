@@ -44,29 +44,52 @@ def hf_factory(model_key: str) -> Streamer:
     from pathlib import Path
 
     # # 데이터베이스에서 모델 정보 조회
-    # logger.info(f"hf_factory: {model_key}")
-    # model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
-    # logger.info(f"model_info: {model_info}")
+    logger.info(f"hf_factory: {model_key}")
+    model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
+    logger.info(f"model_info: {model_info}")
 
     # # 모델 경로 확인
-    # local_path = _resolve_model_path(model_info.get("model_path"))
-    # logger.info(f"local_path: {local_path}")
-    # logger.info(f"hf_factory: {model_key}")
+    local_path = _resolve_model_path(model_info.get("model_path"))
+    logger.info(f"local_path: {local_path}")
+    logger.info(f"hf_factory: {model_key}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성
     if model_key.startswith("qwen_2.5_7b"):
         logger.info(f"qwen_2.5_7b")
-        local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
+        # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("qwen_2.5_vl"):
         return _Wrap(lambda messages, **kw: qwen_vl_7b.stream_chat(messages, model_path=local_path, **kw))
-    if model_key.startswith("gpt_oss"):
+    if model_key.startswith("gpt_oss") or model_key.startswith("gpt-oss") :
         logger.info(f"gpt_oss_20b")
-        local_path = Path("/home/work/CoreIQ/backend/storage/model/gpt-oss-20b")
+        # local_path = Path("/home/work/CoreIQ/backend/storage/model/gpt-oss-20b")
         return _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=local_path, **kw))
     else:
         logger.error(f"해당모델 이름으로 시작하는 로직이 없음. {model_key}")
     raise NotFoundError(f"지원하지 않는 huggingface 모델: {model_key}")
+
+
+def preload_adapter_model(model_key: str) -> bool:
+    """Preload a local HF model via shared loader so that adapter path can stream later.
+    This avoids bitsandbytes/triton by using utils.model_load.load_hf_llm_model.
+    Returns True on success, False otherwise.
+    """
+    try:
+        model_info = get_llm_model_by_provider_and_name("huggingface", model_key)
+        local_path = _resolve_model_path(model_info.get("model_path"))
+        from utils import load_hf_llm_model
+        load_hf_llm_model(str(local_path))
+        try:
+            logger.info(f"adapter preload ok: {model_key} -> {local_path}")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        try:
+            logger.exception(f"adapter preload failed for {model_key}: {e}")
+        except Exception:
+            pass
+        return False
 
 ### OpenAI API
 

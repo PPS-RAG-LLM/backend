@@ -12,7 +12,6 @@ logger = logger(__name__)
 @lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
 def load_gpt_oss_20b(model_dir): 
     
-
     # 2) 로컬 디렉터리 존재 확인
     if not os.path.isdir(model_dir):
         parent = model_dir.parent
@@ -41,7 +40,6 @@ def load_gpt_oss_20b(model_dir):
         )
     model.eval()
     return model, tokenizer
-
 
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
     logger.info(f"stream_chat: {gen_kwargs}\n\n")

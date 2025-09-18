@@ -14,14 +14,24 @@ from service.admin.LLM_finetuning import (
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
 
 
-@router.post("/fine-tuning", summary="파인튜닝 설정 및 실행 (카테고리 필수)")
-def launch_fine_tuning(category: str = Query(..., description="qa | doc_gen | summary"), body: FineTuneRequest = ...):
-    # Let service raise structured exceptions; middleware will format the response.
-    return start_fine_tuning(category, body)
+@router.post("/fine-tuning", summary="파인튜닝 설정 및 실행 (Body에 category/subcategory 포함)")
+def launch_fine_tuning(
+    body: FineTuneRequest,
+    category: str | None = Query(None, description="(하위호환) qa | doc_gen | summary. 지정 시 body.category 보다 우선하지 않음"),
+):
+    """
+    - 하위호환: Query category가 오더라도, 실제 처리는 body.category를 원천으로 사용.
+    - QLORA일 때 quantizationBits(4/8) 검증은 FineTuneRequest validator에서 수행.
+    """
+    cat = body.category or category
+    return start_fine_tuning(cat, body)
 
 
 @router.get("/fine-tuning", summary="지정된 작업 ID의 파인튜닝 진행 상태와 결과를 조회")
-def read_fine_tuning_status(category: str = Query(..., description="qa | doc_gen | summary"), jobId: str = Query(...)):
+def read_fine_tuning_status(
+    jobId: str = Query(...),
+    category: str = Query("qa", description="(옵션) qa | doc_gen | summary. 기본값 qa"),
+):
     return get_fine_tuning_status(category, jobId)
 
 
@@ -36,7 +46,10 @@ def read_fine_tuning_logs(jobId: str = Query(...), tail: int = Query(200, ge=1, 
 
 
 @router.get("/fine-tuning/stream", summary="파인튜닝 진행 상황을 SSE로 실시간 구독")
-def stream_fine_tuning(jobId: str):
+def stream_fine_tuning(
+    jobId: str,
+    category: str = Query("qa", description="(옵션) qa | doc_gen | summary. 기본값 qa"),
+):
     async def event_generator():
         last_len = 0
         while True:
@@ -49,7 +62,7 @@ def stream_fine_tuning(jobId: str):
                     yield f"data: {ln}\n\n"
                 last_len = len(lines)
             # status
-            st = get_fine_tuning_status("qa", jobId)  # category는 상태만 위해 의미 없음
+            st = get_fine_tuning_status(category, jobId)
             yield f"event: status\ndata: {json.dumps(st, ensure_ascii=False)}\n\n"
             if st.get("status") in ("succeeded", "failed"):
                 break

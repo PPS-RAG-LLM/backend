@@ -19,6 +19,7 @@ from routers.users.workspace_chat import chat_router as chat_router
 from routers.admin.manage_vator_DB_api import router as vector_db_router
 from routers.users.workspace_thread import thread_router
 from routers.users.documents import router as document_router
+from routers.docgen_simple import router as docgen_simple_router
 from routers.admin.LLM_finetuning_api import router as llm_finetuning_router
 from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 # from src.routes.admin import router as admin_router
@@ -28,6 +29,9 @@ from routers.mock_company import mock_company_router as mock_company_router
 from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
+
+from routers.users.summary_templates import router as summary_router
+from routers.users.doc_gen_templates import router as doc_gen_templates_router
 logger = logger(__name__)
 
 
@@ -151,6 +155,8 @@ app.include_router(llm_finetuning_router)
 app.include_router(admin_llm_router)
 app.include_router(sso_router)
 app.include_router(mock_company_router)
+app.include_router(summary_router)
+app.include_router(doc_gen_templates_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
 
