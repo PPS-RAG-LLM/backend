@@ -111,6 +111,34 @@ def _resolve_train_path(p: str) -> str:
         pass
     return os.path.abspath(p)
 
+# ===== Helpers: detect MXFP4 / gpt-oss =====
+def _looks_like_mxfp4_model(dir_or_name: str) -> bool:
+    name = (dir_or_name or "").lower()
+    if "gpt-oss" in name:
+        return True
+    # 로컬 폴더일 경우 config에서 힌트 찾기
+    try:
+        cand = os.path.join(dir_or_name, "config.json")
+        if os.path.isfile(cand):
+            with open(cand, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            txt = json.dumps(cfg).lower()
+            if "mxfp4" in txt or "mx" in txt:
+                return True
+    except Exception:
+        pass
+    # 양자화 설정 파일 케이스
+    for q in ("quantization_config.json", "quantize_config.json"):
+        try:
+            cand = os.path.join(dir_or_name, q)
+            if os.path.isfile(cand):
+                with open(cand, "r", encoding="utf-8") as f:
+                    if "mxfp4" in f.read().lower():
+                        return True
+        except Exception:
+            pass
+    return False
+
 # ===== Schemas =====
 class FineTuneRequest(BaseModel):
     # === 공통 태그(필수) ===
@@ -883,54 +911,104 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             model = get_peft_model(model, lora_config)
 
         else:
-            # QLORA: 4-bit + LoRA
-            try:
-                from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
-            except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for QLORA: {e}")
-                _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
-                logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
-                return
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-            )
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-            if tokenizer.pad_token_id is None:
-                if getattr(tokenizer, "eos_token_id", None) is not None:
-                    tokenizer.pad_token_id = tokenizer.eos_token_id
-                else:
-                    tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-                    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                device_map="auto",
-                quantization_config=bnb_config,
-                local_files_only=True,
-            )
-            model.gradient_checkpointing_enable()
-            model = prepare_model_for_kbit_training(model)
-            candidate_keywords = [
-                "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
-                "down_proj","w1","w2","c_proj","c_attn"
-            ]
-            lora_target_modules = sorted({
-                name.split(".")[-1]
-                for name, _ in model.named_modules()
-                if any(k in name for k in candidate_keywords)
-            })
-            lora_config = LoraConfig(
-                r=64,
-                lora_alpha=16,
-                target_modules=lora_target_modules or None,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            model = get_peft_model(model, lora_config)
+            # QLORA
+            is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
+
+            if is_mxfp4:
+                # ---- MXFP4 (gpt-oss) 전용: Unsloth 로더 사용 ----
+                try:
+                    from unsloth import FastLanguageModel  # type: ignore
+                except Exception as e:
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] Unsloth not installed: {e}")
+                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"unsloth not installed: {e}"})
+                    return
+
+                max_len = int(job.request.get("max_len", 4096))
+                model, tokenizer = FastLanguageModel.from_pretrained(
+                    model_name=model_path,
+                    dtype=None,
+                    max_seq_length=max_len,
+                    load_in_4bit=True,
+                    full_finetuning=False,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+
+                # LoRA 어댑터 추가 (Unsloth 헬퍼 우선)
+                try:
+                    model = FastLanguageModel.get_peft_model(
+                        model,
+                        r=64,
+                        lora_alpha=16,
+                        lora_dropout=0.05,
+                        bias="none",
+                    )
+                except Exception:
+                    from peft import LoraConfig, get_peft_model  # type: ignore
+                    candidate_keywords = [
+                        "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
+                        "down_proj","w1","w2","c_proj","c_attn"
+                    ]
+                    lora_target_modules = sorted({
+                        name.split(".")[-1]
+                        for name, _ in model.named_modules()
+                        if any(k in name for k in candidate_keywords)
+                    })
+                    lora_config = LoraConfig(
+                        r=64, lora_alpha=16, target_modules=lora_target_modules or None,
+                        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
+                    )
+                    model = get_peft_model(model, lora_config)
+
+            else:
+                # ---- 일반 QLORA: BitsAndBytes 사용 ----
+                try:
+                    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
+                except Exception as e:
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for QLORA: {e}")
+                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
+                    logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
+                    return
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                )
+                tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+                if tokenizer.pad_token_id is None:
+                    if getattr(tokenizer, "eos_token_id", None) is not None:
+                        tokenizer.pad_token_id = tokenizer.eos_token_id
+                    else:
+                        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+                        tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    device_map="auto",
+                    quantization_config=bnb_config,
+                    local_files_only=True,
+                )
+                model.gradient_checkpointing_enable()
+                model = prepare_model_for_kbit_training(model)
+                candidate_keywords = [
+                    "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
+                    "down_proj","w1","w2","c_proj","c_attn"
+                ]
+                lora_target_modules = sorted({
+                    name.split(".")[-1]
+                    for name, _ in model.named_modules()
+                    if any(k in name for k in candidate_keywords)
+                })
+                lora_config = LoraConfig(
+                    r=64,
+                    lora_alpha=16,
+                    target_modules=lora_target_modules or None,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
+                model = get_peft_model(model, lora_config)
 
         # ===== Train =====
         max_len = job.request.get("max_len", 4096)
@@ -1045,8 +1123,24 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 final_rouge = sum(scores) / len(scores)
 
         _update_job_status(conn, job.job_id, "running", rough=int((final_rouge or 0)*100), extras={"rouge1F1": final_rouge})
-        trainer.save_model(output_dir)
-        tokenizer.save_pretrained(output_dir)
+
+        # ===== Save / Merge =====
+        is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
+        if is_mxfp4:
+            try:
+                # MXFP4 네이티브 병합 저장 (Unsloth 권장)
+                model.save_pretrained_merged(
+                    output_dir,
+                    tokenizer,
+                    save_method="mxfp4",
+                )
+            except Exception as e:
+                _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, fallback HF save.")
+                trainer.save_model(output_dir)
+                tokenizer.save_pretrained(output_dir)
+        else:
+            trainer.save_model(output_dir)
+            tokenizer.save_pretrained(output_dir)
 
         _finish_job_success(
             conn,

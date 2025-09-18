@@ -33,10 +33,11 @@
 { "category":"doc_gen", "subtask":"출장계획서", "promptId": 123 }
 
 # 파인튜닝 테스트
-
 {
+  "category": "doc_gen",
+  "subcategory": "doc_gen",
   "baseModelName": "Qwen2.5-7B-Instruct-1M",
-  "saveModelName": "Qwen2.5-7B-Instruct-1M",
+  "saveModelName": "Qwen2.5-7B-Instruct-1M-질의응답",
   "systemPrompt": "위 글을 참고하여 대답해 주세요",
   "batchSize": 4,
   "epochs": 3,
@@ -44,35 +45,25 @@
   "overfittingPrevention": true,
   "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
   "gradientAccumulationSteps": 8,
-  "tuningType": "LORA"
-}
-
-{
-  "baseModelName": "gpt-oss-20b",
-  "saveModelName": "gpt-oss-20b-qa",
-  "systemPrompt": "위 글을 참고하여 대답해 주세요",
-  "batchSize": 4,
-  "epochs": 3,
-  "learningRate": 0.0002,
-  "overfittingPrevention": true,
-  "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
-  "gradientAccumulationSteps": 8,
+  "quantizationBits": 4,
   "tuningType": "QLORA"
 }
 
 {
+  "category": "summary",
+  "subcategory": "summary",
   "baseModelName": "gpt-oss-20b",
   "saveModelName": "gpt-oss-20b-summary",
-  "systemPrompt": "위 글을 참고하여 대답해 주세요",
+  "systemPrompt": "위 글을 참고하여 요약해 주세요",
   "batchSize": 4,
   "epochs": 3,
   "learningRate": 0.0002,
   "overfittingPrevention": true,
   "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
   "gradientAccumulationSteps": 8,
-  "tuningType": "FULL"
+  "quantizationBits": 4,
+  "tuningType": "QLORA"
 }
-
 
 
 =====================================================================================
