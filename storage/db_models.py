@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Column, Integer, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint, Float, Index
+from sqlalchemy import Column, Integer, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint, Float
 from sqlalchemy.orm import relationship
 from utils.database import Base
 
@@ -156,12 +156,22 @@ class LlmModel(Base):
     revision = Column(Integer)
     model_path = Column(Text)
     category = Column(Text, nullable=False)  # CHECK constraint는 DB 레벨에서 처리
-    subcategory = Column(Text)
+    mather_path = Column(Text) # QLORA나 LORA만 사용
     type = Column(Text, nullable=False, server_default=text("'base'"))  # CHECK constraint는 DB 레벨에서 처리
     is_default = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     trained_at = Column(DateTime)
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+class LlmPromptMapping(Base):
+    __tablename__ = "llm_prompt_mapping"
+
+    llm_id = Column(Integer, primary_key=True, autoincrement=True)
+    prompt_id = Column(Text, unique=True)
+    rouge_score = Column(Float)
+    response = Column(Text)
+    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    updated_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
 class EmbeddingModel(Base):
     __tablename__ = "embedding_models"
@@ -336,9 +346,6 @@ class FineTuneJob(Base):
 
 class FineTunedModel(Base):
     __tablename__ = "fine_tuned_models"
-    __table_args__ = (
-        Index("ix_fine_tuned_models_base_model_id", "base_model_id"),
-    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     model_id = Column(Integer, ForeignKey("llm_models.id", ondelete="CASCADE", onupdate="CASCADE"))
@@ -347,8 +354,4 @@ class FineTunedModel(Base):
     lora_weights_path = Column(Text)
     type = Column(Text, nullable=False)  # 'base', 'lora', 'full'
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
-    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
-    
-    # 베이스 모델 참조 (LoRA/QLoRA용)
-    base_model_id = Column(Integer, ForeignKey("llm_models.id"), nullable=True)
-    base_model_path = Column(Text, nullable=True)  # 상대경로(백엔드 루트 기준) 
+    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False) 

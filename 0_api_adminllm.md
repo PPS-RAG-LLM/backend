@@ -45,7 +45,7 @@
   "overfittingPrevention": true,
   "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
   "gradientAccumulationSteps": 8,
-  "quantizationBits": 4,
+  "quantizationBits": 8,
   "tuningType": "QLORA"
 }
 
