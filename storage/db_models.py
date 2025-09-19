@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Column, Integer, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint, Float
+from sqlalchemy import Column, Integer, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint, Float, Index
 from sqlalchemy.orm import relationship
 from utils.database import Base
 
@@ -336,6 +336,9 @@ class FineTuneJob(Base):
 
 class FineTunedModel(Base):
     __tablename__ = "fine_tuned_models"
+    __table_args__ = (
+        Index("ix_fine_tuned_models_base_model_id", "base_model_id"),
+    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     model_id = Column(Integer, ForeignKey("llm_models.id", ondelete="CASCADE", onupdate="CASCADE"))
@@ -344,4 +347,8 @@ class FineTunedModel(Base):
     lora_weights_path = Column(Text)
     type = Column(Text, nullable=False)  # 'base', 'lora', 'full'
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
-    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False) 
+    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    
+    # 베이스 모델 참조 (LoRA/QLoRA용)
+    base_model_id = Column(Integer, ForeignKey("llm_models.id"), nullable=True)
+    base_model_path = Column(Text, nullable=True)  # 상대경로(백엔드 루트 기준) 

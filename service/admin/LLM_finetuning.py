@@ -576,27 +576,37 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
     rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
     mdl_type = "lora" if tuning_type.upper() in ("LORA", "QLORA") else "full"
     with SessionLocal() as s:
-        # job 상태 업데이트
+        # --- job/metrics에서 baseModelName 추출 ---
         job_row = s.execute(select(ORMJob).where(ORMJob.provider_job_id == job_id)).scalar_one_or_none()
+        base_model_name = None
+        if job_row and job_row.metrics:
+            try:
+                mt = json.loads(job_row.metrics) or {}
+                base_model_name = (mt.get("hyperparameters") or {}).get("baseModelName")
+            except Exception:
+                base_model_name = None
+        
+        # job 상태 업데이트
         if job_row:
             job_row.status = "succeeded"
             job_row.finished_at = datetime.utcnow()
             s.add(job_row)
-        # llm_models upsert (name unique)
+        
+        # --- FT 결과 모델(LlmModel) upsert ---
         m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
         if m:
             m.trained_at = datetime.utcnow()
             m.category = category
             m.subcategory = subcategory
             m.type = mdl_type
-            m.model_path = rel_model_path
+            m.model_path = rel_model_path  # 어댑터 폴더만 가리킴
             m.is_active = True
         else:
             m = LlmModel(
                 provider="hf",
                 name=model_name,
                 revision=0,
-                model_path=rel_model_path,
+                model_path=rel_model_path,  # 어댑터 폴더
                 category=category,
                 subcategory=subcategory,
                 type=mdl_type,
@@ -605,8 +615,35 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 trained_at=datetime.utcnow(),
             )
         s.add(m)
-        s.flush()  # get m.id
-        # fine_tuned_models insert (최종 ROUGE 저장)
+        s.flush()  # m.id
+
+        # --- 베이스 모델 row 보장/획득 ---
+        base_model_id = None
+        base_model_path = None
+        if base_model_name:
+            # _resolve_model_dir 로 물리 경로 확보 → 상대 경로로 저장
+            abs_base_dir = _resolve_model_dir(base_model_name)
+            base_model_path = _to_rel(abs_base_dir)
+
+            base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
+            if not base_row:
+                base_row = LlmModel(
+                    provider="hf",
+                    name=base_model_name,
+                    revision=0,
+                    model_path=base_model_path,
+                    category="all",    # 베이스는 공용
+                    subcategory=None,
+                    type="base",
+                    is_default=False,
+                    is_active=True,
+                    trained_at=None,
+                )
+                s.add(base_row)
+                s.flush()
+            base_model_id = int(base_row.id)
+
+        # --- FineTunedModel insert ---
         lora_path = rel_model_path if mdl_type == "lora" else None
         ftm = FineTunedModel(
             model_id=m.id,
@@ -615,6 +652,9 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
             lora_weights_path=lora_path,
             type=mdl_type,
             is_active=True,
+            # 베이스 모델 참조
+            base_model_id=base_model_id,
+            base_model_path=base_model_path,
         )
         # rouge1_f1 컬럼이 스키마에 존재하는 버전 고려
         try:
@@ -1057,33 +1097,34 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         training_args = TrainingArguments(**_ta_kwargs)
 
         # === 콜백으로 진행률 반영 ===
-        class ProgressCallback(TrainerCallback):  # type: ignore[misc]
+        class ProgressHeartbeatCallback(TrainerCallback):  # type: ignore[misc]
+            def __init__(self, job_id: str):
+                self.job_id = job_id
+
             def on_train_begin(self, args, state, control, **kwargs):
                 try:
                     c = get_db()
-                    _update_job_status(c, job.job_id, "running", progress=0)
+                    _update_job_status(c, self.job_id, "running", progress=0)
                     c.close()
                 except Exception:
                     pass
 
-            def on_log(self, args, state, control, logs=None, **kwargs):
-                # epoch 기반 진행률(대부분의 환경에서 안정적)
-                try:
-                    if state.epoch is not None and args.num_train_epochs:
-                        pct = int(min(99, max(0, round(100 * float(state.epoch) / float(args.num_train_epochs)))))
-                        c = get_db()
-                        _update_job_status(c, job.job_id, "running", progress=pct)
-                        c.close()
-                except Exception:
-                    pass
-
             def on_step_end(self, args, state, control, **kwargs):
-                # 너무 잦은 업데이트 방지: 10스텝마다 갱신
                 try:
-                    if state.global_step and state.max_steps and (state.global_step % 10 == 0):
-                        pct = int(min(99, max(0, 100 * state.global_step / max(1, state.max_steps))))
-                        c = get_db()
-                        _update_job_status(c, job.job_id, "running", progress=pct)
+                    # global_step 기반 정확한 진행률 계산
+                    total = max(1, getattr(state, "max_steps", 0) or 0)
+                    done = int(getattr(state, "global_step", 0) or 0)
+                    pct = int((done / total) * 100) if total else 0
+                    pct = min(99, max(0, pct))  # 최대 99% (학습 완료 전까지)
+
+                    c = get_db()
+                    try:
+                        _update_job_status(
+                            c, self.job_id, "running",
+                            progress=pct,
+                            extras={"learningProgress": pct}
+                        )
+                    finally:
                         c.close()
                 except Exception:
                     pass
@@ -1091,7 +1132,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             def on_train_end(self, args, state, control, **kwargs):
                 try:
                     c = get_db()
-                    _update_job_status(c, job.job_id, "running", progress=100)
+                    _update_job_status(c, self.job_id, "running", progress=100)
                     c.close()
                 except Exception:
                     pass
@@ -1101,15 +1142,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 if logs and "loss" in logs:
                     _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
-        class HeartbeatCallback(TrainerCallback):  # type: ignore[misc]
-            def on_step_end(self, args, state, control, **kwargs):
-                try:
-                    c = get_db()
-                    _update_job_status(c, job.job_id, "running")
-                    c.close()
-                except Exception:
-                    pass
-
         def _build_trainer()->Trainer:
             return Trainer(
                 model=model,
@@ -1117,7 +1149,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 tokenizer=tokenizer,
-                callbacks=[LogCallback(), HeartbeatCallback(), ProgressCallback()],
+                callbacks=[LogCallback(), ProgressHeartbeatCallback(job.job_id)],
             )
 
         trainer=_build_trainer()
@@ -1167,22 +1199,33 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         
         # ===== Save / Merge =====
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
-        if is_mxfp4:
+        
+        if tuning_type in ("LORA", "QLORA"):
+            # LoRA/QLoRA: 어댑터만 저장 (베이스는 참조로)
             try:
-                # MXFP4 네이티브 병합 저장 (Unsloth 권장)
-                model.save_pretrained_merged(
-                    output_dir,
-                    tokenizer,
-                    save_method="mxfp4",
-                )
-                _save_stage("mxfp4_merge", 70)
+                # PEFT/Unsloth 모델에서 save_pretrained는 어댑터만 저장
+                model.save_pretrained(output_dir)
+                _save_stage("adapter", 70)
+                tokenizer.save_pretrained(output_dir)
+                _save_stage("tokenizer", 90)
+                _append_log(log_path, f"[{datetime.now().isoformat()}] saved adapters only → {output_dir}")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, fallback HF save.")
+                _append_log(log_path, f"[{datetime.now().isoformat()}] adapter save failed: {e}, fallback trainer.save_model")
                 trainer.save_model(output_dir)
                 _save_stage("model", 70)
                 tokenizer.save_pretrained(output_dir)
                 _save_stage("tokenizer", 90)
+            
+            # MXFP4 병합 저장은 환경변수로 제어 (기본 비활성)
+            save_merge = os.getenv("FT_UNSLOTH_MERGE_SAVE", "0") == "1"
+            if is_mxfp4 and save_merge:
+                try:
+                    model.save_pretrained_merged(output_dir, tokenizer, save_method="mxfp4")
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] merged MXFP4 saved → {output_dir}")
+                except Exception as e:
+                    _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, using adapters only.")
         else:
+            # FULL: 전체 모델 저장
             trainer.save_model(output_dir)
             _save_stage("model", 70)
             tokenizer.save_pretrained(output_dir)
@@ -1228,7 +1271,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         except Exception:
             pass
     finally:
-        # ✅ 메모리 정리
+        # ✅ 메모리 정리 강화
         try:
             del trainer
         except Exception:
@@ -1242,6 +1285,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             gc.collect()
             if hasattr(torch, "cuda") and torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()  # IPC 메모리 정리
         except Exception:
             pass
         # ✅ 캐시 정리 (임시 디렉토리 삭제 및 환경변수 복원)
