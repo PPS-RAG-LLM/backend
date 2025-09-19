@@ -197,6 +197,9 @@ class FineTuneRequest(BaseModel):
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
     )
+    startAt: Optional[str] = Field(
+        default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
+    )
 
     @field_validator("category")
     @classmethod
@@ -447,7 +450,8 @@ def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
         s.refresh(row)
         return int(row.id)
 
-def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int) -> int:
+def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int,
+                initial_status: str = "queued", scheduled_at: Optional[str] = None) -> int:
     # ==== ORM 버전 ====
     reserve_now = _now_local_str()
     train_path = _resolve_train_path(req.trainSetFile)
@@ -468,13 +472,18 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "gradientAccumulationSteps": req.gradientAccumulationSteps,
         "quantizationBits": req.quantizationBits,
     }
+    metrics = {"hyperparameters": hyper}
+    if scheduled_at:
+        metrics["scheduledAt"] = scheduled_at
+        metrics["learningProgress"] = 0
+
     with SessionLocal() as s:
         row = ORMJob(
             provider_job_id=job_id,
             dataset_id=dataset_id,
-            status="queued",
+            status=initial_status,
             started_at=datetime.utcnow(),
-            metrics=json.dumps({"hyperparameters": hyper}, ensure_ascii=False),
+            metrics=json.dumps(metrics, ensure_ascii=False),
         )
         s.add(row)
         s.commit()
@@ -1079,6 +1088,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             return 2 * (precision * recall) / (precision + recall)
 
         import math
+        from inspect import signature as _sig
 
         # Build kwargs dict first to allow graceful fallback when certain versions
         # of transformers don't support a particular parameter (e.g. evaluation_strategy).
@@ -1095,24 +1105,46 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             learning_rate=job.request.get("learningRate", 2e-4),
             bf16=True,
             logging_steps=10,
-            save_steps=500,
             save_total_limit=2,
             report_to="none",
             optim=optim_name,
             seed=42,
             data_seed=42,
         )
-        # Conditionally include evaluation_strategy only if the current transformers version supports it
-        from inspect import signature as _sig
-        if "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters:
-            _ta_kwargs["evaluation_strategy"] = "epoch" if eval_dataset is not None else "no"
+
+        # ---- 평가/저장/얼리스톱 설정 (버전 호환 포함) ----
+        has_eval_strategy = "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters
+        has_save_strategy = "save_strategy" in _sig(TrainingArguments.__init__).parameters
+        has_lbm = "load_best_model_at_end" in _sig(TrainingArguments.__init__).parameters
+        has_metric_for_best = "metric_for_best_model" in _sig(TrainingArguments.__init__).parameters
+        has_greater = "greater_is_better" in _sig(TrainingArguments.__init__).parameters
+
+        use_eval = eval_dataset is not None and len(eval_dataset) > 0
+        if has_eval_strategy:
+            _ta_kwargs["evaluation_strategy"] = "epoch" if use_eval else "no"
+        # 저장 전략: 에폭마다 저장(평가가 있을 때만). 아니면 save_steps 사용
+        if has_save_strategy and use_eval:
+            _ta_kwargs["save_strategy"] = "epoch"
+        else:
+            _ta_kwargs["save_steps"] = 500
+        if has_lbm and use_eval:
+            _ta_kwargs["load_best_model_at_end"] = True
+        if has_metric_for_best and use_eval:
+            _ta_kwargs["metric_for_best_model"] = "eval_loss"
+        if has_greater and use_eval:
+            _ta_kwargs["greater_is_better"] = False
 
         training_args = TrainingArguments(**_ta_kwargs)
 
-        # === 콜백으로 진행률 반영 ===
-        class ProgressHeartbeatCallback(TrainerCallback):  # type: ignore[misc]
-            def __init__(self, job_id: str):
+        # ===== 콜백들 =====
+        class ProgressCallback(TrainerCallback):  # type: ignore[misc]
+            def __init__(self, job_id: str, every_steps: int = None):
                 self.job_id = job_id
+                try:
+                    self.every_steps = every_steps if every_steps is not None else max(1, int(os.getenv("FT_PROGRESS_EVERY_STEPS", "1")))
+                except Exception:
+                    self.every_steps = 1
+                self.total_steps = None
 
             def on_train_begin(self, args, state, control, **kwargs):
                 try:
@@ -1122,21 +1154,25 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 except Exception:
                     pass
 
+            def on_train_begin_dataloader(self, args, state, control, **kwargs):
+                # total steps 계산 (데이터로더 확보 후)
+                try:
+                    if state.max_steps and state.max_steps > 0:
+                        self.total_steps = int(state.max_steps)
+                except Exception:
+                    pass
+
             def on_step_end(self, args, state, control, **kwargs):
                 try:
-                    # global_step 기반 정확한 진행률 계산
-                    total = max(1, getattr(state, "max_steps", 0) or 0)
-                    done = int(getattr(state, "global_step", 0) or 0)
-                    pct = int((done / total) * 100) if total else 0
-                    pct = min(99, max(0, pct))  # 최대 99% (학습 완료 전까지)
-
+                    total = self.total_steps or (state.max_steps or 0)
+                    if not total or total <= 0:
+                        return
+                    if state.global_step % self.every_steps != 0:
+                        return
+                    pct = int(min(100, max(0, round((state.global_step / total) * 100))))
                     c = get_db()
                     try:
-                        _update_job_status(
-                            c, self.job_id, "running",
-                            progress=pct,
-                            extras={"learningProgress": pct}
-                        )
+                        _update_job_status(c, self.job_id, "running", progress=pct)
                     finally:
                         c.close()
                 except Exception:
@@ -1155,6 +1191,17 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 if logs and "loss" in logs:
                     _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
+        # 얼리스톱(평가가 있을 때만): 2 에폭 연속 개선 없으면 중단
+        extra_callbacks = []
+        if use_eval and (job.request.get("overfittingPrevention", True) is True):
+            try:
+                from transformers import EarlyStoppingCallback  # type: ignore
+                extra_callbacks.append(EarlyStoppingCallback(early_stopping_patience=2))
+            except Exception:
+                pass
+
+        _pc = ProgressCallback(job.job_id)
+
         def _build_trainer()->Trainer:
             return Trainer(
                 model=model,
@@ -1162,12 +1209,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 tokenizer=tokenizer,
-                callbacks=[LogCallback(), ProgressHeartbeatCallback(job.job_id)],
+                callbacks=[_pc, LogCallback(), *extra_callbacks],
             )
 
         trainer=_build_trainer()
 
         try:
+            _append_log(log_path, f"[{datetime.now().isoformat()}] training started...")
             trainer.train()
         except RuntimeError as re:
             if "out of memory" in str(re).lower() and training_args.per_device_train_batch_size>1:
@@ -1209,7 +1257,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             c.close()
 
         _save_stage("start", 5)
-        
+        _append_log(log_path, f"[{datetime.now().isoformat()}] saving model...")
         # ===== Save / Merge =====
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
         
@@ -1345,7 +1393,26 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     try:
         train_path = _resolve_train_path(body.trainSetFile)
         dataset_id = _insert_dataset_if_needed(conn, train_path, category)
-        _insert_job(conn, category, body, job_id, save_name_with_suffix, dataset_id)
+        # 예약 시간 파싱
+        scheduled_at_iso = None
+        delay_sec = 0.0
+        if body.startAt:
+            try:
+                scheduled_dt = datetime.fromisoformat(body.startAt)
+                now_dt = datetime.now(scheduled_dt.tzinfo) if scheduled_dt.tzinfo else datetime.now()
+                delta = (scheduled_dt - now_dt).total_seconds()
+                if delta > 1.0:
+                    delay_sec = float(delta)
+                    scheduled_at_iso = scheduled_dt.isoformat()
+            except Exception:
+                scheduled_at_iso = None
+                delay_sec = 0.0
+
+        _insert_job(
+            conn, category, body, job_id, save_name_with_suffix, dataset_id,
+            initial_status=("scheduled" if delay_sec > 1.0 else "queued"),
+            scheduled_at=scheduled_at_iso,
+        )
     except Exception as e:
         _log_to_save_name(save_name_with_suffix, f"db insert failed: {e}")
         logger.error(f"fine-tuning init failed: {e}")
@@ -1361,14 +1428,35 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-    # 항상 실제 학습만
-    target = _run_training_inline
-    logger.info(
-        f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} "
-        f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
-    )
-    t = threading.Thread(target=target, args=(job, save_name_with_suffix), daemon=True)
-    t.start()
+    # 예약 실행 지원
+    def _launch():
+        _run_training_inline(job, save_name_with_suffix)
+
+    # 예약 딜레이 재계산 (위 try 블록과 동일 로직 재사용)
+    delay_sec = 0.0
+    if body.startAt:
+        try:
+            scheduled_dt = datetime.fromisoformat(body.startAt)
+            now_dt = datetime.now(scheduled_dt.tzinfo) if scheduled_dt.tzinfo else datetime.now()
+            delta = (scheduled_dt - now_dt).total_seconds()
+            if delta > 1.0:
+                delay_sec = float(delta)
+        except Exception:
+            delay_sec = 0.0
+
+    if delay_sec > 1.0:
+        t = threading.Timer(delay_sec, _launch)
+        t.daemon = True
+        t.start()
+        logger.info(
+            f"Fine-tuning scheduled jobId={job.job_id} at {scheduled_dt.isoformat()} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+        )
+    else:
+        t = threading.Thread(target=_launch, daemon=True)
+        t.start()
+        logger.info(
+            f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
+        )
 
     return {"jobId": job_id}
 
