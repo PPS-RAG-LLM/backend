@@ -53,14 +53,16 @@ class PromptVariable(BaseModel):
 
 
 class CreatePromptBody(BaseModel):
-    title: str
-    prompt: str
+    title: str  # 서브카테고리 표시용 이름(=template.name)
+    prompt: str  # system prompt
+    userPrompt: Optional[str] = None  # user prompt -> template.sub_content
     variables: List[PromptVariable] = []
 
 
 class UpdatePromptBody(BaseModel):
     title: Optional[str] = None
-    prompt: Optional[str] = None
+    prompt: Optional[str] = None           # system prompt
+    userPrompt: Optional[str] = None       # user prompt
     variables: Optional[List[PromptVariable]] = None
 
 
@@ -932,31 +934,30 @@ def get_model_list(category: str) -> Dict[str, Any]:
     conn = _connect()
     try:
         cur = conn.cursor()
+        # ✅ is_active 필터를 제거하여 '등록된 모든 모델'을 보여준다.
         if category == "base":
-            # 모든 카테고리의 활성 모델 표시
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1
                 ORDER BY trained_at DESC, id DESC
                 """
             )
         elif category == "all":
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1 AND category='all'
+                WHERE category='all'
                 ORDER BY trained_at DESC, id DESC
                 """
             )
         else:
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, created_at
+                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE is_active=1 AND (category=? OR category='all')
+                WHERE (category=? OR category='all')
                 ORDER BY trained_at DESC, id DESC
                 """,
                 (category,)
@@ -986,7 +987,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # 일반 카테고리 요청 시: base 중복 방지
+        # 일반 카테고리 요청 시: base 중복 방지는 유지
         if category != "base":
             row_type = str((r["type"] or "")).lower()
             row_cat  = str((r["category"] or "")).lower()
@@ -1001,7 +1002,9 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "loaded": bool(loaded_flag),
             "active": (name in active_names) and bool(loaded_flag),
             "category": r["category"],
-                "createdAt": r["created_at"],
+            "subcategory": r["subcategory"],
+            "isActive": bool(r["is_active"]),
+            "createdAt": r["created_at"],
         })
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
@@ -1299,48 +1302,55 @@ def compare_models(payload: CompareModelsBody) -> Dict[str, Any]:
 
 def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]:
     category = _norm_category(category)
-    subtask = _subtask_key(subtask)
+    # subtask 인자는 하위호환. 이제는 template.name(=subcategory)로 필터
+    subcat = (subtask or "").strip().lower() or None
     conn = _connect()
     cur = conn.cursor()
-    if subtask:
+    if subcat:
+        # name(=subcategory)으로 필터
         cur.execute(
             """
-          SELECT id, name, content, subtask FROM system_prompt_template
-          WHERE category=? AND ifnull(subtask,'')=? AND ifnull(is_active,1)=1
-          ORDER BY id DESC
-        """,
-            (category, subtask),
+            SELECT id, name, content, sub_content FROM system_prompt_template
+            WHERE category=? AND lower(name)=? AND ifnull(is_active,1)=1
+            ORDER BY id DESC
+            """,
+            (category, subcat),
         )
     else:
         cur.execute(
             """
-          SELECT id, name, content, subtask FROM system_prompt_template
-          WHERE category=? AND ifnull(is_active,1)=1
-          ORDER BY id DESC
-        """,
+            SELECT id, name, content, sub_content FROM system_prompt_template
+            WHERE category=? AND ifnull(is_active,1)=1
+            ORDER BY id DESC
+            """,
             (category,),
         )
     rows = cur.fetchall()
     conn.close()
-    prompt_list = [
-        {"promptId": r["id"], "title": r["name"], "prompt": r["content"], "subtask": r["subtask"]}
-        for r in rows
-    ]
-    return {"category": category, "subtask": subtask or None, "promptList": prompt_list}
+    prompt_list = []
+    for r in rows:
+        prompt_list.append({
+            "promptId": r["id"],
+            "title": r["name"],                 # 서브카테고리 이름
+            "prompt": r["content"],             # system prompt
+            "userPrompt": r["sub_content"],     # user prompt
+            "subcategory": r["name"],           # 명시적으로 내려줌
+        })
+    return {"category": category, "subcategory": subcat or None, "promptList": prompt_list}
 
 
 def create_prompt(category: str, subtask: Optional[str], body: CreatePromptBody) -> Dict[str, Any]:
     start = time.time()
     category = _norm_category(category)
-    subtask = _subtask_key(subtask)
+    # subtask 인자는 무시(하위호환). 템플릿 name=body.title 가 서브카테고리.
     conn = _connect()
     cur = conn.cursor()
     # 템플릿 생성
     required_vars = [v.key for v in body.variables] if body.variables else []
     cur.execute("""
-      INSERT INTO system_prompt_template(name, category, content, subtask, required_vars, is_active)
+      INSERT INTO system_prompt_template(name, category, content, sub_content, required_vars, is_active)
       VALUES(?,?,?,?,?,1)
-    """, (body.title, category, body.prompt, (subtask or None), _json(required_vars)))
+    """, (body.title, category, body.prompt, (body.userPrompt or None), _json(required_vars)))
     template_id = cur.lastrowid
 
     # 변수/매핑 생성
@@ -1386,10 +1396,11 @@ def get_prompt(prompt_id: int) -> Dict[str, Any]:
     tmpl, variables = _fetch_prompt_full(prompt_id)
     return {
         "promptId": tmpl["id"],
-        "title": tmpl["name"],
-        "prompt": tmpl["content"],
+        "title": tmpl["name"],                      # 서브카테고리 이름
+        "prompt": tmpl["content"],                  # system prompt
+        "userPrompt": tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None),
         "category": tmpl["category"],
-        "subtask": tmpl["subtask"],
+        "subcategory": tmpl["name"],
         "variables": [{"key": v["key"], "value": v["value"], "type": v["type"]} for v in variables],
     }
 
@@ -1403,6 +1414,8 @@ def update_prompt(prompt_id: int, body: UpdatePromptBody) -> Dict[str, Any]:
         cur.execute("UPDATE system_prompt_template SET name=? WHERE id=?", (body.title, prompt_id))
     if body.prompt is not None:
         cur.execute("UPDATE system_prompt_template SET content=? WHERE id=?", (body.prompt, prompt_id))
+    if body.userPrompt is not None:
+        cur.execute("UPDATE system_prompt_template SET sub_content=? WHERE id=?", (body.userPrompt, prompt_id))
 
     # 변수 업데이트(간단: 모두 재구성)
     if body.variables is not None:
@@ -1471,12 +1484,13 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     temperature = float(body.get("temperature", 0.7))
 
     tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
-    subtask = tmpl["subtask"] if (isinstance(tmpl, dict) or hasattr(tmpl, "__getitem__")) else getattr(tmpl, "subtask", None)
+    # 템플릿 name = subcategory
+    subcategory = (tmpl["name"] if isinstance(tmpl, dict) else getattr(tmpl, "name", None)) or None
 
     if body.get("modelName"):
         model_name = body["modelName"]
     else:
-        model_name = select_model_for_task(category, subtask)
+        model_name = select_model_for_task(category, subcategory)
         if not model_name:
             return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
     required = json.loads(tmpl["required_vars"] or "[]")
@@ -1485,7 +1499,11 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     if missing:
         return {"success": False, "error": f"필수 변수 누락: {', '.join(missing)}"}
 
-    prompt_text = _fill_template(tmpl["content"], variables)
+    # system/user prompt 각각 치환하고, 최종 프롬프트는 system + "\n" + user 로 합성
+    system_prompt_text = _fill_template(tmpl["content"], variables)
+    user_prompt_raw = (tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None)) or ""
+    user_prompt_text = _fill_template(user_prompt_raw, variables)
+    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
 
     # 간단 추론
     answer = _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
@@ -1510,6 +1528,7 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
 
     meta = {
         "category": category,
+        "subcategory": subcategory,
         "promptId": prompt_id,
         "promptText": prompt_text,
         "variables": variables,

@@ -156,12 +156,22 @@ class LlmModel(Base):
     revision = Column(Integer)
     model_path = Column(Text)
     category = Column(Text, nullable=False)  # CHECK constraint는 DB 레벨에서 처리
-    subcategory = Column(Text)
+    mather_path = Column(Text) # QLORA나 LORA만 사용
     type = Column(Text, nullable=False, server_default=text("'base'"))  # CHECK constraint는 DB 레벨에서 처리
     is_default = Column(Boolean, nullable=False, server_default=text("false"))
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     trained_at = Column(DateTime)
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+class LlmPromptMapping(Base):
+    __tablename__ = "llm_prompt_mapping"
+
+    llm_id = Column(Integer, primary_key=True, autoincrement=True)
+    prompt_id = Column(Text, unique=True)
+    rouge_score = Column(Float)
+    response = Column(Text)
+    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    updated_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
 class EmbeddingModel(Base):
     __tablename__ = "embedding_models"
