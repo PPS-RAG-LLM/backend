@@ -147,11 +147,12 @@ def get_default_model_route(
 def set_default_model_route(body: DefaultModelBody):
     return set_default_model(body)
 
-@router.get("/settings/select-model", summary="과업별 실제 사용할 모델 선택(기본→활성→베이스)")
+@router.get("/settings/select-model", summary="테스크별 디폴트 모델 확인(프롬프트 테이블 기반)")
 def select_model_route(
     category: str = Query(..., description="qa | qna | doc_gen | summary"),
     subcategory: str | None = Query(None, description="doc_gen 서브테스크")
 ):
-    name = select_model_for_task(category, subcategory)
-    return {"category": category, "subcategory": subcategory, "modelName": name}
+    from service.admin.manage_admin_LLM import SelectModelQuery, get_selected_model
+    query = SelectModelQuery(category=category, subcategory=subcategory)
+    return get_selected_model(query)
 

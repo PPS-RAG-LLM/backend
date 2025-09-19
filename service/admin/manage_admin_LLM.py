@@ -1545,3 +1545,183 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     conn.close()
 
     return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
+
+
+# ==== (추가) LORA/QLORA 베이스/어댑터 경로 인식 강화 ====
+
+def _db_get_model_record(model_name: str) -> Optional[sqlite3.Row]:
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def _resolve_paths_for_model(model_name: str) -> Dict[str, Optional[str]]:
+    """
+    모델 이름으로부터 로딩에 필요한 경로를 정리해서 반환.
+    - LORA/QLORA: {'base': mather_path(abs), 'adapter': model_path(abs)}
+    - FULL:      {'full': model_path(abs)}
+    - BASE:      {'base': mather_path(abs)} (실제 로드는 외부 규칙에 따름)
+    경로는 가능한 경우 절대경로로 환원.
+    """
+    row = _db_get_model_record(model_name)
+    base_abs = adap_abs = full_abs = None
+
+    def _to_abs_from_rel_or_name(p: Optional[str]) -> Optional[str]:
+        if not p:
+            return None
+        pp = p.replace("\\", "/")
+        if pp.startswith("./"):
+            cand = (BASE_BACKEND / pp.lstrip("./"))
+            return str(cand)
+        # 이름/폴더만 온 경우도 지원
+        return _resolve_model_fs_path(pp)
+
+    if row:
+        t = (row["type"] or "").upper()
+        if t in ("LORA", "QLORA"):
+            base_abs = _to_abs_from_rel_or_name(row["mather_path"])
+            adap_abs = _to_abs_from_rel_or_name(row["model_path"])
+            return {"base": base_abs, "adapter": adap_abs, "full": None}
+        elif t == "FULL":
+            full_abs = _to_abs_from_rel_or_name(row["model_path"]) or _resolve_model_fs_path(model_name)
+            return {"base": None, "adapter": None, "full": full_abs}
+        elif t == "BASE":
+            base_abs = _to_abs_from_rel_or_name(row["mather_path"])
+            return {"base": base_abs, "adapter": None, "full": None}
+
+    # DB에 없거나 메타가 빈 경우: 기존 해석으로 폴백
+    return {"base": None, "adapter": None, "full": _resolve_model_fs_path(model_name)}
+
+
+# (기존) _db_get_model_path 는 아래처럼 소폭 조정하여 '단일 경로'가 필요한 코드만 위해 유지
+def _db_get_model_path(model_name: str) -> Optional[str]:
+    """
+    단일 경로가 필요한 호출자 호환용.
+    - LORA/QLORA는 어댑터 경로(model_path) 우선 반환
+    - FULL은 model_path 또는 규칙 경로 반환
+    - BASE는 mather_path 반환(있으면)
+    """
+    rec = _resolve_paths_for_model(model_name)
+    return rec.get("adapter") or rec.get("full") or rec.get("base")
+
+
+# ==== (선택) 로딩 로직에서 LORA/QLORA 조합 고려 (간단 폴백) ====
+def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
+    """
+    최초 사용시 지연 로딩.
+    여기서는 경량 호환: FULL은 통짜 로딩, LORA/QLORA는 어댑터 경로만 우선 로딩 시도.
+    (실제 어댑터-베이스 merge/inject는 추론 경로에서 구성하거나 외부 추론기 사용을 권장)
+    """
+    try:
+        if _is_model_loaded(model_name):
+            return {"loaded": True, "message": "already loaded", "modelName": model_name}
+
+        paths = _resolve_paths_for_model(model_name)
+        # 우선순위: full -> adapter -> name
+        candidate = paths.get("full") or paths.get("adapter") or _resolve_model_fs_path(model_name)
+
+        try:
+            _MODEL_MANAGER.load(candidate)
+            return {"loaded": True, "message": "loaded", "modelName": model_name}
+        except Exception:
+            logging.getLogger(__name__).exception("lazy load failed - fallback adapter preload")
+            if _preload_via_adapters(model_name):
+                return {"loaded": True, "message": "adapter preloaded (fallback)", "modelName": model_name}
+            return {"loaded": False, "message": "load failed", "modelName": model_name}
+    except Exception:
+        logging.getLogger(__name__).exception("lazy_load_if_needed unexpected error")
+        return {"loaded": False, "message": "unexpected error", "modelName": model_name}
+
+
+# ===== (추가) 테스크별 디폴트 모델 확인 =====
+
+class SelectModelQuery(BaseModel):
+    category: str
+    subcategory: Optional[str] = None  # template.name (예: doc_gen의 세부 테스크명)
+
+
+def get_selected_model(q: SelectModelQuery) -> Dict[str, Any]:
+    """
+    요구사항: 테스크별 default model은 '프롬프트 테이블'에서 확인.
+    절차:
+      1) system_prompt_template에서 category(및 선택적 name=subcategory) + is_default=1 템플릿 1건을 고른다.
+         - 여러 개면 최신 id 우선
+      2) 해당 템플릿(prompt_id)에 연결된 llm_prompt_mapping 중 rouge_score가 가장 높은 1건을 선택
+      3) 그 llm_id로 llm_models 조회 후 모델 메타 반환
+    스키마의 unique 제약(테스크별 default는 1개)은 '확인만' 수행하고, 위반 시에도 가장 높은 rouge_score 1건만 반환.
+    """
+    category = _norm_category(q.category)
+    subcat = (q.subcategory or "").strip().lower() or None
+
+    conn = _connect(); cur = conn.cursor()
+    try:
+        # 1) default 템플릿 선택
+        if subcat:
+            cur.execute("""
+                SELECT id, name FROM system_prompt_template
+                 WHERE category=? AND lower(name)=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+                 ORDER BY id DESC LIMIT 1
+            """, (category, subcat))
+        else:
+            cur.execute("""
+                SELECT id, name FROM system_prompt_template
+                 WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+                 ORDER BY id DESC LIMIT 1
+            """, (category,))
+        tmpl = cur.fetchone()
+        if not tmpl:
+            return {"category": category, "subcategory": subcat, "default": None, "note": "기본 템플릿 없음"}
+
+        prompt_id = int(tmpl["id"])
+
+        # 2) prompt 매핑 중 최고 rouge_score 1건
+        cur.execute("""
+            SELECT llm_id, prompt_id, rouge_score
+              FROM llm_prompt_mapping
+             WHERE prompt_id=?
+             ORDER BY IFNULL(rouge_score, -1) DESC, llm_id DESC
+             LIMIT 1
+        """, (prompt_id,))
+        mp = cur.fetchone()
+        if not mp:
+            return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "프롬프트-모델 매핑 없음"}
+
+        # 3) llm_models 메타
+        cur.execute("""
+            SELECT id, name, provider, type, model_path, mather_path, category, is_active, trained_at, created_at
+              FROM llm_models WHERE id=?
+        """, (mp["llm_id"],))
+        mdl = cur.fetchone()
+        if not mdl:
+            return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "llm_models에 모델 없음"}
+
+        # 스키마 제약 확인(참고 메시지)
+        # 카테고리/서브카테고리별 default가 1개라는 제약을 코드에서는 강제하지 않음(요구대로 '확인만')
+        cur.execute("""
+            SELECT COUNT(*) AS cnt
+              FROM system_prompt_template
+             WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+               AND (? IS NULL OR lower(name)=?)
+        """, (category, subcat, subcat))
+        cnt = (cur.fetchone() or {"cnt": 0})["cnt"]
+
+        return {
+            "category": category,
+            "subcategory": (tmpl["name"] or None),
+            "default": {
+                "promptId": prompt_id,
+                "llmId": mdl["id"],
+                "modelName": mdl["name"],
+                "type": mdl["type"],
+                "modelPath": mdl["model_path"],
+                "matherPath": mdl["mather_path"],
+                "rougeScore": mp["rouge_score"],
+            },
+            "note": ("default 템플릿 다수" if (cnt and cnt > 1) else None)
+        }
+    finally:
+        conn.close()

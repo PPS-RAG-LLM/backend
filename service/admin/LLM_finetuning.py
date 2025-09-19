@@ -572,9 +572,19 @@ def _ensure_ftm_rouge_column(conn):
         pass
 
 def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str, final_rouge: Optional[float] = None, subcategory: Optional[str]=None):
-    # ==== ORM 버전 ====
-    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
-    mdl_type = "lora" if tuning_type.upper() in ("LORA", "QLORA") else "full"
+    """
+    파인튜닝 완료시 결과를 DB에 반영한다.
+    - llm_models:
+        - type: FULL | LORA | QLORA (대문자)
+        - LORA/QLORA:  model_path=어댑터 폴더(상대), mather_path=베이스 폴더(상대)
+        - FULL:        model_path=통짜 저장 폴더(상대), mather_path=NULL
+    - fine_tuned_models:
+        - type 동일(대문자)
+        - rouge1_f1: 최종 ROUGE 저장
+    """
+    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))  # 출력(어댑터 or FULL 저장 폴더)
+    mdl_type = (tuning_type or "QLORA").upper()
+
     with SessionLocal() as s:
         # --- job/metrics에서 baseModelName 추출 ---
         job_row = s.execute(select(ORMJob).where(ORMJob.provider_job_id == job_id)).scalar_one_or_none()
@@ -585,56 +595,30 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 base_model_name = (mt.get("hyperparameters") or {}).get("baseModelName")
             except Exception:
                 base_model_name = None
-        
+
         # job 상태 업데이트
         if job_row:
             job_row.status = "succeeded"
             job_row.finished_at = datetime.utcnow()
             s.add(job_row)
-        
-        # --- FT 결과 모델(LlmModel) upsert ---
-        m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
-        if m:
-            m.trained_at = datetime.utcnow()
-            m.category = category
-            m.subcategory = subcategory
-            m.type = mdl_type
-            m.model_path = rel_model_path  # 어댑터 폴더만 가리킴
-            m.is_active = True
-        else:
-            m = LlmModel(
-                provider="hf",
-                name=model_name,
-                revision=0,
-                model_path=rel_model_path,  # 어댑터 폴더
-                category=category,
-                subcategory=subcategory,
-                type=mdl_type,
-                is_default=False,
-                is_active=True,
-                trained_at=datetime.utcnow(),
-            )
-        s.add(m)
-        s.flush()  # m.id
 
-        # --- 베이스 모델 row 보장/획득 ---
+        # --- 베이스 모델 경로 준비 (상대 저장) ---
         base_model_id = None
-        base_model_path = None
+        base_model_rel_path = None
         if base_model_name:
-            # _resolve_model_dir 로 물리 경로 확보 → 상대 경로로 저장
-            abs_base_dir = _resolve_model_dir(base_model_name)
-            base_model_path = _to_rel(abs_base_dir)
-
+            abs_base = _resolve_model_dir(base_model_name)      # 물리 경로
+            base_model_rel_path = _to_rel(abs_base)             # 상대 경로
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(
                     provider="hf",
                     name=base_model_name,
                     revision=0,
-                    model_path=base_model_path,
-                    category="all",    # 베이스는 공용
-                    subcategory=None,
-                    type="base",
+                    model_path=None,       # BASE는 어댑터 없음
+                    mather_path=base_model_rel_path,
+                    category="all",
+                    # subcategory는 BASE엔 적용하지 않음
+                    type="BASE",
                     is_default=False,
                     is_active=True,
                     trained_at=None,
@@ -643,24 +627,53 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 s.flush()
             base_model_id = int(base_row.id)
 
+        # --- FT 결과 모델(LlmModel) upsert ---
+        m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
+        if m is None:
+            m = LlmModel(
+                provider="hf",
+                name=model_name,
+                revision=0,
+                category=category,
+                # 서브카테고리 제약 제거(메타만 보유), 과거 데이터 호환을 위해 None으로 저장
+                type=mdl_type,
+                is_default=False,
+                is_active=True,
+                trained_at=datetime.utcnow(),
+            )
+
+        # 타입별 경로 저장 정책
+        if mdl_type in ("LORA", "QLORA"):
+            # 어댑터 경로는 model_path, 베이스는 mather_path
+            m.model_path = rel_model_path
+            m.mather_path = base_model_rel_path
+        else:  # FULL
+            m.model_path = rel_model_path  # 통짜 저장 폴더
+            m.mather_path = None
+
+        m.category = category
+        # m.subcategory = subcategory  # <- llm_models에 서브태스크 제약 제거. 필요시 메타로만 유지.
+        m.is_active = True
+        m.trained_at = datetime.utcnow()
+        s.add(m)
+        s.flush()  # m.id 확보
+
         # --- FineTunedModel insert ---
-        lora_path = rel_model_path if mdl_type == "lora" else None
         ftm = FineTunedModel(
             model_id=m.id,
             job_id=job_row.id if job_row else None,
             provider_model_id=model_name,
-            lora_weights_path=lora_path,
-            type=mdl_type,
+            lora_weights_path=(rel_model_path if mdl_type in ("LORA", "QLORA") else None),
+            type=mdl_type,                    # 대문자 저장
             is_active=True,
-            # 베이스 모델 참조
             base_model_id=base_model_id,
-            base_model_path=base_model_path,
+            base_model_path=base_model_rel_path,
         )
-        # rouge1_f1 컬럼이 스키마에 존재하는 버전 고려
         try:
             setattr(ftm, "rouge1_f1", (final_rouge if final_rouge is not None else None))
         except Exception:
             pass
+
         s.add(ftm)
         s.commit()
 
