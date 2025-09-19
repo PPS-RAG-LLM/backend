@@ -7,21 +7,41 @@ import threading
 import time
 import uuid
 import sqlite3
+import tempfile
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 from pathlib import Path
+from contextlib import contextmanager
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import get_db, logger
 from errors.exceptions import BadRequestError, InternalServerError
 logger = logger(__name__)
 
-try:
-    from transformers import TrainerCallback  # type: ignore
-except Exception:  # transformers may be absent during static analysis
-    class TrainerCallback:  # type: ignore
-        pass
+
+# ===== 캐시/임시 디렉토리 관리 =====
+@contextmanager
+def _ephemeral_cache_env():
+    """훈련 중에만 임시 캐시 디렉토리를 사용하고 끝나면 삭제"""
+    keys = [
+        "HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE",
+        "XDG_CACHE_HOME", "UNSLOTH_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR",
+    ]
+    tmpdir = tempfile.mkdtemp(prefix="ft_cache_")
+    old = {k: os.environ.get(k) for k in keys}
+    try:
+        for k in keys:
+            os.environ[k] = tmpdir
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None: 
+                os.environ.pop(k, None)
+            else: 
+                os.environ[k] = v
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 # ===== Progress interval (seconds) =====
 FT_PROGRESS_INTERVAL_SEC = int(os.getenv("FT_PROGRESS_INTERVAL_SEC", "2"))
@@ -60,29 +80,44 @@ def _to_rel(p: str) -> str:
 def _resolve_model_dir(name_or_path: str) -> str:
     """Resolve a local model directory for finetuning.
     Priority: DB.llm_models.model_path (by exact name, then base-name) → STORAGE_MODEL_ROOT/name.
+    인터넷 다운로드는 시도하지 않음.
     """
     if os.path.isabs(name_or_path):
         return name_or_path
-    # 1) Try DB lookup (huggingface/hf providers)
+    
+    # 1) DB에서 llm_models 테이블 조회
     try:
-        from repository.users.llm_models import get_llm_model_by_provider_and_name as _get
-        def _strip_cat(n: str) -> str:
-            for suf in ("-qa", "-doc_gen", "-summary"):
-                if n.endswith(suf):
-                    return n[: -len(suf)]
-            return n
-        for key in (name_or_path, _strip_cat(name_or_path)):
-            for prov in ("huggingface", "hf"):
-                row = _get(prov, key)
-                if row and row.get("model_path"):
-                    p = row["model_path"]
-                    if os.path.isabs(p):
-                        return p
-                    cand = os.path.join(STORAGE_MODEL_ROOT, p)
-                    if os.path.isdir(cand):
-                        return cand
-    except Exception:
-        pass
+        with SessionLocal() as s:
+            # 정확한 이름으로 먼저 찾기
+            model = s.execute(
+                select(LlmModel).where(LlmModel.name == name_or_path)
+            ).scalar_one_or_none()
+            
+            if not model:
+                # 카테고리 접미사 제거 후 다시 찾기
+                def _strip_cat(n: str) -> str:
+                    for suf in ("-qa", "-doc_gen", "-summary"):
+                        if n.endswith(suf):
+                            return n[: -len(suf)]
+                    return n
+                
+                base_name = _strip_cat(name_or_path)
+                if base_name != name_or_path:
+                    model = s.execute(
+                        select(LlmModel).where(LlmModel.name == base_name)
+                    ).scalar_one_or_none()
+            
+            if model and model.model_path:
+                p = model.model_path
+                if os.path.isabs(p):
+                    return p
+                # 상대 경로인 경우 STORAGE_MODEL_ROOT 기준으로 해석
+                cand = os.path.join(STORAGE_MODEL_ROOT, p)
+                if os.path.isdir(cand):
+                    return cand
+    except Exception as e:
+        logger.warning(f"DB lookup failed for model {name_or_path}: {e}")
+    
     # 2) Fallback to storage root
     return os.path.join(STORAGE_MODEL_ROOT, name_or_path)
 
@@ -448,7 +483,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
 
 def _update_job_status(conn, job_id: str, status: str, progress: int | None = None, rough: int | None = None, extras: dict | None = None, _retries: int = 3):
     """
-    Update job status and optional metrics. Progress percentage is intentionally ignored (not persisted).
+    Update job status and optional metrics. Progress percentage is now persisted.
     - If the fine_tune_jobs.metrics column doesn't exist, fall back to updating only status.
     """
     for attempt in range(_retries):
@@ -469,14 +504,20 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 except Exception:
                     metrics = {}
 
-            # Intentionally do not persist progress percentage
+            # ✅ 진행률 반영 (되돌아가지 않게 max 유지)
+            if progress is not None:
+                prev = int(metrics.get("learningProgress", 0) or 0)
+                metrics["learningProgress"] = max(prev, int(progress))
+
             if rough is not None:
-                metrics["roughScore"] = rough
+                metrics["roughScore"] = int(rough)
+
             if extras:
                 try:
                     metrics.update(extras)
                 except Exception:
                     pass
+
             # Update heartbeat timestamp for liveness detection
             try:
                 metrics["heartbeatAt"] = datetime.now().isoformat()
@@ -499,7 +540,7 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 out_dir = _resolve_out_dir_by_job(conn, job_id)
                 if out_dir:
                     log_path = os.path.join(out_dir, "train.log")
-                    msg = f"status={status} progress={progress if progress is not None else '-'} rough={rough if rough is not None else '-'} extras={extras or {}}"
+                    msg = f"status={status} progress={metrics.get('learningProgress','-')} rough={metrics.get('roughScore','-')} extras={extras or {}}"
                     _append_log(log_path, f"[{datetime.now().isoformat()}] {msg}")
             except Exception:
                 pass
@@ -630,58 +671,7 @@ def get_fine_tuning_logs(job_id: str, tail: int = 200) -> Dict[str, Any]:
     finally:
         conn.close()
 
-# ===== Training (simulated) =====
-def _simulate_training(job: FineTuneJob, save_name_with_suffix: str):
-    conn = get_db()
-    try:
-        _update_job_status(conn, job.job_id, "running")
-        out_dir = _ensure_output_dir(save_name_with_suffix)
-        ttype = (job.request.get("tuningType") or "QLORA").upper()
-        if ttype in ("LORA", "QLORA"):
-            _ensure_lora_marker(out_dir, ttype)
-        log_path = os.path.join(out_dir, "train.log")
-        # fresh log
-        try:
-            with open(log_path, "w", encoding="utf-8") as _tmp:
-                _tmp.write("")
-        except Exception:
-            pass
-        # console log
-        logger.info(
-            f"Fine-tuning started (SIM) jobId={job.job_id} category={job.category} save={save_name_with_suffix}"
-        )
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} started (SIMULATED)")
-        for p in range(2, 101):
-            time.sleep(0.1)
-            if p % 5 == 0:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] progress {p}%")
-                # Heartbeat to avoid false failure while simulating long runs
-                try:
-                    c = get_db()
-                    try:
-                        _update_job_status(c, job.job_id, "running")
-                    finally:
-                        c.close()
-                except Exception:
-                    logger.exception("failed to update heartbeat status (simulate)")
-        _finish_job_success(conn, job.job_id, save_name_with_suffix, job.category, ttype, subcategory=job.request.get("subcategory"))
-        logger.info(
-            f"Fine-tuning succeeded (SIM) jobId={job.job_id} save={save_name_with_suffix} type={ttype}"
-        )
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} succeeded")
-    except Exception:
-        logger.error(f"Fine-tuning failed (SIM) jobId={job.job_id}")
-        cur = conn.cursor()
-        cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-        conn.commit()
-        try:
-            out_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
-            log_path = os.path.join(out_dir, "train.log")
-            _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} failed")
-        except Exception:
-            pass
-    finally:
-        conn.close()
+# ===== 시뮬레이터 제거됨 =====
 
 # ===== Training (inline, real) =====
 def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
@@ -693,7 +683,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
     """
     conn = get_db()
     try:
-        _update_job_status(conn, job.job_id, "running")
+        _update_job_status(conn, job.job_id, "running", progress=0)
 
         out_dir = _ensure_output_dir(save_name_with_suffix)
         tuning_type = (job.request.get("tuningType") or "QLORA").upper()
@@ -712,6 +702,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             f"Fine-tuning started jobId={job.job_id} type={tuning_type} base={job.request.get('baseModelName')} "
             f"save={save_name_with_suffix} data={job.request.get('trainSetFile')}"
         )
+
+        # ✅ 캐시 설정 (임시 디렉토리 사용)
+        tmpdir = tempfile.mkdtemp(prefix="ft_cache_")
+        cache_keys = ["HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "XDG_CACHE_HOME", "UNSLOTH_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR"]
+        old_cache = {k: os.environ.get(k) for k in cache_keys}
+        for k in cache_keys:
+            os.environ[k] = tmpdir
 
         # imports
         try:
@@ -1059,6 +1056,46 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         training_args = TrainingArguments(**_ta_kwargs)
 
+        # === 콜백으로 진행률 반영 ===
+        class ProgressCallback(TrainerCallback):  # type: ignore[misc]
+            def on_train_begin(self, args, state, control, **kwargs):
+                try:
+                    c = get_db()
+                    _update_job_status(c, job.job_id, "running", progress=0)
+                    c.close()
+                except Exception:
+                    pass
+
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                # epoch 기반 진행률(대부분의 환경에서 안정적)
+                try:
+                    if state.epoch is not None and args.num_train_epochs:
+                        pct = int(min(99, max(0, round(100 * float(state.epoch) / float(args.num_train_epochs)))))
+                        c = get_db()
+                        _update_job_status(c, job.job_id, "running", progress=pct)
+                        c.close()
+                except Exception:
+                    pass
+
+            def on_step_end(self, args, state, control, **kwargs):
+                # 너무 잦은 업데이트 방지: 10스텝마다 갱신
+                try:
+                    if state.global_step and state.max_steps and (state.global_step % 10 == 0):
+                        pct = int(min(99, max(0, 100 * state.global_step / max(1, state.max_steps))))
+                        c = get_db()
+                        _update_job_status(c, job.job_id, "running", progress=pct)
+                        c.close()
+                except Exception:
+                    pass
+
+            def on_train_end(self, args, state, control, **kwargs):
+                try:
+                    c = get_db()
+                    _update_job_status(c, job.job_id, "running", progress=100)
+                    c.close()
+                except Exception:
+                    pass
+
         class LogCallback(TrainerCallback):  # type: ignore[misc]
             def on_log(self, args, state, control, logs=None, **kwargs):
                 if logs and "loss" in logs:
@@ -1068,15 +1105,10 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             def on_step_end(self, args, state, control, **kwargs):
                 try:
                     c = get_db()
-                    try:
-                        _update_job_status(c, job.job_id, "running")
-                    finally:
-                        c.close()
+                    _update_job_status(c, job.job_id, "running")
+                    c.close()
                 except Exception:
-                    logger.exception("failed to update heartbeat status (on_step_end)")
-
-        # === Periodic progress callback (interval-based) ===
-        # Remove periodic DB progress updates entirely
+                    pass
 
         def _build_trainer()->Trainer:
             return Trainer(
@@ -1085,7 +1117,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 tokenizer=tokenizer,
-                callbacks=[LogCallback(), HeartbeatCallback()],
+                callbacks=[LogCallback(), HeartbeatCallback(), ProgressCallback()],
             )
 
         trainer=_build_trainer()
@@ -1124,6 +1156,15 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         _update_job_status(conn, job.job_id, "running", rough=int((final_rouge or 0)*100), extras={"rouge1F1": final_rouge})
 
+        # === 저장(merge) 단계도 사용자에게 보여주기 ===
+        def _save_stage(stage: str, pct: int):
+            _append_log(log_path, f"[{datetime.now().isoformat()}] save:{stage} {pct}%")
+            c = get_db()
+            _update_job_status(c, job.job_id, "running", extras={"saveStage": stage, "saveProgress": pct})
+            c.close()
+
+        _save_stage("start", 5)
+        
         # ===== Save / Merge =====
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
         if is_mxfp4:
@@ -1134,13 +1175,21 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     tokenizer,
                     save_method="mxfp4",
                 )
+                _save_stage("mxfp4_merge", 70)
             except Exception as e:
                 _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, fallback HF save.")
                 trainer.save_model(output_dir)
+                _save_stage("model", 70)
                 tokenizer.save_pretrained(output_dir)
+                _save_stage("tokenizer", 90)
         else:
             trainer.save_model(output_dir)
+            _save_stage("model", 70)
             tokenizer.save_pretrained(output_dir)
+            _save_stage("tokenizer", 90)
+        
+        # 마무리
+        _save_stage("done", 100)
 
         _finish_job_success(
             conn,
@@ -1179,6 +1228,34 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         except Exception:
             pass
     finally:
+        # ✅ 메모리 정리
+        try:
+            del trainer
+        except Exception:
+            pass
+        try:
+            del model, tokenizer
+        except Exception:
+            pass
+        try:
+            import gc, torch
+            gc.collect()
+            if hasattr(torch, "cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        # ✅ 캐시 정리 (임시 디렉토리 삭제 및 환경변수 복원)
+        try:
+            # 환경변수 복원
+            for k, v in old_cache.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            # 임시 디렉토리 삭제
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
         conn.close()
 
 # ===== Public APIs =====
@@ -1227,9 +1304,8 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-    # FT_USE_SIM=0 -> 실제 학습
-    use_sim = os.getenv("FT_USE_SIM", "0") != "0"
-    target = _simulate_training if use_sim else _run_training_inline
+    # 항상 실제 학습만
+    target = _run_training_inline
     logger.info(
         f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} "
         f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
@@ -1239,7 +1315,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
 
     return {"jobId": job_id}
 
-def get_fine_tuning_status(category: str, job_id: str) -> Dict[str, Any]:
+def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     conn = get_db()
     try:
         cur = conn.cursor()
@@ -1253,9 +1329,11 @@ def get_fine_tuning_status(category: str, job_id: str) -> Dict[str, Any]:
                 metrics = json.loads(row["metrics"]) or {}
             except Exception:
                 metrics = {}
+        
         # Liveness: if status is running but heartbeat is stale, flip to failed
+        row_status = row["status"]
         try:
-            if row["status"] == "running":
+            if row_status == "running":
                 hb = metrics.get("heartbeatAt")
                 if hb:
                     from datetime import datetime, timezone
@@ -1269,22 +1347,18 @@ def get_fine_tuning_status(category: str, job_id: str) -> Dict[str, Any]:
                         finally:
                             c2.close()
                         row_status = "failed"
-                    else:
-                        row_status = row["status"]
-                else:
-                    row_status = row["status"]
-            else:
-                row_status = row["status"]
         except Exception:
-            row_status = row["status"]
+            pass
 
         return {
             "jobId": row["provider_job_id"],
             "status": row_status,
             "learningProgress": int(metrics.get("learningProgress", 0)),
             "roughScore": int(metrics.get("roughScore", 0)),
-            "error": metrics.get("error"),
             "rouge1F1": metrics.get("rouge1F1"),
+            "saveProgress": int(metrics.get("saveProgress", 0)),
+            "saveStage": metrics.get("saveStage"),
+            "error": metrics.get("error"),
         }
     finally:
         conn.close()
