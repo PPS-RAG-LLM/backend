@@ -49,8 +49,21 @@
   "tuningType": "QLORA"
 }
 
-
-
+{
+  "category": "summary",
+  "subcategory": "summary",
+  "baseModelName": "gpt-oss-20b",
+  "saveModelName": "gpt-oss-20b-summary",
+  "systemPrompt": "위 글을 참고하여 요약해 주세요",
+  "batchSize": 4,
+  "epochs": 3,
+  "learningRate": 0.0002,
+  "overfittingPrevention": true,
+  "trainSetFile": "/home/work/CoreIQ/backend/storage/train_data/data.csv",
+  "gradientAccumulationSteps": 8,
+  "quantizationBits": 4,
+  "tuningType": "QLORA"
+}
 
 
 =====================================================================================
