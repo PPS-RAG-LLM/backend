@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, UploadFile, File, Form
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 import asyncio
 import json
@@ -17,6 +18,41 @@ from service.admin.LLM_finetuning import (
 )
 
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
+class FineTuneJsonRequest(BaseModel):
+    """JSON 바디로 받는 파라미터. Swagger의 Edit Value 사용 가능."""
+    trainSetPath: str = Field(..., description="학습 CSV의 절대경로 또는 백엔드 루트 기준 상대경로")
+    category: str | None = Field(None, description="qa | doc_gen | summary")
+    baseModelName: str | None = Field(None, description="베이스 모델 이름(예: gpt-oss)")
+    saveModelName: str | None = Field(None, description="저장될 모델 표시 이름(미지정 시 자동 생성)")
+    systemPrompt: str | None = Field(None, description="시스템 프롬프트")
+    batchSize: int | None = Field(None)
+    epochs: int | None = Field(None)
+    learningRate: float | None = Field(None)
+    overfittingPrevention: bool | None = Field(None)
+    gradientAccumulationSteps: int | None = Field(None)
+    tuningType: str | None = Field(None, description="LORA | QLORA | FULL")
+    quantizationBits: int | None = Field(None, description="QLORA 전용: 4 또는 8")
+    startAt: str | None = Field(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "trainSetPath": "./storage/train_data/my_run/train.csv",
+                "category": "qa",
+                "baseModelName": "gpt-oss",
+                "saveModelName": "fine-qa-20250919",
+                "systemPrompt": "당신은 도움이 되는 AI 어시스턴트입니다.",
+                "batchSize": 4,
+                "epochs": 3,
+                "learningRate": 0.0002,
+                "overfittingPrevention": True,
+                "gradientAccumulationSteps": 8,
+                "tuningType": "QLORA",
+                "quantizationBits": 4,
+                "startAt": None,
+            }
+        }
+
 
 # ---- 업로드 유틸 ----
 def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
@@ -44,27 +80,84 @@ def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
     return target_path
 
 
-@router.post("/fine-tuning", summary="파인튜닝 실행(파일 업로드 + 예약 지원)")
+@router.post("/fine-tuning", summary="파인튜닝 실행(텍스트 파라미터 + 학습 파일 업로드)")
 async def launch_fine_tuning(
-    # ---- 멀티파트 Form 필드들 ----
-    category: str = Form(..., description="qa | doc_gen | summary"),
-    baseModelName: str = Form(...),
-    saveModelName: str = Form(...),
-    systemPrompt: str = Form(...),
-    batchSize: int = Form(4),
-    epochs: int = Form(3),
-    learningRate: float = Form(2e-4),
-    overfittingPrevention: bool = Form(True),
-    gradientAccumulationSteps: int = Form(8),
-    tuningType: str = Form("QLORA", description="LORA | QLORA | FULL"),
+    # 텍스트(옵션) 파라미터들 — 값이 오면 사용, 없으면 기본값
+    category: str | None = Form(None, description="qa | doc_gen | summary"),
+    baseModelName: str | None = Form(None, description="베이스 모델 이름(예: gpt-oss)"),
+    saveModelName: str | None = Form(None, description="저장될 모델 표시 이름(미지정 시 자동 생성)"),
+    systemPrompt: str | None = Form(None, description="시스템 프롬프트"),
+    batchSize: int | None = Form(None),
+    epochs: int | None = Form(None),
+    learningRate: float | None = Form(None),
+    overfittingPrevention: bool | None = Form(None),
+    gradientAccumulationSteps: int | None = Form(None),
+    tuningType: str | None = Form(None, description="LORA | QLORA | FULL"),
     quantizationBits: int | None = Form(None, description="QLORA 전용: 4 또는 8"),
     startAt: str | None = Form(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"),
-    # ---- 업로드 파일 ----
+    # 업로드 파일(필수)
     trainSet: UploadFile = File(..., description="학습 CSV 파일"),
 ):
+    # 기본값 채우기
+    _category = (category or "qa").strip()
+    _base = (baseModelName or "gpt-oss").strip()
+    _save = saveModelName or f"fine-tuned-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    _sys = systemPrompt or "당신은 도움이 되는 AI 어시스턴트입니다."
+    _bs = int(batchSize) if batchSize is not None else 4
+    _epochs = int(epochs) if epochs is not None else 3
+    _lr = float(learningRate) if learningRate is not None else 2e-4
+    _ofp = True if overfittingPrevention is None else bool(overfittingPrevention)
+    _gas = int(gradientAccumulationSteps) if gradientAccumulationSteps is not None else 8
+    _tuning = (tuningType or "QLORA").upper()
+    _qbits = quantizationBits if quantizationBits is not None else (4 if _tuning == "QLORA" else None)
+
     # 1) 파일 저장
-    saved_abs = _save_upload_csv(trainSet, subdir=saveModelName)
-    # 2) 서비스 요청 모델 생성 (서비스는 '경로'를 받음)
+    saved_abs = _save_upload_csv(trainSet, subdir=_save)
+    # 2) 서비스 요청 생성
+    req = FineTuneRequest(
+        category=_category,
+        subcategory=None,
+        baseModelName=_base,
+        saveModelName=_save,
+        systemPrompt=_sys,
+        batchSize=_bs,
+        epochs=_epochs,
+        learningRate=_lr,
+        overfittingPrevention=_ofp,
+        trainSetFile=saved_abs,
+        gradientAccumulationSteps=_gas,
+        quantizationBits=_qbits,
+        tuningType=_tuning,
+        startAt=startAt,
+    )
+    return start_fine_tuning(_category, req)
+
+
+@router.get("/fine-tuning", summary="지정된 작업 ID의 파인튜닝 진행 상태와 결과를 조회")
+def read_fine_tuning_status(jobId: str = Query(...)):
+    return get_fine_tuning_status(job_id=jobId)
+
+
+@router.post("/fine-tuning/json", summary="파인튜닝 실행(JSON 바디; Swagger Edit Value로 편리 입력)")
+def launch_fine_tuning_json(body: FineTuneJsonRequest):
+    # 기본값 채우기
+    category = (body.category or "qa").strip()
+    baseModelName = (body.baseModelName or "gpt-oss").strip()
+    saveModelName = body.saveModelName or f"fine-tuned-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    systemPrompt = body.systemPrompt or "당신은 도움이 되는 AI 어시스턴트입니다."
+    batchSize = int(body.batchSize) if body.batchSize is not None else 4
+    epochs = int(body.epochs) if body.epochs is not None else 3
+    learningRate = float(body.learningRate) if body.learningRate is not None else 2e-4
+    overfittingPrevention = True if body.overfittingPrevention is None else bool(body.overfittingPrevention)
+    gradientAccumulationSteps = int(body.gradientAccumulationSteps) if body.gradientAccumulationSteps is not None else 8
+    tuningType = (body.tuningType or "QLORA").upper()
+    quantizationBits = body.quantizationBits if body.quantizationBits is not None else (4 if tuningType == "QLORA" else None)
+
+    # 학습 파일 경로 확인
+    train_path = body.trainSetPath
+    if train_path.startswith("./"):
+        train_path = str(Path(__file__).resolve().parents[2] / train_path.lstrip("./"))
+
     req = FineTuneRequest(
         category=category,
         subcategory=None,
@@ -75,19 +168,13 @@ async def launch_fine_tuning(
         epochs=epochs,
         learningRate=learningRate,
         overfittingPrevention=overfittingPrevention,
-        trainSetFile=saved_abs,
+        trainSetFile=train_path,
         gradientAccumulationSteps=gradientAccumulationSteps,
         quantizationBits=quantizationBits,
         tuningType=tuningType,
-        startAt=startAt,
+        startAt=body.startAt,
     )
     return start_fine_tuning(category, req)
-
-
-@router.get("/fine-tuning", summary="지정된 작업 ID의 파인튜닝 진행 상태와 결과를 조회")
-def read_fine_tuning_status(jobId: str = Query(...)):
-    return get_fine_tuning_status(job_id=jobId)
-
 
 @router.get("/fine-tuning/train-dirs", summary="학습 데이터(root: storage/train_data) 하위 폴더 목록 조회")
 def get_train_dirs():
