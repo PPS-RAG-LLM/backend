@@ -531,15 +531,23 @@ class FineTunedModel(Base):
     __tablename__ = "fine_tuned_models"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+
     model_id = Column(
         Integer, ForeignKey("llm_models.id", ondelete="CASCADE", onupdate="CASCADE")
     )
     job_id = Column(
         Integer, ForeignKey("fine_tune_jobs.id", ondelete="CASCADE", onupdate="CASCADE")
     )
+
     provider_model_id = Column(Text, nullable=False)
     lora_weights_path = Column(Text)
-    type = Column(Text, nullable=False)  # 'base', 'lora', 'full'
+
+    # 추가된 필드
+    base_model_id = Column(Integer, nullable=True)       # 베이스 모델의 ID
+    base_model_path = Column(Text, nullable=True)        # 베이스 모델의 상대 경로
+    rouge1_f1 = Column(Float, nullable=True)             # 성능 평가 지표
+
+    type = Column(Text, nullable=False)  # 'BASE', 'LORA', 'QLORA', 'FULL'
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False

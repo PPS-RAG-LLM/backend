@@ -52,7 +52,7 @@
 {
   "category": "summary",
   "subcategory": "summary",
-  "baseModelName": "gpt_oss_20b",
+  "baseModelName": "gpt-oss-20b",
   "saveModelName": "gpt_oss_20b_summary-요약",
   "systemPrompt": "위 글을 참고하여 요약해 주세요",
   "batchSize": 4,
