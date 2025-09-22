@@ -927,8 +927,13 @@ def infer_local(body: InferBody) -> Dict[str, Any]:
 
 
 def get_model_list(category: str) -> Dict[str, Any]:
-    # 카테고리 정규화
-    category = _norm_category(category)
+    # 카테고리 정규화 + 서브카테고리 분리("cat:sub" → cat만 사용)
+    raw = _norm_category(category)
+    if ":" in raw:
+        base_cat = raw.split(":", 1)[0].strip()
+    else:
+        base_cat = raw
+    category = base_cat
     _ensure_models_from_fs(category)
 
     conn = _connect()
@@ -948,7 +953,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
                 """
                 SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE category='all'
+                WHERE lower(category)='all'
                 ORDER BY trained_at DESC, id DESC
                 """
             )
@@ -957,7 +962,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
                 """
                 SELECT id, name, type, category, subcategory, model_path, is_active, created_at
                 FROM llm_models
-                WHERE (category=? OR category='all')
+                WHERE (lower(category)=? OR lower(category)='all')
                 ORDER BY trained_at DESC, id DESC
                 """,
                 (category,)
@@ -987,12 +992,14 @@ def get_model_list(category: str) -> Dict[str, Any]:
         active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # 일반 카테고리 요청 시: base 중복 방지는 유지
+        # 일반 카테고리 요청 시: BASE 타입도 category='all'이면 항상 노출
         if category != "base":
             row_type = str((r["type"] or "")).lower()
             row_cat  = str((r["category"] or "")).lower()
             if (row_type == "base") and (row_cat != "all"):
-                continue
+                # 'BASE'가 특정 카테고리에만 속한 경우: 현재 카테고리와 일치하는 레코드만 이미 쿼리에서 선택됨
+                # 추가 필터 없이 통과
+                pass
         name = r["name"]
         cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)

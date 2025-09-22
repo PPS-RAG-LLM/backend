@@ -33,6 +33,7 @@ class FineTuneJsonRequest(BaseModel):
     tuningType: str | None = Field(None, description="LORA | QLORA | FULL")
     quantizationBits: int | None = Field(None, description="QLORA 전용: 4 또는 8")
     startAt: str | None = Field(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)")
+    startNow: bool | None = Field(None, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)")
 
     class Config:
         json_schema_extra = {
@@ -50,6 +51,7 @@ class FineTuneJsonRequest(BaseModel):
                 "tuningType": "QLORA",
                 "quantizationBits": 4,
                 "startAt": None,
+                "startNow": True,
             }
         }
 
@@ -95,6 +97,7 @@ async def launch_fine_tuning(
     tuningType: str | None = Form(None, description="LORA | QLORA | FULL"),
     quantizationBits: int | None = Form(None, description="QLORA 전용: 4 또는 8"),
     startAt: str | None = Form(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"),
+    startNow: bool | None = Form(None, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)"),
     # 업로드 파일(필수)
     trainSet: UploadFile = File(..., description="학습 CSV 파일"),
 ):
@@ -110,6 +113,7 @@ async def launch_fine_tuning(
     _gas = int(gradientAccumulationSteps) if gradientAccumulationSteps is not None else 8
     _tuning = (tuningType or "QLORA").upper()
     _qbits = quantizationBits if quantizationBits is not None else (4 if _tuning == "QLORA" else None)
+    _startNow = startNow if startNow is not None else False
 
     # 1) 파일 저장
     saved_abs = _save_upload_csv(trainSet, subdir=_save)
@@ -129,6 +133,7 @@ async def launch_fine_tuning(
         quantizationBits=_qbits,
         tuningType=_tuning,
         startAt=startAt,
+        startNow=_startNow,
     )
     return start_fine_tuning(_category, req)
 
@@ -152,6 +157,7 @@ def launch_fine_tuning_json(body: FineTuneJsonRequest):
     gradientAccumulationSteps = int(body.gradientAccumulationSteps) if body.gradientAccumulationSteps is not None else 8
     tuningType = (body.tuningType or "QLORA").upper()
     quantizationBits = body.quantizationBits if body.quantizationBits is not None else (4 if tuningType == "QLORA" else None)
+    startNow = body.startNow if body.startNow is not None else False
 
     # 학습 파일 경로 확인
     train_path = body.trainSetPath
@@ -173,6 +179,7 @@ def launch_fine_tuning_json(body: FineTuneJsonRequest):
         quantizationBits=quantizationBits,
         tuningType=tuningType,
         startAt=body.startAt,
+        startNow=startNow,
     )
     return start_fine_tuning(category, req)
 

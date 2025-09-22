@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from pathlib import Path
 from contextlib import contextmanager
@@ -18,6 +18,11 @@ from contextlib import contextmanager
 from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import get_db, logger
 from errors.exceptions import BadRequestError, InternalServerError
+try:
+    import unsloth  # Unsloth는 transformers/peft보다 먼저 import
+except Exception:
+    pass
+
 logger = logger(__name__)
 
 
@@ -200,6 +205,9 @@ class FineTuneRequest(BaseModel):
     startAt: Optional[str] = Field(
         default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
     )
+    startNow: bool = Field(
+        default=False, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)"
+    )
 
     @field_validator("category")
     @classmethod
@@ -235,7 +243,20 @@ class FineTuneJob:
 
 # ===== Common utils =====
 def _now_local_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """현재 시간을 KST로 반환"""
+    kst = timezone(timedelta(hours=9))
+    return datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S")
+
+def _now_utc() -> datetime:
+    """현재 시간을 UTC로 반환"""
+    return datetime.now(timezone.utc)
+
+def _to_kst(utc_dt: datetime) -> datetime:
+    """UTC datetime을 KST로 변환"""
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    kst = timezone(timedelta(hours=9))
+    return utc_dt.astimezone(kst)
 
 def _ensure_output_dir(model_name: str) -> str:
     try:
@@ -266,7 +287,7 @@ def _ensure_output_dir(model_name: str) -> str:
     if not os.path.isfile(cfg_path):
         try:
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump({"created_at": datetime.now().isoformat()}, f, ensure_ascii=False)
+                json.dump({"created_at": _now_utc().isoformat()}, f, ensure_ascii=False)
         except Exception:
             logger.exception(f"failed to write config.json inside {out_dir}")
     return out_dir
@@ -296,7 +317,7 @@ def _write_error(out_dir: str, message: str):
         os.makedirs(out_dir, exist_ok=True)
         err_path = os.path.join(out_dir, "error.txt")
         with open(err_path, "a", encoding="utf-8") as f:
-            ts = datetime.now().isoformat()
+            ts = _now_utc().isoformat()
             f.write(f"[{ts}] {message}\n")
     except Exception:
         logger.exception(f"failed to write error file under {out_dir}")
@@ -320,7 +341,7 @@ def list_train_data_dirs() -> Dict[str, Any]:
                 if not entry.is_dir():
                     continue
                 try:
-                    mtime = datetime.utcfromtimestamp(entry.stat().st_mtime).isoformat()
+                    mtime = datetime.fromtimestamp(entry.stat().st_mtime, tz=timezone.utc).isoformat()
                 except Exception:
                     logger.exception(f"failed to stat dir: {entry.path}")
                     mtime = None
@@ -351,8 +372,8 @@ def list_train_data_dirs() -> Dict[str, Any]:
                         cur = conn.cursor()
                         if _has_column(conn, "fine_tune_datasets", "record_count"):
                             cur.execute(
-                                "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                                (file_count, dataset_id),
+                                "UPDATE fine_tune_datasets SET record_count=?, updated_at=? WHERE id=?",
+                                (file_count, _now_utc().isoformat(), dataset_id),
                             )
                             conn.commit()
                     except Exception:
@@ -399,8 +420,8 @@ def list_train_data_dirs() -> Dict[str, Any]:
                             try:
                                 if _has_column(conn, "fine_tune_datasets", "record_count"):
                                     cur.execute(
-                                        "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE name=? AND path=?",
-                                        (recomputed_count, name_val, rel_path_val),
+                                        "UPDATE fine_tune_datasets SET record_count=?, updated_at=? WHERE name=? AND path=?",
+                                        (recomputed_count, _now_utc().isoformat(), name_val, rel_path_val),
                                     )
                                     conn.commit()
                             except Exception:
@@ -482,7 +503,7 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
             provider_job_id=job_id,
             dataset_id=dataset_id,
             status=initial_status,
-            started_at=datetime.utcnow(),
+            started_at=_now_utc(),
             metrics=json.dumps(metrics, ensure_ascii=False),
         )
         s.add(row)
@@ -513,10 +534,9 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 except Exception:
                     metrics = {}
 
-            # ✅ 진행률 반영 (되돌아가지 않게 max 유지)
+            # 진행률 반영: 요청값을 그대로 저장(사용자 요청대로 max 적용 제거)
             if progress is not None:
-                prev = int(metrics.get("learningProgress", 0) or 0)
-                metrics["learningProgress"] = max(prev, int(progress))
+                metrics["learningProgress"] = int(progress)
 
             if rough is not None:
                 metrics["roughScore"] = int(rough)
@@ -529,7 +549,7 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
 
             # Update heartbeat timestamp for liveness detection
             try:
-                metrics["heartbeatAt"] = datetime.now().isoformat()
+                metrics["heartbeatAt"] = _now_utc().isoformat()
             except Exception:
                 pass
 
@@ -550,7 +570,7 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 if out_dir:
                     log_path = os.path.join(out_dir, "train.log")
                     msg = f"status={status} progress={metrics.get('learningProgress','-')} rough={metrics.get('roughScore','-')} extras={extras or {}}"
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] {msg}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] {msg}")
             except Exception:
                 pass
             return
@@ -608,7 +628,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         # job 상태 업데이트
         if job_row:
             job_row.status = "succeeded"
-            job_row.finished_at = datetime.utcnow()
+            job_row.finished_at = _now_utc()
             s.add(job_row)
 
         # --- 베이스 모델 경로 준비 (상대 저장) ---
@@ -648,7 +668,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 type=mdl_type,
                 is_default=False,
                 is_active=True,
-                trained_at=datetime.utcnow(),
+                trained_at=_now_utc(),
             )
 
         # 타입별 경로 저장 정책
@@ -663,7 +683,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         m.category = category
         # m.subcategory = subcategory  # <- llm_models에 서브태스크 제약 제거. 필요시 메타로만 유지.
         m.is_active = True
-        m.trained_at = datetime.utcnow()
+        m.trained_at = _now_utc()
         s.add(m)
         s.flush()  # m.id 확보
 
@@ -758,7 +778,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 _tmp.write("")
         except Exception:
             pass
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} started (INLINE)")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] job {job.job_id} started (INLINE)")
         # console log
         logger.info(
             f"Fine-tuning started jobId={job.job_id} type={tuning_type} base={job.request.get('baseModelName')} "
@@ -774,6 +794,10 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # imports
         try:
+            try:
+                from unsloth import FastLanguageModel  # type: ignore
+            except Exception:
+                FastLanguageModel = None  # FULL/LORA 경로에서 필요 없음
             import pandas as pd
             import torch
             from transformers import (
@@ -785,7 +809,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 TrainerCallback,
             )
         except Exception as e:
-            _append_log(log_path, f"[{datetime.now().isoformat()}] import error: {e}")
+            _append_log(log_path, f"[{_now_utc().isoformat()}] import error: {e}")
             try:
                 _update_job_status(conn, job.job_id, "failed", extras={"error": f"import error: {e}"})
             except Exception:
@@ -818,7 +842,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 enc = chardet.detect(raw).get("encoding") or "utf-8"
                 df = pd.read_csv(csv_path, encoding=enc, dtype=str, on_bad_lines="skip").fillna("")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] csv load failed: {e}")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] csv load failed: {e}")
                 try:
                     _update_job_status(conn, job.job_id, "failed", extras={"error": f"csv load failed: {e}"})
                 except Exception:
@@ -839,15 +863,12 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # ===== Deterministic train/test split (random_state=42) =====
         total_examples = len(conversations)
-        if total_examples >= 10:
-            eval_size = max(1, int(round(total_examples * 0.1)))
-        elif total_examples >= 2:
-            eval_size = 1
+        if total_examples >= 2:
+            eval_size = max(1, int(round(total_examples * 0.3)))  # 30% eval
         else:
             eval_size = 0
 
         if eval_size > 0:
-            # shuffle deterministically
             import random as _py_random
             indices = list(range(total_examples))
             rng = _py_random.Random(42)
@@ -892,7 +913,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         base_folder = _resolve_model_dir(job.request.get("baseModelName"))
         if not _has_model_signature(base_folder):
-            _append_log(log_path, f"[{datetime.now().isoformat()}] base model not found: {base_folder}")
+            _append_log(log_path, f"[{_now_utc().isoformat()}] base model not found: {base_folder}")
             try:
                 _update_job_status(conn, job.job_id, "failed", extras={"error": f"base model not found: {base_folder}"})
             except Exception:
@@ -930,7 +951,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             try:
                 from peft import LoraConfig, get_peft_model  # type: ignore
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for LORA: {e}")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] peft not installed for LORA: {e}")
                 _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
                 logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
                 return
@@ -978,7 +999,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 try:
                     from unsloth import FastLanguageModel  # type: ignore
                 except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] Unsloth not installed: {e}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] Unsloth not installed: {e}")
                     _update_job_status(conn, job.job_id, "failed", extras={"error": f"unsloth not installed: {e}"})
                     return
 
@@ -1024,7 +1045,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 try:
                     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
                 except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for QLORA: {e}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] peft not installed for QLORA: {e}")
                     _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
                     logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
                     return
@@ -1090,13 +1111,17 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         import math
         from inspect import signature as _sig
 
-        # Build kwargs dict first to allow graceful fallback when certain versions
-        # of transformers don't support a particular parameter (e.g. evaluation_strategy).
-        # Optimizer: avoid bitsandbytes for FULL/LORA by default; keep for QLORA.
+# --- 전략 일치 설정 ---
+        has_eval = (eval_dataset is not None) and (len(eval_conversations) > 0)
+        save_strategy = "epoch" if has_eval else "no"
+        evaluation_strategy = "epoch" if has_eval else "no"
+
+        # Optimizer: FULL/LORA는 기본 adamw_torch, QLORA는 paged_adamw_8bit (환경변수로 오버라이드 가능)
         optim_name = os.getenv(
             "FT_OPTIM",
             ("adamw_torch" if tuning_type in ("FULL", "LORA") else "paged_adamw_8bit"),
         )
+
         _ta_kwargs = dict(
             output_dir=output_dir,
             num_train_epochs=job.request.get("epochs", 3),
@@ -1105,12 +1130,33 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             learning_rate=job.request.get("learningRate", 2e-4),
             bf16=True,
             logging_steps=10,
-            save_total_limit=2,
             report_to="none",
             optim=optim_name,
             seed=42,
             data_seed=42,
+            save_total_limit=2,
+            # 🔹 전략 일치
+            save_strategy=save_strategy,
         )
+
+        # transformers 버전 차이를 감안해 signature 검사
+        from inspect import signature as _sig
+        if "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters:
+            _ta_kwargs["evaluation_strategy"] = evaluation_strategy
+
+        # 🔹 평가가 있을 때만 best model 로직 활성화 (전략 일치 필수!)
+        if has_eval:
+            _ta_kwargs.update(
+                dict(
+                    load_best_model_at_end=True,
+                    metric_for_best_model="eval_loss",
+                    greater_is_better=False,
+                    per_device_eval_batch_size=max(1, job.request.get("batchSize", 1)),
+                    eval_accumulation_steps=None,  # 기본
+                )
+            )
+
+        training_args = TrainingArguments(**_ta_kwargs)
 
         # ---- 평가/저장/얼리스톱 설정 (버전 호환 포함) ----
         has_eval_strategy = "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters
@@ -1120,15 +1166,15 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         has_greater = "greater_is_better" in _sig(TrainingArguments.__init__).parameters
 
         use_eval = eval_dataset is not None and len(eval_dataset) > 0
+        # 평가/저장 전략은 항상 동일하게 강제하여 충돌 방지
         if has_eval_strategy:
-            _ta_kwargs["evaluation_strategy"] = "epoch" if use_eval else "no"
-        # 저장 전략: 에폭마다 저장(평가가 있을 때만). 아니면 save_steps 사용
-        if has_save_strategy and use_eval:
-            _ta_kwargs["save_strategy"] = "epoch"
-        else:
-            _ta_kwargs["save_steps"] = 500
-        if has_lbm and use_eval:
-            _ta_kwargs["load_best_model_at_end"] = True
+            _ta_kwargs["evaluation_strategy"] = ("epoch" if use_eval else "no")
+        if has_save_strategy:
+            _ta_kwargs["save_strategy"] = ("epoch" if use_eval else "no")
+
+        # 베스트 모델 로드는 검증셋 있을 때만
+        if has_lbm:
+            _ta_kwargs["load_best_model_at_end"] = bool(use_eval)
         if has_metric_for_best and use_eval:
             _ta_kwargs["metric_for_best_model"] = "eval_loss"
         if has_greater and use_eval:
@@ -1189,7 +1235,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         class LogCallback(TrainerCallback):  # type: ignore[misc]
             def on_log(self, args, state, control, logs=None, **kwargs):
                 if logs and "loss" in logs:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
         # 얼리스톱(평가가 있을 때만): 2 에폭 연속 개선 없으면 중단
         extra_callbacks = []
@@ -1215,12 +1261,12 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         trainer=_build_trainer()
 
         try:
-            _append_log(log_path, f"[{datetime.now().isoformat()}] training started...")
+            _append_log(log_path, f"[{_now_utc().isoformat()}] training started...")
             trainer.train()
         except RuntimeError as re:
             if "out of memory" in str(re).lower() and training_args.per_device_train_batch_size>1:
                 new_bs=max(1,training_args.per_device_train_batch_size//2)
-                _append_log(log_path,f"[{datetime.now().isoformat()}] OOM detected, retrying with batch_size={new_bs}")
+                _append_log(log_path,f"[{_now_utc().isoformat()}] OOM detected, retrying with batch_size={new_bs}")
                 training_args.per_device_train_batch_size=new_bs
                 trainer=_build_trainer()
                 trainer.train()
@@ -1251,13 +1297,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # === 저장(merge) 단계도 사용자에게 보여주기 ===
         def _save_stage(stage: str, pct: int):
-            _append_log(log_path, f"[{datetime.now().isoformat()}] save:{stage} {pct}%")
+            _append_log(log_path, f"[{_now_utc().isoformat()}] save:{stage} {pct}%")
             c = get_db()
             _update_job_status(c, job.job_id, "running", extras={"saveStage": stage, "saveProgress": pct})
             c.close()
 
         _save_stage("start", 5)
-        _append_log(log_path, f"[{datetime.now().isoformat()}] saving model...")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] saving model...")
         # ===== Save / Merge =====
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
         
@@ -1269,9 +1315,9 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 _save_stage("adapter", 70)
                 tokenizer.save_pretrained(output_dir)
                 _save_stage("tokenizer", 90)
-                _append_log(log_path, f"[{datetime.now().isoformat()}] saved adapters only → {output_dir}")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] saved adapters only → {output_dir}")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] adapter save failed: {e}, fallback trainer.save_model")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] adapter save failed: {e}, fallback trainer.save_model")
                 trainer.save_model(output_dir)
                 _save_stage("model", 70)
                 tokenizer.save_pretrained(output_dir)
@@ -1282,9 +1328,9 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             if is_mxfp4 and save_merge:
                 try:
                     model.save_pretrained_merged(output_dir, tokenizer, save_method="mxfp4")
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] merged MXFP4 saved → {output_dir}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] merged MXFP4 saved → {output_dir}")
                 except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, using adapters only.")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] MXFP4 merge save failed: {e}, using adapters only.")
         else:
             # FULL: 전체 모델 저장
             trainer.save_model(output_dir)
@@ -1307,14 +1353,14 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         logger.info(
             f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}"
         )
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} succeeded")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] job {job.job_id} succeeded")
 
     except Exception as e:
         logger.error(f"Fine-tuning failed jobId={job.job_id} error={e}")
         # Log error to file
         try:
             _append_log(os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix, "train.log"),
-                        f"[{datetime.now().isoformat()}] error: {e}")
+                        f"[{_now_utc().isoformat()}] error: {e}")
         except Exception:
             pass
 
@@ -1368,7 +1414,7 @@ def _log_to_save_name(save_name_with_suffix: str, message: str):
     try:
         out_dir = _ensure_output_dir(save_name_with_suffix)
         log_path = os.path.join(out_dir, "train.log")
-        _append_log(log_path, f"[{datetime.now().isoformat()}] {message}")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] {message}")
     except Exception:
         pass
 
@@ -1399,7 +1445,11 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
         if body.startAt:
             try:
                 scheduled_dt = datetime.fromisoformat(body.startAt)
-                now_dt = datetime.now(scheduled_dt.tzinfo) if scheduled_dt.tzinfo else datetime.now()
+                # timezone 정보가 없으면 KST로 가정
+                if scheduled_dt.tzinfo is None:
+                    kst = timezone(timedelta(hours=9))
+                    scheduled_dt = scheduled_dt.replace(tzinfo=kst)
+                now_dt = _now_utc()
                 delta = (scheduled_dt - now_dt).total_seconds()
                 if delta > 1.0:
                     delay_sec = float(delta)
@@ -1428,37 +1478,70 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-    # 예약 실행 지원
-    def _launch():
-        _run_training_inline(job, save_name_with_suffix)
-
-    # 예약 딜레이 재계산 (위 try 블록과 동일 로직 재사용)
-    delay_sec = 0.0
-    if body.startAt:
-        try:
-            scheduled_dt = datetime.fromisoformat(body.startAt)
-            now_dt = datetime.now(scheduled_dt.tzinfo) if scheduled_dt.tzinfo else datetime.now()
-            delta = (scheduled_dt - now_dt).total_seconds()
-            if delta > 1.0:
-                delay_sec = float(delta)
-        except Exception:
-            delay_sec = 0.0
-
-    if delay_sec > 1.0:
-        t = threading.Timer(delay_sec, _launch)
-        t.daemon = True
-        t.start()
-        logger.info(
-            f"Fine-tuning scheduled jobId={job.job_id} at {scheduled_dt.isoformat()} category={category} base={body.baseModelName} save={save_name_with_suffix}"
-        )
-    else:
+    
+    # 🔹 즉시 실행 여부에 따라 분기
+    if body.startNow:
+        # 즉시 실행
+        def _launch():
+            _run_training_inline(job, save_name_with_suffix)
+        
         t = threading.Thread(target=_launch, daemon=True)
         t.start()
         logger.info(
-            f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
+            f"Fine-tuning started immediately jobId={job.job_id} category={category} base={body.baseModelName} "
+            f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
         )
+    else:
+        # 예약 실행 또는 큐에만 등록
+        if body.startAt:
+            # 예약 실행
+            def _launch():
+                _run_training_inline(job, save_name_with_suffix)
+            
+            # 예약 딜레이 재계산
+            delay_sec = 0.0
+            try:
+                scheduled_dt = datetime.fromisoformat(body.startAt)
+                # timezone 정보가 없으면 KST로 가정
+                if scheduled_dt.tzinfo is None:
+                    kst = timezone(timedelta(hours=9))
+                    scheduled_dt = scheduled_dt.replace(tzinfo=kst)
+                now_dt = _now_utc()
+                delta = (scheduled_dt - now_dt).total_seconds()
+                if delta > 1.0:
+                    delay_sec = float(delta)
+            except Exception:
+                delay_sec = 0.0
 
-    return {"jobId": job_id}
+            if delay_sec > 1.0:
+                t = threading.Timer(delay_sec, _launch)
+                t.daemon = True
+                t.start()
+                logger.info(
+                    f"Fine-tuning scheduled jobId={job.job_id} at {scheduled_dt.isoformat()} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+                )
+            else:
+                # 예약 시간이 이미 지났으면 즉시 실행
+                t = threading.Thread(target=_launch, daemon=True)
+                t.start()
+                logger.info(
+                    f"Fine-tuning started (scheduled time passed) jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+                )
+        else:
+            # 큐에만 등록 (스케줄러가 나중에 실행)
+            try:
+                conn2 = get_db()
+                _update_job_status(conn2, job_id, "queued", extras={"reserved": True, "reservedAt": _now_local_str()})
+            finally:
+                try:
+                    conn2.close()
+                except Exception:
+                    pass
+            logger.info(
+                f"Fine-tuning queued (not started) jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+            )
+
+    return {"jobId": job_id, "started": bool(body.startNow)}
 
 def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     conn = get_db()
@@ -1481,10 +1564,9 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
             if row_status == "running":
                 hb = metrics.get("heartbeatAt")
                 if hb:
-                    from datetime import datetime, timezone
                     from dateutil import parser as dtparser  # type: ignore
                     last = dtparser.parse(hb)
-                    now = datetime.now(last.tzinfo or timezone.utc)
+                    now = _now_utc()
                     if (now - last).total_seconds() > FT_HEARTBEAT_TIMEOUT_SEC:
                         c2 = get_db()
                         try:
