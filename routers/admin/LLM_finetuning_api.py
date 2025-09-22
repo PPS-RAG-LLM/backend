@@ -18,6 +18,23 @@ from service.admin.LLM_finetuning import (
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
 
 
+# ---- Response Schemas (for enriched docs) ----
+class FineTuneLaunchResponse(BaseModel):
+    jobId: str = Field(..., description="생성된 작업 ID (ft-job-xxxx)")
+    started: bool = Field(..., description="즉시 실행 여부(True면 즉시 스레드 시작)")
+
+
+class FineTuneStatusResponse(BaseModel):
+    jobId: str = Field(..., description="작업 ID")
+    status: str = Field(..., description="queued | scheduled | running | succeeded | failed")
+    learningProgress: int = Field(0, ge=0, le=100, description="학습 진행률 0~100")
+    saveProgress: int | None = Field(0, ge=0, le=100, description="저장 단계 진행률 0~100")
+    saveStage: str | None = Field(None, description="저장 단계 라벨(adapter/tokenizer/model/done 등)")
+    roughScore: int | None = Field(None, description="간이 점수(ROUGE 0~100 환산)")
+    rouge1F1: float | None = Field(None, description="최종 ROUGE-1 F1 (0.0~1.0)")
+    error: str | None = Field(None, description="에러 메시지(있을 때만)")
+
+
 # ---- 업로드 유틸 ----
 def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
     """
@@ -44,7 +61,16 @@ def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
     return target_path
 
 
-@router.post("/fine-tuning", summary="파인튜닝 실행(텍스트 파라미터 + 학습 파일 업로드)")
+@router.post(
+    "/fine-tuning",
+    summary="파인튜닝 실행(텍스트 파라미터 + 학습 파일 업로드)",
+    response_model=FineTuneLaunchResponse,
+    responses={
+        200: {"description": "작업이 생성되었고 즉시 실행 여부가 반환됩니다."},
+        400: {"description": "요청 파라미터 오류 또는 중복 실행 락"},
+        500: {"description": "서버 내부 오류"},
+    },
+)
 async def launch_fine_tuning(
     # 텍스트(옵션) 파라미터들 — 값이 오면 사용, 없으면 기본값
     category: str | None = Form(None, description="qa | doc_gen | summary"),
@@ -99,5 +125,17 @@ async def launch_fine_tuning(
     )
     return start_fine_tuning(_category, req)
 
+
+@router.get(
+    "/fine-tuning",
+    summary="파인튜닝 진행 상태 조회",
+    response_model=FineTuneStatusResponse,
+    responses={
+        200: {"description": "현재 진행 상태 및 진행률을 반환합니다."},
+        404: {"description": "해당 작업이 존재하지 않습니다."},
+    },
+)
+async def read_fine_tuning_status(jobId: str = Query(..., description="조회할 작업 ID")):
+    return get_fine_tuning_status(job_id=jobId)
 
 
