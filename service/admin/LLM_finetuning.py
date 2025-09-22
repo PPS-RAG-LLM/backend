@@ -31,6 +31,20 @@ from errors.exceptions import BadRequestError, InternalServerError
 logger = logger(__name__)
 
 
+# ===== 디바이스 유틸 =====
+def _get_model_device(model):
+    try:
+        return model.get_input_embeddings().weight.device
+    except Exception:
+        pass
+    try:
+        return next(model.parameters()).device
+    except Exception:
+        pass
+    import torch as _torch
+    return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+
+
 # ===== 캐시/임시 디렉토리 관리 =====
 @contextmanager
 def _ephemeral_cache_env():
@@ -1007,13 +1021,21 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         if use_eval:
             model.eval()
             preds, refs = [], []
+            device = _get_model_device(model)
             for item in eval_ds:
-                inp = item["input_ids"].unsqueeze(0).to(model.device)
+                inp_ids = item["input_ids"].unsqueeze(0).to(device)
+                attn = item["attention_mask"].unsqueeze(0).to(device)
                 try:
-                    out = model.generate(inp, max_new_tokens=128, do_sample=False)[0]
+                    with torch.inference_mode():
+                        out_ids = model.generate(
+                            inp_ids,
+                            attention_mask=attn,
+                            max_new_tokens=128,
+                            do_sample=False,
+                        )[0]
                 except Exception:
                     continue
-                preds.append(tokenizer.decode(out, skip_special_tokens=True))
+                preds.append(tokenizer.decode(out_ids, skip_special_tokens=True))
                 ref_ids = item["labels"]
                 ref_ids = torch.where(ref_ids == -100, torch.tensor(tokenizer.pad_token_id), ref_ids)
                 refs.append(tokenizer.decode(ref_ids, skip_special_tokens=True))
