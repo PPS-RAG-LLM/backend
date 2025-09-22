@@ -1205,7 +1205,9 @@ async def search_documents(
 
     settings = get_vector_settings()
     model_key = req.model or settings["embeddingModel"]
-    search_type = (search_type_override or settings["searchType"]).lower()
+    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    # alias normalization: 'semantic'/'sementic' -> 'vector'; default 'hybrid' if empty
+    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await _get_or_load_embedder_async(model_key)
     q_emb = _embed_text(tok, model, device, req.query)

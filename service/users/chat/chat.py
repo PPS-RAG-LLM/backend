@@ -8,6 +8,8 @@ from repository.users.workspace_chat import (
     get_chat_history_by_thread_id,
     insert_chat_history,
 )
+from service.users.doc_gen_templates import get_doc_gen_template
+from service.users.summary_templates import get_summary_template
 from utils import logger
 import json, time
 from .retrieval import (
@@ -40,6 +42,46 @@ def _build_messages(ws: Dict[str, Any], body: Dict[str, Any]) -> List[Dict[str, 
 
     logger.info(f"msgs: {msgs}")
     return msgs
+
+def _render_template(category: str, body: Dict[str, Any]) -> str:
+    """
+    화면 입력값(templateVariables)과 템플릿(content/sub_content 또는 templateText)을 병합해
+    시스템 프롬프트로 주입할 텍스트 생성.
+    """
+    tpl_text = body.get("templateText") or ""
+    tpl_id = body.get("templateId")
+    vars_map: Dict[str, str] = dict(body.get("templateVariables") or {})
+
+    row = None
+    try:
+        if not tpl_text and tpl_id:
+            if category == "doc_gen":
+                row = get_doc_gen_template(int(tpl_id))
+                if row:
+                    base = str(row.get("content") or "")
+                    sub = str(row.get("sub_content") or "") or ""
+                    defaults = {}
+                    for it in row.get("variables") or []:
+                        k = str(it.get("key") or "")
+                        v = str(it.get("value") or "")
+                        if k and v:
+                            defaults[k] = v
+                    merged = {**defaults, **vars_map}
+                    txt = base + (("\n\n" + sub) if sub else "")
+                    for k, v in merged.items():
+                        txt = txt.replace("{{" + k + "}}", str(v))
+                    tpl_text = txt
+            elif category == "summary":
+                row = get_summary_template(int(tpl_id))
+                if row:
+                    tpl_text = str(row.get("content") or "")
+    except Exception:
+        pass
+
+    if tpl_text and vars_map:
+        kv_lines = "\n".join(f"- {k}: {v}" for k, v in vars_map.items())
+        tpl_text = tpl_text + f"\n\n### 입력값\n{kv_lines}"
+    return tpl_text.strip()
 
 
 def preflight_stream_chat_for_workspace(
@@ -152,12 +194,20 @@ def stream_chat_for_workspace(
     # 메시지 구성 : [system = system_prompt + ctx] + [history] + [user]
     messages : List[Dict[str, Any]] = []
 
-    # 1) system : 워크스페이스 시스템 프롬프트와 RAG 컨텍스트 단일 system으로 합침
+    # 1) system : (요청 오버라이드 또는 워크스페이스) 시스템 프롬프트 + RAG 컨텍스트 + 템플릿
     system_parts: List[str] = []
-    if ws.get("system_prompt"):
-        system_parts.append(ws["system_prompt"] + ". 반드시 한국어로 대답하세요.")
+    effective_system_prompt = (body.get("systemPrompt") or ws.get("system_prompt"))
+    if effective_system_prompt:
+        system_parts.append(str(effective_system_prompt) + ". 반드시 한국어로 대답하세요.")
     if ctx:
         system_parts.append(ctx)
+    if category in ("doc_gen", "summary"):
+        try:
+            tpl = _render_template(category, body)
+            if tpl:
+                system_parts.append("### TEMPLATE\n" + tpl)
+        except Exception as e:
+            logger.error(f"template render failed: {e}")
     if system_parts:
         messages.append({"role": "system", "content": "\n\n".join(system_parts)})
 
