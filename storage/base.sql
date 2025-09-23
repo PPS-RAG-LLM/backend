@@ -17,7 +17,7 @@ INSERT INTO
 VALUES (
         1,
         'huggingface',
-        'gpt_oss_20b',
+        'gpt-oss-20b',
         0,
         './service/storage/model/gpt-oss-20b',
         'all',
@@ -45,7 +45,7 @@ INSERT INTO
 VALUES (
         2,
         'huggingface',
-        'qwen_2.5_7b_instruct',
+        'Qwen2.5-7B-Instruct-1M',
         0,
         './service/storage/model/Qwen2.5-7B-Instruct-1M',
         'all',
