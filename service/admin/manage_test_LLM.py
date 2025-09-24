@@ -176,19 +176,7 @@ def select_model_for_task(category: str, subcategory: Optional[str] = None) -> O
         if r:
             return r[0]
 
-        # 2) task-specific active model (doc_gen with subcategory first)
-        if cat == "doc_gen" and sub:
-            cur.execute(
-                """
-                SELECT name FROM llm_models
-                 WHERE is_active=1 AND category='doc_gen' AND IFNULL(subcategory,'')=?
-                 ORDER BY trained_at DESC, id DESC LIMIT 1
-                """,
-                (sub,),
-            )
-            r = cur.fetchone()
-            if r:
-                return r[0]
+        # 2) task-specific active model (subcategory 로직 제거됨)
 
         cur.execute(
             """

@@ -931,7 +931,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         if category == "base":
             cur.execute(
                 """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
+                SELECT id, name, type, category, model_path, is_active, created_at
                 FROM llm_models
                 ORDER BY trained_at DESC, id DESC
                 """
@@ -939,7 +939,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         elif category == "all":
             cur.execute(
                 """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
+                SELECT id, name, type, category, model_path, is_active, created_at
                 FROM llm_models
                 WHERE lower(category)='all'
                 ORDER BY trained_at DESC, id DESC
@@ -948,7 +948,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
         else:
             cur.execute(
                 """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
+                SELECT id, name, type, category, model_path, is_active, created_at
                 FROM llm_models
                 WHERE (lower(category)=? OR lower(category)='all')
                 ORDER BY trained_at DESC, id DESC
@@ -997,7 +997,7 @@ def get_model_list(category: str) -> Dict[str, Any]:
             "loaded": bool(loaded_flag),
             "active": (name in active_names) and bool(loaded_flag),
             "category": r["category"],
-            "subcategory": r["subcategory"],
+            "subcategory": None,  # subcategory 컬럼 제거됨
             "isActive": bool(r["is_active"]),
             "createdAt": r["created_at"],
         })

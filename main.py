@@ -175,4 +175,10 @@ if __name__ == "__main__":
         host=config["server"]["host"], 
         port=config["server"]["port"],
         reload=True,
+        reload_dirs=["routers", "service", "utils"],
+        reload_excludes=[
+            "**/unsloth_compiled_cache/**",
+            "**/storage/model/**",
+            "**/storage/train_data/**",
+        ],
     )
