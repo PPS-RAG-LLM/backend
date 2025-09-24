@@ -22,6 +22,7 @@ from routers.users.documents import router as document_router
 from routers.docgen_simple import router as docgen_simple_router
 from routers.admin.LLM_finetuning_api import router as llm_finetuning_router
 from routers.admin.manage_admin_LLM_api import router as admin_llm_router
+from routers.admin.manage_test_LLM_api import router as test_llm_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
 from routers.sso import sso_router as sso_router
@@ -153,6 +154,7 @@ app.include_router(thread_router)
 app.include_router(vector_db_router)
 app.include_router(llm_finetuning_router)
 app.include_router(admin_llm_router)
+app.include_router(test_llm_router)
 app.include_router(sso_router)
 app.include_router(mock_company_router)
 app.include_router(summary_router)
@@ -173,4 +175,10 @@ if __name__ == "__main__":
         host=config["server"]["host"], 
         port=config["server"]["port"],
         reload=True,
+        reload_dirs=["routers", "service", "utils"],
+        reload_excludes=[
+            "**/unsloth_compiled_cache/**",
+            "**/storage/model/**",
+            "**/storage/train_data/**",
+        ],
     )

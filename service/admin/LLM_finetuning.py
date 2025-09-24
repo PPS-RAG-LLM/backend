@@ -1,8 +1,17 @@
 # service/admin/LLM_finetuning.py
 from __future__ import annotations
 
-import json
+# ✅ Unsloth는 transformers/peft 보다 먼저 import
+try:
+    import unsloth  # noqa: F401
+except Exception:
+    pass
+
 import os
+# 🔧 CUDA 메모리 단편화 완화 (권장)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:256,expandable_segments:True")
+
+import json
 import threading
 import time
 import uuid
@@ -10,7 +19,7 @@ import sqlite3
 import tempfile
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from pathlib import Path
 from contextlib import contextmanager
@@ -18,7 +27,22 @@ from contextlib import contextmanager
 from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import get_db, logger
 from errors.exceptions import BadRequestError, InternalServerError
+
 logger = logger(__name__)
+
+
+# ===== 디바이스 유틸 =====
+def _get_model_device(model):
+    try:
+        return model.get_input_embeddings().weight.device
+    except Exception:
+        pass
+    try:
+        return next(model.parameters()).device
+    except Exception:
+        pass
+    import torch as _torch
+    return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
 
 
 # ===== 캐시/임시 디렉토리 관리 =====
@@ -46,7 +70,9 @@ def _ephemeral_cache_env():
 # ===== Progress interval (seconds) =====
 FT_PROGRESS_INTERVAL_SEC = int(os.getenv("FT_PROGRESS_INTERVAL_SEC", "2"))
 # ===== Heartbeat timeout (seconds) for liveness detection =====
-FT_HEARTBEAT_TIMEOUT_SEC = int(os.getenv("FT_HEARTBEAT_TIMEOUT_SEC", "60"))
+FT_HEARTBEAT_TIMEOUT_SEC = int(os.getenv("FT_HEARTBEAT_TIMEOUT_SEC", "300"))
+# ===== OOM retry limit =====
+MAX_OOM_RETRIES = int(os.getenv("FT_MAX_OOM_RETRIES", "1"))
 
 # ===== Paths =====
 BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))  # backend/
@@ -183,12 +209,12 @@ class FineTuneRequest(BaseModel):
     baseModelName: str
     saveModelName: str
     systemPrompt: str
-    batchSize: int = 4
+    batchSize: int = 1
     epochs: int = 3
     learningRate: float = 2e-4
     overfittingPrevention: bool = True
     trainSetFile: str
-    gradientAccumulationSteps: int = 8
+    gradientAccumulationSteps: int = 16
     quantizationBits: Optional[int] = Field(
         default=None, description="QLORA 전용: 양자화 비트 (4 또는 8)",
     )
@@ -196,6 +222,12 @@ class FineTuneRequest(BaseModel):
         default="QLORA",
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
+    )
+    startAt: Optional[str] = Field(
+        default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
+    )
+    startNow: bool = Field(
+        default=False, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)"
     )
 
     @field_validator("category")
@@ -232,7 +264,20 @@ class FineTuneJob:
 
 # ===== Common utils =====
 def _now_local_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """현재 시간을 KST로 반환"""
+    kst = timezone(timedelta(hours=9))
+    return datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S")
+
+def _now_utc() -> datetime:
+    """현재 시간을 UTC로 반환"""
+    return datetime.now(timezone.utc)
+
+def _to_kst(utc_dt: datetime) -> datetime:
+    """UTC datetime을 KST로 변환"""
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    kst = timezone(timedelta(hours=9))
+    return utc_dt.astimezone(kst)
 
 def _ensure_output_dir(model_name: str) -> str:
     try:
@@ -263,7 +308,7 @@ def _ensure_output_dir(model_name: str) -> str:
     if not os.path.isfile(cfg_path):
         try:
             with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump({"created_at": datetime.now().isoformat()}, f, ensure_ascii=False)
+                json.dump({"created_at": _now_utc().isoformat()}, f, ensure_ascii=False)
         except Exception:
             logger.exception(f"failed to write config.json inside {out_dir}")
     return out_dir
@@ -293,138 +338,11 @@ def _write_error(out_dir: str, message: str):
         os.makedirs(out_dir, exist_ok=True)
         err_path = os.path.join(out_dir, "error.txt")
         with open(err_path, "a", encoding="utf-8") as f:
-            ts = datetime.now().isoformat()
+            ts = _now_utc().isoformat()
             f.write(f"[{ts}] {message}\n")
     except Exception:
         logger.exception(f"failed to write error file under {out_dir}")
 
-# ===== List train dirs =====
-def list_train_data_dirs() -> Dict[str, Any]:
-    items = []
-    root_path = TRAIN_DATA_ROOT
-    if not os.path.isdir(root_path):
-        try:
-            logger.warning(f"train data root not found: {root_path}")
-        except Exception:
-            pass
-        return {"root": _to_rel(root_path), "dirs": items}
-
-    # Persist discovered train data directories into DB with relative paths
-    conn = get_db()
-    try:
-        try:
-            for entry in os.scandir(root_path):
-                if not entry.is_dir():
-                    continue
-                try:
-                    mtime = datetime.utcfromtimestamp(entry.stat().st_mtime).isoformat()
-                except Exception:
-                    logger.exception(f"failed to stat dir: {entry.path}")
-                    mtime = None
-
-                file_count = 0
-                try:
-                    for _, _, files in os.walk(entry.path):
-                        file_count += len(files)
-                except Exception:
-                    logger.exception(f"failed to walk dir: {entry.path}")
-
-                # Only consider directories that actually contain files
-                if file_count <= 0:
-                    try:
-                        logger.info(f"skip empty train dir: {entry.path}")
-                    except Exception:
-                        pass
-                    continue
-
-                abs_dir_path = os.path.join(root_path, entry.name)
-                rel_dir_path = _to_rel(abs_dir_path)
-
-                # Insert if not exists
-                try:
-                    dataset_id = _insert_dataset_if_needed(conn, abs_dir_path, "unknown")
-                    # Best-effort update of record_count, if column exists
-                    try:
-                        cur = conn.cursor()
-                        if _has_column(conn, "fine_tune_datasets", "record_count"):
-                            cur.execute(
-                                "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                                (file_count, dataset_id),
-                            )
-                            conn.commit()
-                    except Exception:
-                        logger.exception("failed to update record_count for dataset_id=%s", dataset_id)
-                except Exception as e:
-                    logger.error(f"failed to upsert train dataset for {abs_dir_path}: {e}")
-
-                items.append({
-                    "name": entry.name,
-                    "path": rel_dir_path,
-                    "fileCount": file_count,
-                    "modifiedAt": mtime,
-                })
-        except Exception:
-            logger.exception(f"failed to scan train data root: {root_path}")
-
-        # Fallback: if no items discovered via filesystem, read last known datasets from DB
-        if len(items) == 0:
-            try:
-                cur = conn.cursor()
-                rel_root = _to_rel(root_path)
-                like_prefix = rel_root if rel_root.endswith(os.sep) else rel_root + os.sep
-                cur.execute(
-                    "SELECT name, path, record_count, updated_at, created_at FROM fine_tune_datasets WHERE path LIKE ?",
-                    (like_prefix + '%',),
-                )
-                rows = cur.fetchall() or []
-                for r in rows:
-                    name_val = r[0] if isinstance(r, tuple) else r["name"]
-                    rel_path_val = r[1] if isinstance(r, tuple) else r["path"]
-                    db_count_val = (r[2] if isinstance(r, tuple) else r.get("record_count") if isinstance(r, dict) else None) or 0
-                    modified_val = (r[3] if isinstance(r, tuple) else r.get("updated_at") if isinstance(r, dict) else None) or (r[4] if isinstance(r, tuple) else r.get("created_at") if isinstance(r, dict) else None)
-
-                    # Recompute file count from filesystem for accuracy
-                    recomputed_count = db_count_val
-                    try:
-                        abs_dir = rel_path_val if os.path.isabs(rel_path_val) else os.path.join(str(BASE_BACKEND), rel_path_val)
-                        if os.path.isdir(abs_dir):
-                            cnt = 0
-                            for _, _, files in os.walk(abs_dir):
-                                cnt += len(files)
-                            recomputed_count = cnt
-                            # Update DB with fresh count if column exists
-                            try:
-                                if _has_column(conn, "fine_tune_datasets", "record_count"):
-                                    cur.execute(
-                                        "UPDATE fine_tune_datasets SET record_count=?, updated_at=CURRENT_TIMESTAMP WHERE name=? AND path=?",
-                                        (recomputed_count, name_val, rel_path_val),
-                                    )
-                                    conn.commit()
-                            except Exception:
-                                logger.exception("failed to refresh record_count from fallback for path=%s", rel_path_val)
-                        else:
-                            logger.info(f"fallback path not found: {abs_dir}")
-                    except Exception:
-                        logger.exception("failed to recompute file count for fallback path=%s", rel_path_val)
-
-                    items.append({
-                        "name": name_val,
-                        "path": rel_path_val,
-                        "fileCount": int(recomputed_count or 0),
-                        "modifiedAt": modified_val,
-                    })
-                if len(items) == 0:
-                    logger.info("no train dirs found in filesystem or database")
-            except Exception:
-                logger.exception("failed to read train datasets from DB for fallback")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            logger.exception("failed to close DB connection in list_train_data_dirs")
-
-    items.sort(key=lambda x: (x["modifiedAt"] or ""), reverse=True)
-    return {"root": _to_rel(root_path), "dirs": items}
 
 # ===== DB ops =====
 def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
@@ -447,7 +365,8 @@ def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
         s.refresh(row)
         return int(row.id)
 
-def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int) -> int:
+def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int,
+                initial_status: str = "queued", scheduled_at: Optional[str] = None) -> int:
     # ==== ORM 버전 ====
     reserve_now = _now_local_str()
     train_path = _resolve_train_path(req.trainSetFile)
@@ -468,13 +387,18 @@ def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_nam
         "gradientAccumulationSteps": req.gradientAccumulationSteps,
         "quantizationBits": req.quantizationBits,
     }
+    metrics = {"hyperparameters": hyper}
+    if scheduled_at:
+        metrics["scheduledAt"] = scheduled_at
+        metrics["learningProgress"] = 0
+
     with SessionLocal() as s:
         row = ORMJob(
             provider_job_id=job_id,
             dataset_id=dataset_id,
-            status="queued",
-            started_at=datetime.utcnow(),
-            metrics=json.dumps({"hyperparameters": hyper}, ensure_ascii=False),
+            status=initial_status,
+            started_at=None,  # 실제 시작 시점에 설정
+            metrics=json.dumps(metrics, ensure_ascii=False),
         )
         s.add(row)
         s.commit()
@@ -504,10 +428,9 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 except Exception:
                     metrics = {}
 
-            # ✅ 진행률 반영 (되돌아가지 않게 max 유지)
+            # 진행률 반영: 요청값을 그대로 저장(사용자 요청대로 max 적용 제거)
             if progress is not None:
-                prev = int(metrics.get("learningProgress", 0) or 0)
-                metrics["learningProgress"] = max(prev, int(progress))
+                metrics["learningProgress"] = int(progress)
 
             if rough is not None:
                 metrics["roughScore"] = int(rough)
@@ -520,7 +443,7 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
 
             # Update heartbeat timestamp for liveness detection
             try:
-                metrics["heartbeatAt"] = datetime.now().isoformat()
+                metrics["heartbeatAt"] = _now_utc().isoformat()
             except Exception:
                 pass
 
@@ -541,7 +464,7 @@ def _update_job_status(conn, job_id: str, status: str, progress: int | None = No
                 if out_dir:
                     log_path = os.path.join(out_dir, "train.log")
                     msg = f"status={status} progress={metrics.get('learningProgress','-')} rough={metrics.get('roughScore','-')} extras={extras or {}}"
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] {msg}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] {msg}")
             except Exception:
                 pass
             return
@@ -572,9 +495,19 @@ def _ensure_ftm_rouge_column(conn):
         pass
 
 def _finish_job_success(conn, job_id: str, model_name: str, category: str, tuning_type: str, final_rouge: Optional[float] = None, subcategory: Optional[str]=None):
-    # ==== ORM 버전 ====
-    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
-    mdl_type = "lora" if tuning_type.upper() in ("LORA", "QLORA") else "full"
+    """
+    파인튜닝 완료시 결과를 DB에 반영한다.
+    - llm_models:
+        - type: FULL | LORA | QLORA (대문자)
+        - LORA/QLORA:  model_path=어댑터 폴더(상대), mather_path=베이스 폴더(상대)
+        - FULL:        model_path=통짜 저장 폴더(상대), mather_path=NULL
+    - fine_tuned_models:
+        - type 동일(대문자)
+        - rouge1_f1: 최종 ROUGE 저장
+    """
+    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))  # 출력(어댑터 or FULL 저장 폴더)
+    mdl_type = (tuning_type or "QLORA").upper()
+
     with SessionLocal() as s:
         # --- job/metrics에서 baseModelName 추출 ---
         job_row = s.execute(select(ORMJob).where(ORMJob.provider_job_id == job_id)).scalar_one_or_none()
@@ -585,56 +518,30 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 base_model_name = (mt.get("hyperparameters") or {}).get("baseModelName")
             except Exception:
                 base_model_name = None
-        
+
         # job 상태 업데이트
         if job_row:
             job_row.status = "succeeded"
-            job_row.finished_at = datetime.utcnow()
+            job_row.finished_at = _now_utc()
             s.add(job_row)
-        
-        # --- FT 결과 모델(LlmModel) upsert ---
-        m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
-        if m:
-            m.trained_at = datetime.utcnow()
-            m.category = category
-            m.subcategory = subcategory
-            m.type = mdl_type
-            m.model_path = rel_model_path  # 어댑터 폴더만 가리킴
-            m.is_active = True
-        else:
-            m = LlmModel(
-                provider="hf",
-                name=model_name,
-                revision=0,
-                model_path=rel_model_path,  # 어댑터 폴더
-                category=category,
-                subcategory=subcategory,
-                type=mdl_type,
-                is_default=False,
-                is_active=True,
-                trained_at=datetime.utcnow(),
-            )
-        s.add(m)
-        s.flush()  # m.id
 
-        # --- 베이스 모델 row 보장/획득 ---
+        # --- 베이스 모델 경로 준비 (상대 저장) ---
         base_model_id = None
-        base_model_path = None
+        base_model_rel_path = None
         if base_model_name:
-            # _resolve_model_dir 로 물리 경로 확보 → 상대 경로로 저장
-            abs_base_dir = _resolve_model_dir(base_model_name)
-            base_model_path = _to_rel(abs_base_dir)
-
+            abs_base = _resolve_model_dir(base_model_name)      # 물리 경로
+            base_model_rel_path = _to_rel(abs_base)             # 상대 경로
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(
                     provider="hf",
                     name=base_model_name,
                     revision=0,
-                    model_path=base_model_path,
-                    category="all",    # 베이스는 공용
-                    subcategory=None,
-                    type="base",
+                    model_path=None,       # BASE는 어댑터 없음
+                    mather_path=base_model_rel_path,
+                    category="all",
+                    # subcategory는 BASE엔 적용하지 않음
+                    type="BASE",
                     is_default=False,
                     is_active=True,
                     trained_at=None,
@@ -643,24 +550,53 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
                 s.flush()
             base_model_id = int(base_row.id)
 
+        # --- FT 결과 모델(LlmModel) upsert ---
+        m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
+        if m is None:
+            m = LlmModel(
+                provider="hf",
+                name=model_name,
+                revision=0,
+                category=category,
+                # 서브카테고리 제약 제거(메타만 보유), 과거 데이터 호환을 위해 None으로 저장
+                type=mdl_type,
+                is_default=False,
+                is_active=True,
+                trained_at=_now_utc(),
+            )
+
+        # 타입별 경로 저장 정책
+        if mdl_type in ("LORA", "QLORA"):
+            # 어댑터 경로는 model_path, 베이스는 mather_path
+            m.model_path = rel_model_path
+            m.mather_path = base_model_rel_path
+        else:  # FULL
+            m.model_path = rel_model_path  # 통짜 저장 폴더
+            m.mather_path = None
+
+        m.category = category
+        # m.subcategory = subcategory  # <- llm_models에 서브태스크 제약 제거. 필요시 메타로만 유지.
+        m.is_active = True
+        m.trained_at = _now_utc()
+        s.add(m)
+        s.flush()  # m.id 확보
+
         # --- FineTunedModel insert ---
-        lora_path = rel_model_path if mdl_type == "lora" else None
         ftm = FineTunedModel(
             model_id=m.id,
             job_id=job_row.id if job_row else None,
             provider_model_id=model_name,
-            lora_weights_path=lora_path,
-            type=mdl_type,
+            lora_weights_path=(rel_model_path if mdl_type in ("LORA", "QLORA") else None),
+            type=mdl_type,                    # 대문자 저장
             is_active=True,
-            # 베이스 모델 참조
             base_model_id=base_model_id,
-            base_model_path=base_model_path,
+            base_model_path=base_model_rel_path,
         )
-        # rouge1_f1 컬럼이 스키마에 존재하는 버전 고려
         try:
             setattr(ftm, "rouge1_f1", (final_rouge if final_rouge is not None else None))
         except Exception:
             pass
+
         s.add(ftm)
         s.commit()
 
@@ -695,32 +631,18 @@ def _resolve_out_dir_by_job(conn, job_id: str) -> Optional[str]:
         return None
     return os.path.join(STORAGE_MODEL_ROOT, save_name)
 
-def get_fine_tuning_logs(job_id: str, tail: int = 200) -> Dict[str, Any]:
-    conn = get_db()
-    try:
-        out_dir = _resolve_out_dir_by_job(conn, job_id)
-        if not out_dir:
-            return {"jobId": job_id, "log": "(no output dir yet)", "lines": []}
-        log_path = os.path.join(out_dir, "train.log")
-        if not os.path.isfile(log_path):
-            return {"jobId": job_id, "log": "(log not created yet)", "lines": []}
-        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        tail = max(1, min(int(tail), 2000))
-        return {"jobId": job_id, "lines": [l.rstrip("\n") for l in lines[-tail:]]}
-    finally:
-        conn.close()
 
 # ===== 시뮬레이터 제거됨 =====
 
 # ===== Training (inline, real) =====
 def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
     """
-    실제 파인튜닝 실행 (CSV -> 회화 프롬프트 -> RagDataset)
-    FULL:    bf16 full finetune (no 4-bit)
-    LORA:    bf16 + LoRA
-    QLORA:   4-bit + LoRA
+    Unsloth gpt-oss(20B) 노트북 흐름을 반영한 경량/안정 파이프라인.
+    - gpt-oss(MXFP4) → Unsloth FastLanguageModel + 4bit LoRA
+    - 그 외 QLORA → BitsAndBytes 4bit + LoRA
+    - LORA/FULL 경로는 기존 로직 유지 (필요 시 동일 패턴으로 확장 가능)
     """
+    import gc
     conn = get_db()
     try:
         _update_job_status(conn, job.job_id, "running", progress=0)
@@ -730,28 +652,27 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         if tuning_type in ("LORA", "QLORA"):
             _ensure_lora_marker(out_dir, tuning_type)
         log_path = os.path.join(out_dir, "train.log")
-        # Truncate old log to avoid confusion with previous runs having same save name
         try:
             with open(log_path, "w", encoding="utf-8") as _tmp:
                 _tmp.write("")
         except Exception:
             pass
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} started (INLINE)")
-        # console log
+        _append_log(log_path, f"[{_now_utc().isoformat()}] job {job.job_id} started (INLINE)")
         logger.info(
             f"Fine-tuning started jobId={job.job_id} type={tuning_type} base={job.request.get('baseModelName')} "
             f"save={save_name_with_suffix} data={job.request.get('trainSetFile')}"
         )
 
-        # ✅ 캐시 설정 (임시 디렉토리 사용)
+        # ✅ 임시 캐시 폴더
         tmpdir = tempfile.mkdtemp(prefix="ft_cache_")
         cache_keys = ["HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "XDG_CACHE_HOME", "UNSLOTH_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR"]
         old_cache = {k: os.environ.get(k) for k in cache_keys}
         for k in cache_keys:
             os.environ[k] = tmpdir
 
-        # imports
+        # ===== Imports =====
         try:
+            from unsloth import FastLanguageModel  # type: ignore
             import pandas as pd
             import torch
             from transformers import (
@@ -763,19 +684,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 TrainerCallback,
             )
         except Exception as e:
-            _append_log(log_path, f"[{datetime.now().isoformat()}] import error: {e}")
-            try:
-                _update_job_status(conn, job.job_id, "failed", extras={"error": f"import error: {e}"})
-            except Exception:
-                cur = conn.cursor()
-                cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-                conn.commit()
+            _append_log(log_path, f"[{_now_utc().isoformat()}] import error: {e}")
+            _update_job_status(conn, job.job_id, "failed", extras={"error": f"import error: {e}"})
             logger.error(f"Fine-tuning failed jobId={job.job_id} error=import error: {e}")
             return
 
-        # ===== Build dataset from CSV =====
+        # ===== 데이터 적재/전처리 =====
         system_prompt = job.request.get("systemPrompt") or "You are Qwen, a helpful assistant."
-
         def build_prompt(context: str, question: str) -> str:
             return f"{context.strip()}\n{system_prompt}\nQuestion: {question.strip()}"
 
@@ -796,122 +711,107 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 enc = chardet.detect(raw).get("encoding") or "utf-8"
                 df = pd.read_csv(csv_path, encoding=enc, dtype=str, on_bad_lines="skip").fillna("")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] csv load failed: {e}")
-                try:
-                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"csv load failed: {e}"})
-                except Exception:
-                    cur = conn.cursor()
-                    cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-                    conn.commit()
+                _append_log(log_path, f"[{_now_utc().isoformat()}] csv load failed: {e}")
+                _update_job_status(conn, job.job_id, "failed", extras={"error": f"csv load failed: {e}"})
                 logger.error(f"Fine-tuning failed jobId={job.job_id} error=csv load failed: {e}")
                 return
 
-        conversations = []
-        for _, row in df.iterrows():
-            conversations.append({
-                "conversations": [
-                    {"from": "user", "value": build_prompt(row.get("Chunk_Context", ""), row.get("Question", ""))},
-                    {"from": "assistant", "value": row.get("Answer", "")},
-                ]
-            })
+        conversations = [{
+            "conversations": [
+                {"from": "user", "value": build_prompt(r.get("Chunk_Context",""), r.get("Question",""))},
+                {"from": "assistant", "value": r.get("Answer","")},
+            ]
+        } for _, r in df.iterrows()]
 
-        # ===== Deterministic train/test split (random_state=42) =====
-        total_examples = len(conversations)
-        if total_examples >= 10:
-            eval_size = max(1, int(round(total_examples * 0.1)))
-        elif total_examples >= 2:
-            eval_size = 1
-        else:
-            eval_size = 0
-
+        # ===== 7:3 고정 split (random_state=42) =====
+        total = len(conversations)
+        eval_size = max(1, int(round(total * 0.3))) if total >= 2 else 0
         if eval_size > 0:
-            # shuffle deterministically
-            import random as _py_random
-            indices = list(range(total_examples))
-            rng = _py_random.Random(42)
-            rng.shuffle(indices)
-            eval_indices = set(indices[:eval_size])
-            train_conversations = [conversations[i] for i in indices[eval_size:]]
-            eval_conversations = [conversations[i] for i in indices[:eval_size]]
+            import random as _R
+            idx = list(range(total))
+            rng = _R.Random(42)
+            rng.shuffle(idx)
+            eval_idx = set(idx[:eval_size])
+            train_data = [conversations[i] for i in idx[eval_size:]]
+            eval_data  = [conversations[i] for i in idx[:eval_size]]
         else:
-            train_conversations = conversations
-            eval_conversations = []
+            train_data, eval_data = conversations, []
+        _append_log(log_path, f"[{_now_utc().isoformat()}] split: total={total} eval={eval_size} train={len(train_data)}")
 
         class RagDataset(torch.utils.data.Dataset):
             def __init__(self, data, tokenizer, max_len=4096):
                 self.data = data
-                self.tokenizer = tokenizer
+                self.tk = tokenizer
                 self.max_len = max_len
-            def __len__(self):
-                return len(self.data)
-            def __getitem__(self, idx):
-                dialog = self.data[idx]["conversations"]
+            def __len__(self): return len(self.data)
+            def __getitem__(self, i):
+                dialog = self.data[i]["conversations"]
                 messages = [
                     {"role": "system", "content": "You are Qwen, a helpful assistant."},
                     {"role": "user", "content": dialog[0]["value"]},
                     {"role": "assistant", "content": dialog[1]["value"]},
                 ]
-                full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
-                enc = self.tokenizer(
-                    full_text,
-                    max_length=self.max_len,
-                    truncation=True,
-                    padding="max_length",
-                    return_tensors="pt",
-                )
+                full = self.tk.apply_chat_template(messages, tokenize=False)
+                enc = self.tk(full, max_length=self.max_len, truncation=True, padding="max_length", return_tensors="pt")
                 input_ids = enc.input_ids[0]
-                assist_prompt = self.tokenizer.apply_chat_template(
-                    messages[:-1], tokenize=False, add_generation_prompt=True
-                )
-                prefix_len = len(self.tokenizer(assist_prompt).input_ids)
+                assist = self.tk.apply_chat_template(messages[:-1], tokenize=False, add_generation_prompt=True)
+                prefix_len = len(self.tk(assist).input_ids)
                 labels = input_ids.clone()
                 labels[:prefix_len] = -100
                 return {"input_ids": input_ids, "attention_mask": enc.attention_mask[0], "labels": labels}
 
         base_folder = _resolve_model_dir(job.request.get("baseModelName"))
         if not _has_model_signature(base_folder):
-            _append_log(log_path, f"[{datetime.now().isoformat()}] base model not found: {base_folder}")
-            try:
-                _update_job_status(conn, job.job_id, "failed", extras={"error": f"base model not found: {base_folder}"})
-            except Exception:
-                cur = conn.cursor()
-                cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
-                conn.commit()
-            logger.error(f"Fine-tuning failed jobId={job.job_id} error=base model not found: {base_folder}")
+            msg = f"base model not found: {base_folder}"
+            _append_log(log_path, f"[{_now_utc().isoformat()}] {msg}")
+            _update_job_status(conn, job.job_id, "failed", extras={"error": msg})
+            logger.error(f"Fine-tuning failed jobId={job.job_id} error={msg}")
             return
+
         model_path = base_folder
         output_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
+        is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
 
-        # ===== Load model/tokenizer per tuning type =====
-        if tuning_type == "FULL":
-            # Full finetune (no 4-bit)
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-            if tokenizer.pad_token_id is None:
-                if getattr(tokenizer, "eos_token_id", None) is not None:
-                    tokenizer.pad_token_id = tokenizer.eos_token_id
-                else:
-                    tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-                    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path,
+        # ===== 모델/토크나이저 로드 =====
+        # gpt-oss(MXFP4) → Unsloth
+        if tuning_type == "QLORA" and is_mxfp4:
+            max_len = int(job.request.get("max_len", 3072))  # 💡 기본 3072로 살짝 낮춰 OOM 예방
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_path,
+                dtype=None,                    # H100 → bf16 자동
+                max_seq_length=max_len,
+                load_in_4bit=True,
+                full_finetuning=False,
                 trust_remote_code=True,
-                device_map="auto",
-                torch_dtype=torch.bfloat16,
                 local_files_only=True,
             )
-            model.gradient_checkpointing_enable()
-            for p in model.parameters():
-                p.requires_grad = True
-
-        elif tuning_type == "LORA":
-            # LoRA (no 4-bit)
+            # Unsloth 모범사례: 학습 최적화 활성화
             try:
+                model = FastLanguageModel.for_training(model)  # 일부 버전에선 in-place. 반환값 호환.
+            except Exception:
+                pass
+            try:
+                model = FastLanguageModel.get_peft_model(
+                    model,
+                    r=64,
+                    lora_alpha=16,
+                    lora_dropout=0.05,
+                    bias="none",
+                )
+            except Exception:
                 from peft import LoraConfig, get_peft_model  # type: ignore
-            except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for LORA: {e}")
-                _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
-                logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
-                return
+                lora_cfg = LoraConfig(r=64, lora_alpha=16, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
+                model = get_peft_model(model, lora_cfg)
+
+        elif tuning_type == "QLORA":
+            # 일반 QLORA
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
+            bnb = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
             if tokenizer.pad_token_id is None:
                 if getattr(tokenizer, "eos_token_id", None) is not None:
@@ -923,158 +823,87 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 model_path,
                 trust_remote_code=True,
                 device_map="auto",
-                torch_dtype=torch.bfloat16,
+                quantization_config=bnb,
                 local_files_only=True,
             )
             model.gradient_checkpointing_enable()
-            # LoRA target discovery
-            candidate_keywords = [
+            model = prepare_model_for_kbit_training(model)
+            lora_targets = [
                 "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
                 "down_proj","w1","w2","c_proj","c_attn"
             ]
-            lora_target_modules = sorted({
-                name.split(".")[-1]
-                for name, _ in model.named_modules()
-                if any(k in name for k in candidate_keywords)
+            from itertools import chain
+            target_modules = sorted({
+                n.split(".")[-1]
+                for n, _ in model.named_modules()
+                if any(k in n for k in lora_targets)
             })
-            lora_config = LoraConfig(
-                r=64,
-                lora_alpha=16,
-                target_modules=lora_target_modules or None,
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
+            lora_cfg = LoraConfig(
+                r=64, lora_alpha=16, target_modules=(target_modules or None),
+                lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
             )
-            model = get_peft_model(model, lora_config)
+            model = get_peft_model(model, lora_cfg)
+            max_len = int(job.request.get("max_len", 4096))
+        elif tuning_type == "LORA":
+            from peft import LoraConfig, get_peft_model  # type: ignore
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+            if tokenizer.pad_token_id is None:
+                if getattr(tokenizer, "eos_token_id", None) is not None:
+                    tokenizer.pad_token_id = tokenizer.eos_token_id
+                else:
+                    tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+                    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                local_files_only=True,
+            )
+            model.gradient_checkpointing_enable()
+            targets = [
+                "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
+                "down_proj","w1","w2","c_proj","c_attn"
+            ]
+            target_modules = sorted({ n.split(".")[-1] for n,_ in model.named_modules() if any(k in n for k in targets) })
+            lora_cfg = LoraConfig(r=64, lora_alpha=16, target_modules=(target_modules or None), lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
+            model = get_peft_model(model, lora_cfg)
+            max_len = int(job.request.get("max_len", 4096))
+        else:  # FULL
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+            if tokenizer.pad_token_id is None:
+                if getattr(tokenizer, "eos_token_id", None) is not None:
+                    tokenizer.pad_token_id = tokenizer.eos_token_id
+                else:
+                    tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+                    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16, local_files_only=True,
+            )
+            model.gradient_checkpointing_enable()
+            for p in model.parameters(): p.requires_grad = True
+            max_len = int(job.request.get("max_len", 4096))
 
-        else:
-            # QLORA
-            is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
+        # ===== 데이터셋 생성 =====
+        train_ds = RagDataset(train_data, tokenizer, max_len=max_len)
+        eval_ds  = RagDataset(eval_data,  tokenizer, max_len=max_len) if eval_size > 0 else None
+        use_eval = eval_ds is not None and len(eval_data) > 0
 
-            if is_mxfp4:
-                # ---- MXFP4 (gpt-oss) 전용: Unsloth 로더 사용 ----
-                try:
-                    from unsloth import FastLanguageModel  # type: ignore
-                except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] Unsloth not installed: {e}")
-                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"unsloth not installed: {e}"})
-                    return
+        # ===== TrainingArguments (버전 호환 키 자동 매핑) =====
+        from inspect import signature as _sig
+        def _supported_args(cls): return set(_sig(cls.__init__).parameters.keys())
+        def _put_kw(supported: set, kw: dict, key: str, value, *aliases: str):
+            for k in (key, *aliases):
+                if k in supported:
+                    kw[k] = value
+                    return k
+            return None
 
-                max_len = int(job.request.get("max_len", 4096))
-                model, tokenizer = FastLanguageModel.from_pretrained(
-                    model_name=model_path,
-                    dtype=None,
-                    max_seq_length=max_len,
-                    load_in_4bit=True,
-                    full_finetuning=False,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
+        optim_name = os.getenv("FT_OPTIM", ("adamw_torch" if tuning_type in ("FULL","LORA") else "paged_adamw_8bit"))
+        save_strategy_val = "epoch" if use_eval else "no"
+        eval_strategy_val = "epoch" if use_eval else "no"
 
-                # LoRA 어댑터 추가 (Unsloth 헬퍼 우선)
-                try:
-                    model = FastLanguageModel.get_peft_model(
-                        model,
-                        r=64,
-                        lora_alpha=16,
-                        lora_dropout=0.05,
-                        bias="none",
-                    )
-                except Exception:
-                    from peft import LoraConfig, get_peft_model  # type: ignore
-                    candidate_keywords = [
-                        "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
-                        "down_proj","w1","w2","c_proj","c_attn"
-                    ]
-                    lora_target_modules = sorted({
-                        name.split(".")[-1]
-                        for name, _ in model.named_modules()
-                        if any(k in name for k in candidate_keywords)
-                    })
-                    lora_config = LoraConfig(
-                        r=64, lora_alpha=16, target_modules=lora_target_modules or None,
-                        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
-                    )
-                    model = get_peft_model(model, lora_config)
-
-            else:
-                # ---- 일반 QLORA: BitsAndBytes 사용 ----
-                try:
-                    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
-                except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] peft not installed for QLORA: {e}")
-                    _update_job_status(conn, job.job_id, "failed", extras={"error": f"peft not installed: {e}"})
-                    logger.error(f"Fine-tuning failed jobId={job.job_id} error=peft not installed: {e}")
-                    return
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                )
-                tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-                if tokenizer.pad_token_id is None:
-                    if getattr(tokenizer, "eos_token_id", None) is not None:
-                        tokenizer.pad_token_id = tokenizer.eos_token_id
-                    else:
-                        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-                        tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    trust_remote_code=True,
-                    device_map="auto",
-                    quantization_config=bnb_config,
-                    local_files_only=True,
-                )
-                model.gradient_checkpointing_enable()
-                model = prepare_model_for_kbit_training(model)
-                candidate_keywords = [
-                    "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
-                    "down_proj","w1","w2","c_proj","c_attn"
-                ]
-                lora_target_modules = sorted({
-                    name.split(".")[-1]
-                    for name, _ in model.named_modules()
-                    if any(k in name for k in candidate_keywords)
-                })
-                lora_config = LoraConfig(
-                    r=64,
-                    lora_alpha=16,
-                    target_modules=lora_target_modules or None,
-                    lora_dropout=0.05,
-                    bias="none",
-                    task_type="CAUSAL_LM",
-                )
-                model = get_peft_model(model, lora_config)
-
-        # ===== Train =====
-        max_len = job.request.get("max_len", 4096)
-        train_dataset = RagDataset(train_conversations, tokenizer, max_len=max_len)
-        eval_dataset = RagDataset(eval_conversations, tokenizer, max_len=max_len) if len(eval_conversations) > 0 else None
-
-        # ===== Simple ROUGE-1 helper =====
-        def _rouge1_f1(reference: str, candidate: str) -> float:
-            ref_words = reference.split()
-            cand_words = candidate.split()
-            if not ref_words or not cand_words:
-                return 0.0
-            matches = sum(1 for w in cand_words if w in ref_words)
-            precision = matches / len(cand_words) if cand_words else 0.0
-            recall = matches / len(ref_words) if ref_words else 0.0
-            if precision + recall == 0:
-                return 0.0
-            return 2 * (precision * recall) / (precision + recall)
-
-        import math
-
-        # Build kwargs dict first to allow graceful fallback when certain versions
-        # of transformers don't support a particular parameter (e.g. evaluation_strategy).
-        # Optimizer: avoid bitsandbytes for FULL/LORA by default; keep for QLORA.
-        optim_name = os.getenv(
-            "FT_OPTIM",
-            ("adamw_torch" if tuning_type in ("FULL", "LORA") else "paged_adamw_8bit"),
-        )
-        _ta_kwargs = dict(
+        _ta = dict(
             output_dir=output_dir,
             num_train_epochs=job.request.get("epochs", 3),
             per_device_train_batch_size=job.request.get("batchSize", 1),
@@ -1082,100 +911,128 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             learning_rate=job.request.get("learningRate", 2e-4),
             bf16=True,
             logging_steps=10,
-            save_steps=500,
-            save_total_limit=2,
             report_to="none",
             optim=optim_name,
             seed=42,
             data_seed=42,
+            save_total_limit=2,
+            warmup_ratio=0.05,
         )
-        # Conditionally include evaluation_strategy only if the current transformers version supports it
-        from inspect import signature as _sig
-        if "evaluation_strategy" in _sig(TrainingArguments.__init__).parameters:
-            _ta_kwargs["evaluation_strategy"] = "epoch" if eval_dataset is not None else "no"
+        sup = _supported_args(TrainingArguments)
+        _put_kw(sup, _ta, "save_strategy", save_strategy_val)
+        _put_kw(sup, _ta, "evaluation_strategy", eval_strategy_val, "eval_strategy")
+        _put_kw(sup, _ta, "gradient_checkpointing", True)
+        _put_kw(sup, _ta, "lr_scheduler_type", "cosine")
+        _put_kw(sup, _ta, "save_safetensors", True)
+        if use_eval:
+            _put_kw(sup, _ta, "load_best_model_at_end", True)
+            _put_kw(sup, _ta, "metric_for_best_model", "eval_loss")
+            _put_kw(sup, _ta, "greater_is_better", False)
+            _put_kw(sup, _ta, "per_device_eval_batch_size", max(1, job.request.get("batchSize", 1)))
 
-        training_args = TrainingArguments(**_ta_kwargs)
+        training_args = TrainingArguments(**_ta)
 
-        # === 콜백으로 진행률 반영 ===
-        class ProgressHeartbeatCallback(TrainerCallback):  # type: ignore[misc]
-            def __init__(self, job_id: str):
+        # ===== 콜백 =====
+        class ProgressCallback(TrainerCallback):
+            def __init__(self, job_id: str, every_steps: int | None = None):
                 self.job_id = job_id
-
-            def on_train_begin(self, args, state, control, **kwargs):
+                self.every_steps = every_steps if every_steps else max(1, int(os.getenv("FT_PROGRESS_EVERY_STEPS", "1")))
+                self.total_steps = None
+            def on_train_begin(self, args, state, control, **kw):
+                c = get_db(); _update_job_status(c, self.job_id, "running", progress=0); c.close()
+            def on_train_begin_dataloader(self, args, state, control, **kw):
                 try:
-                    c = get_db()
-                    _update_job_status(c, self.job_id, "running", progress=0)
-                    c.close()
+                    if state.max_steps and state.max_steps > 0:
+                        self.total_steps = int(state.max_steps)
                 except Exception:
                     pass
-
-            def on_step_end(self, args, state, control, **kwargs):
+            def on_step_end(self, args, state, control, **kw):
                 try:
-                    # global_step 기반 정확한 진행률 계산
-                    total = max(1, getattr(state, "max_steps", 0) or 0)
-                    done = int(getattr(state, "global_step", 0) or 0)
-                    pct = int((done / total) * 100) if total else 0
-                    pct = min(99, max(0, pct))  # 최대 99% (학습 완료 전까지)
-
-                    c = get_db()
-                    try:
-                        _update_job_status(
-                            c, self.job_id, "running",
-                            progress=pct,
-                            extras={"learningProgress": pct}
-                        )
-                    finally:
-                        c.close()
+                    total = self.total_steps or (state.max_steps or 0)
+                    if not total or state.global_step % self.every_steps != 0: return
+                    pct = int(min(100, max(0, round((state.global_step/total)*100))))
+                    c = get_db(); _update_job_status(c, self.job_id, "running", progress=pct); c.close()
                 except Exception:
                     pass
+            def on_train_end(self, args, state, control, **kw):
+                c = get_db(); _update_job_status(c, self.job_id, "running", progress=100); c.close()
 
-            def on_train_end(self, args, state, control, **kwargs):
-                try:
-                    c = get_db()
-                    _update_job_status(c, self.job_id, "running", progress=100)
-                    c.close()
-                except Exception:
-                    pass
-
-        class LogCallback(TrainerCallback):  # type: ignore[misc]
-            def on_log(self, args, state, control, logs=None, **kwargs):
+        class LogCallback(TrainerCallback):
+            def on_log(self, args, state, control, logs=None, **kw):
                 if logs and "loss" in logs:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] step={state.global_step} loss={logs['loss']}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
-        def _build_trainer()->Trainer:
+        def _build_trainer():
             return Trainer(
                 model=model,
                 args=training_args,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                tokenizer=tokenizer,
-                callbacks=[LogCallback(), ProgressHeartbeatCallback(job.job_id)],
+                train_dataset=train_ds,
+                eval_dataset=eval_ds,
+                tokenizer=tokenizer,  # FutureWarning은 무시 가능 (추후 processing_class로 마이그레이션)
+                callbacks=[ProgressCallback(job.job_id), LogCallback()],
             )
 
-        trainer=_build_trainer()
+        trainer = _build_trainer()
 
+        # ===== 학습 + OOM 세이프 재시도 =====
+        import math
         try:
+            _append_log(log_path, f"[{_now_utc().isoformat()}] training started...")
             trainer.train()
         except RuntimeError as re:
-            if "out of memory" in str(re).lower() and training_args.per_device_train_batch_size>1:
-                new_bs=max(1,training_args.per_device_train_batch_size//2)
-                _append_log(log_path,f"[{datetime.now().isoformat()}] OOM detected, retrying with batch_size={new_bs}")
-                training_args.per_device_train_batch_size=new_bs
-                trainer=_build_trainer()
+            if "out of memory" in str(re).lower():
+                # 🔻 배치/시퀀스 동시 축소 + **이전 Trainer/그래프 완전 정리**
+                old_bs = training_args.per_device_train_batch_size
+                new_bs = max(1, old_bs // 2)
+                new_len = max(1024, int(max_len * 0.75))
+                _append_log(log_path, f"[{_now_utc().isoformat()}] OOM → retry with batch={new_bs}, max_len={new_len}")
+                # 메모리 해제
+                try:
+                    del trainer
+                    torch.cuda.empty_cache(); gc.collect()
+                except Exception:
+                    pass
+                # 재구성
+                training_args.per_device_train_batch_size = new_bs
+                train_ds = RagDataset(train_data, tokenizer, max_len=new_len)
+                eval_ds  = RagDataset(eval_data,  tokenizer, max_len=new_len) if use_eval else None
+                trainer = Trainer(
+                    model=model,
+                    args=training_args,
+                    train_dataset=train_ds,
+                    eval_dataset=eval_ds,
+                    tokenizer=tokenizer,
+                    callbacks=[ProgressCallback(job.job_id), LogCallback()],
+                )
                 trainer.train()
             else:
                 raise
 
-        # Compute final ROUGE-1 on full eval set if available
+        # ===== 간단 ROUGE-1 (옵셔널) =====
+        def _rouge1_f1(ref: str, cand: str) -> float:
+            rw, cw = ref.split(), cand.split()
+            if not rw or not cw: return 0.0
+            m = sum(1 for w in cw if w in rw)
+            p = m/len(cw) if cw else 0.0
+            r = m/len(rw) if rw else 0.0
+            return 0.0 if (p+r)==0 else 2*(p*r)/(p+r)
+
         final_rouge = None
-        if eval_dataset is not None and len(eval_dataset) > 0:
+        if use_eval:
             model.eval()
-            preds = []
-            refs = []
-            for item in eval_dataset:
-                inp_ids = item["input_ids"].unsqueeze(0).to(model.device)
+            preds, refs = [], []
+            device = _get_model_device(model)
+            for item in eval_ds:
+                inp_ids = item["input_ids"].unsqueeze(0).to(device)
+                attn = item["attention_mask"].unsqueeze(0).to(device)
                 try:
-                    out_ids = model.generate(inp_ids, max_new_tokens=128, do_sample=False)[0]
+                    with torch.inference_mode():
+                        out_ids = model.generate(
+                            inp_ids,
+                            attention_mask=attn,
+                            max_new_tokens=128,
+                            do_sample=False,
+                        )[0]
                 except Exception:
                     continue
                 preds.append(tokenizer.decode(out_ids, skip_special_tokens=True))
@@ -1183,87 +1040,62 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 ref_ids = torch.where(ref_ids == -100, torch.tensor(tokenizer.pad_token_id), ref_ids)
                 refs.append(tokenizer.decode(ref_ids, skip_special_tokens=True))
             scores = [_rouge1_f1(r, p) for r, p in zip(refs, preds)]
-            if scores:
-                final_rouge = sum(scores) / len(scores)
+            if scores: final_rouge = sum(scores) / len(scores)
+            _update_job_status(conn, job.job_id, "running", rough=int((final_rouge or 0)*100), extras={"rouge1F1": final_rouge})
 
-        _update_job_status(conn, job.job_id, "running", rough=int((final_rouge or 0)*100), extras={"rouge1F1": final_rouge})
-
-        # === 저장(merge) 단계도 사용자에게 보여주기 ===
+        # ===== 저장 =====
         def _save_stage(stage: str, pct: int):
-            _append_log(log_path, f"[{datetime.now().isoformat()}] save:{stage} {pct}%")
-            c = get_db()
-            _update_job_status(c, job.job_id, "running", extras={"saveStage": stage, "saveProgress": pct})
-            c.close()
+            _append_log(log_path, f"[{_now_utc().isoformat()}] save:{stage} {pct}%")
+            c = get_db(); _update_job_status(c, job.job_id, "running", extras={"saveStage": stage, "saveProgress": pct}); c.close()
 
         _save_stage("start", 5)
-        
-        # ===== Save / Merge =====
-        is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
-        
+        _append_log(log_path, f"[{_now_utc().isoformat()}] saving model...")
+
         if tuning_type in ("LORA", "QLORA"):
-            # LoRA/QLoRA: 어댑터만 저장 (베이스는 참조로)
             try:
-                # PEFT/Unsloth 모델에서 save_pretrained는 어댑터만 저장
-                model.save_pretrained(output_dir)
+                model.save_pretrained(output_dir)     # 어댑터만 저장
                 _save_stage("adapter", 70)
                 tokenizer.save_pretrained(output_dir)
                 _save_stage("tokenizer", 90)
-                _append_log(log_path, f"[{datetime.now().isoformat()}] saved adapters only → {output_dir}")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] saved adapters → {output_dir}")
             except Exception as e:
-                _append_log(log_path, f"[{datetime.now().isoformat()}] adapter save failed: {e}, fallback trainer.save_model")
                 trainer.save_model(output_dir)
                 _save_stage("model", 70)
                 tokenizer.save_pretrained(output_dir)
                 _save_stage("tokenizer", 90)
-            
-            # MXFP4 병합 저장은 환경변수로 제어 (기본 비활성)
-            save_merge = os.getenv("FT_UNSLOTH_MERGE_SAVE", "0") == "1"
-            if is_mxfp4 and save_merge:
+                _append_log(log_path, f"[{_now_utc().isoformat()}] fallback save (trainer.save_model): {e}")
+            # MXFP4 병합 저장은 선택(기본 비활성)
+            if is_mxfp4 and os.getenv("FT_UNSLOTH_MERGE_SAVE","0") == "1":
                 try:
                     model.save_pretrained_merged(output_dir, tokenizer, save_method="mxfp4")
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] merged MXFP4 saved → {output_dir}")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] merged MXFP4 saved → {output_dir}")
                 except Exception as e:
-                    _append_log(log_path, f"[{datetime.now().isoformat()}] MXFP4 merge save failed: {e}, using adapters only.")
+                    _append_log(log_path, f"[{_now_utc().isoformat()}] MXFP4 merge save failed: {e}, adapters only.")
         else:
-            # FULL: 전체 모델 저장
             trainer.save_model(output_dir)
             _save_stage("model", 70)
             tokenizer.save_pretrained(output_dir)
             _save_stage("tokenizer", 90)
-        
-        # 마무리
+
         _save_stage("done", 100)
 
         _finish_job_success(
-            conn,
-            job.job_id,
-            save_name_with_suffix,
-            job.category,
-            tuning_type,
-            final_rouge,
-            subcategory=job.request.get("subcategory"),
+            conn, job.job_id, save_name_with_suffix, job.category, tuning_type, final_rouge, subcategory=job.request.get("subcategory"),
         )
-        logger.info(
-            f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}"
-        )
-        _append_log(log_path, f"[{datetime.now().isoformat()}] job {job.job_id} succeeded")
+        logger.info(f"Fine-tuning succeeded jobId={job.job_id} save={save_name_with_suffix} type={tuning_type}")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] job {job.job_id} succeeded")
 
     except Exception as e:
         logger.error(f"Fine-tuning failed jobId={job.job_id} error={e}")
-        # Log error to file
         try:
-            _append_log(os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix, "train.log"),
-                        f"[{datetime.now().isoformat()}] error: {e}")
+            _append_log(os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix, "train.log"), f"[{_now_utc().isoformat()}] error: {e}")
         except Exception:
             pass
-
-        # Persist failure status & error message to DB (fresh connection to avoid thread issues)
         c = get_db()
         try:
             _update_job_status(c, job.job_id, "failed", progress=0, extras={"error": str(e)})
         finally:
             c.close()
-        # Ensure outer scope conn marks failure too (best effort)
         try:
             cur = conn.cursor()
             cur.execute("UPDATE fine_tune_jobs SET status=? WHERE provider_job_id=?", ("failed", job.job_id))
@@ -1271,7 +1103,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         except Exception:
             pass
     finally:
-        # ✅ 메모리 정리 강화
+        # 자원 정리
         try:
             del trainer
         except Exception:
@@ -1281,22 +1113,17 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         except Exception:
             pass
         try:
-            import gc, torch
+            import torch
             gc.collect()
             if hasattr(torch, "cuda") and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()  # IPC 메모리 정리
+                torch.cuda.ipc_collect()
         except Exception:
             pass
-        # ✅ 캐시 정리 (임시 디렉토리 삭제 및 환경변수 복원)
         try:
-            # 환경변수 복원
             for k, v in old_cache.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-            # 임시 디렉토리 삭제
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
@@ -1307,17 +1134,34 @@ def _log_to_save_name(save_name_with_suffix: str, message: str):
     try:
         out_dir = _ensure_output_dir(save_name_with_suffix)
         log_path = os.path.join(out_dir, "train.log")
-        _append_log(log_path, f"[{datetime.now().isoformat()}] {message}")
+        _append_log(log_path, f"[{_now_utc().isoformat()}] {message}")
     except Exception:
         pass
 
 def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
+    # startNow와 startAt 동시 지정 방지
+    if body.startNow and body.startAt:
+        raise BadRequestError("startNow와 startAt은 동시에 사용할 수 없습니다. (둘 중 하나만)")
+    
     # body.category를 최종 신뢰(하위호환을 위해 인수 category는 fallback)
     category = (body.category or category).lower()
     suffix = (body.tuningType or "QLORA").upper()
     # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
     save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"
     _ensure_output_dir(save_name_with_suffix)
+    
+    # 중복 실행 차단 (락 파일)
+    import fcntl
+    out_dir = _ensure_output_dir(save_name_with_suffix)
+    lock_path = os.path.join(out_dir, ".run.lock")
+    lock_f = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_f.write(f"locked at {_now_utc().isoformat()}\n")
+        lock_f.flush()
+    except BlockingIOError:
+        lock_f.close()
+        raise BadRequestError(f"another fine-tune is already running for {save_name_with_suffix}")
 
     base_dir = _resolve_model_dir(body.baseModelName)
     if not _has_model_signature(base_dir):
@@ -1332,7 +1176,30 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     try:
         train_path = _resolve_train_path(body.trainSetFile)
         dataset_id = _insert_dataset_if_needed(conn, train_path, category)
-        _insert_job(conn, category, body, job_id, save_name_with_suffix, dataset_id)
+        # 예약 시간 파싱
+        scheduled_at_iso = None
+        delay_sec = 0.0
+        if body.startAt:
+            try:
+                scheduled_dt = datetime.fromisoformat(body.startAt)
+                # timezone 정보가 없으면 KST로 가정
+                if scheduled_dt.tzinfo is None:
+                    kst = timezone(timedelta(hours=9))
+                    scheduled_dt = scheduled_dt.replace(tzinfo=kst)
+                now_dt = _now_utc()
+                delta = (scheduled_dt - now_dt).total_seconds()
+                if delta > 1.0:
+                    delay_sec = float(delta)
+                    scheduled_at_iso = scheduled_dt.isoformat()
+            except Exception:
+                scheduled_at_iso = None
+                delay_sec = 0.0
+
+        _insert_job(
+            conn, category, body, job_id, save_name_with_suffix, dataset_id,
+            initial_status=("scheduled" if delay_sec > 1.0 else "queued"),
+            scheduled_at=scheduled_at_iso,
+        )
     except Exception as e:
         _log_to_save_name(save_name_with_suffix, f"db insert failed: {e}")
         logger.error(f"fine-tuning init failed: {e}")
@@ -1348,16 +1215,69 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-    # 항상 실제 학습만
-    target = _run_training_inline
-    logger.info(
-        f"Fine-tuning queued jobId={job.job_id} category={category} base={body.baseModelName} "
-        f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
-    )
-    t = threading.Thread(target=target, args=(job, save_name_with_suffix), daemon=True)
-    t.start()
+    
+    # 🔹 즉시 실행이면 예약(startAt)은 **무시**해서 중복 실행을 원천 차단
+    if body.startNow:
+        def _launch():
+            _run_training_inline(job, save_name_with_suffix)
+        t = threading.Thread(target=_launch, daemon=True)
+        t.start()
+        logger.info(
+            f"Fine-tuning started immediately jobId={job.job_id} category={category} base={body.baseModelName} "
+            f"save={save_name_with_suffix} tuning={body.tuningType or 'QLORA'}"
+        )
+        return {"jobId": job_id, "started": True}
+    else:
+        # 예약 실행 또는 큐에만 등록
+        if body.startAt:
+            # 예약 실행
+            def _launch():
+                _run_training_inline(job, save_name_with_suffix)
+            
+            # 예약 딜레이 재계산
+            delay_sec = 0.0
+            try:
+                scheduled_dt = datetime.fromisoformat(body.startAt)
+                # timezone 정보가 없으면 KST로 가정
+                if scheduled_dt.tzinfo is None:
+                    kst = timezone(timedelta(hours=9))
+                    scheduled_dt = scheduled_dt.replace(tzinfo=kst)
+                now_dt = _now_utc()
+                delta = (scheduled_dt - now_dt).total_seconds()
+                if delta > 1.0:
+                    delay_sec = float(delta)
+            except Exception:
+                delay_sec = 0.0
 
-    return {"jobId": job_id}
+            if delay_sec > 1.0:
+                t = threading.Timer(delay_sec, _launch)
+                t.daemon = True
+                t.start()
+                logger.info(
+                    f"Fine-tuning scheduled jobId={job.job_id} at {scheduled_dt.isoformat()} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+                )
+            else:
+                # 예약 시간이 이미 지났으면 즉시 실행
+                t = threading.Thread(target=_launch, daemon=True)
+                t.start()
+                logger.info(
+                    f"Fine-tuning started (scheduled time passed) jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+                )
+        else:
+            # 큐에만 등록 (스케줄러가 나중에 실행)
+            try:
+                conn2 = get_db()
+                _update_job_status(conn2, job_id, "queued", extras={"reserved": True, "reservedAt": _now_local_str()})
+            finally:
+                try:
+                    conn2.close()
+                except Exception:
+                    pass
+            logger.info(
+                f"Fine-tuning queued (not started) jobId={job.job_id} category={category} base={body.baseModelName} save={save_name_with_suffix}"
+            )
+
+    return {"jobId": job_id, "started": bool(body.startNow)}
 
 def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     conn = get_db()
@@ -1380,10 +1300,9 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
             if row_status == "running":
                 hb = metrics.get("heartbeatAt")
                 if hb:
-                    from datetime import datetime, timezone
                     from dateutil import parser as dtparser  # type: ignore
                     last = dtparser.parse(hb)
-                    now = datetime.now(last.tzinfo or timezone.utc)
+                    now = _now_utc()
                     if (now - last).total_seconds() > FT_HEARTBEAT_TIMEOUT_SEC:
                         c2 = get_db()
                         try:

@@ -66,11 +66,7 @@ class UpdatePromptBody(BaseModel):
     variables: Optional[List[PromptVariable]] = None
 
 
-class CompareModelsBody(BaseModel):
-    category: str
-    modelId: Optional[int] = None
-    promptId: Optional[int] = None
-    prompt: Optional[str] = None
+# (moved) CompareModelsBody → service/admin/manage_test_LLM.py
 
 # === NEW: model download / train / infer request bodies ===
 
@@ -88,12 +84,7 @@ class TrainModelBody(BaseModel):
     lr: float = 2e-4
 
 
-class InferBody(BaseModel):
-    modelName: str = Field(..., description="Model folder name under STORAGE_ROOT or repo id")
-    context: str
-    question: str
-    max_tokens: int = 512
-    temperature: float = 0.7
+# (moved) InferBody → service/admin/manage_test_LLM.py
 
 
 class InsertBaseModelBody(BaseModel):
@@ -912,10 +903,7 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 
 
 
-def infer_local(body: InferBody) -> Dict[str, Any]:
-    prompt = f"{body.context.strip()}\n위 내용을 참고하여 응답해 주세요\nQuestion: {body.question.strip()}"
-    answer = _simple_generate(prompt, body.modelName, body.max_tokens, body.temperature)
-    return {"success": True, "answer": answer}
+# moved to service/admin/manage_test_LLM.py
 
 
 # ===== Service functions (구현) =====
@@ -926,43 +914,69 @@ def infer_local(body: InferBody) -> Dict[str, Any]:
 #     return {"success": True}
 
 
-def get_model_list(category: str) -> Dict[str, Any]:
-    # 카테고리 정규화
-    category = _norm_category(category)
-    _ensure_models_from_fs(category)
-
+def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
+    cat = _norm_category(category)
+    sub = (subcategory or "").strip()
+    
     conn = _connect()
+    cur = conn.cursor()
     try:
-        cur = conn.cursor()
-        # ✅ is_active 필터를 제거하여 '등록된 모든 모델'을 보여준다.
-        if category == "base":
+        if cat == "doc_gen" and sub:
+            # system_prompt_template.name = sub 에 매핑된 모델만 반환
             cur.execute(
                 """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
-                FROM llm_models
-                ORDER BY trained_at DESC, id DESC
-                """
-            )
-        elif category == "all":
-            cur.execute(
-                """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
-                FROM llm_models
-                WHERE category='all'
-                ORDER BY trained_at DESC, id DESC
-                """
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, name, type, category, subcategory, model_path, is_active, created_at
-                FROM llm_models
-                WHERE (category=? OR category='all')
-                ORDER BY trained_at DESC, id DESC
+                WITH t AS (
+                  SELECT id
+                    FROM system_prompt_template
+                   WHERE category = ?
+                     AND lower(name) = lower(?)
+                     AND IFNULL(is_active,1) = 1
+                   LIMIT 1
+                )
+                SELECT
+                  m.id,
+                  m.name,
+                  m.provider,
+                  m.category,
+                  m.is_active AS isActive,
+                  m.trained_at,
+                  m.created_at,
+                  CASE WHEN d.model_id = m.id THEN 1 ELSE 0 END AS isDefaultForTask,
+                  pm.rouge_score
+                FROM llm_models m
+                JOIN t ON 1=1
+                JOIN llm_prompt_mapping pm
+                  ON pm.llm_id = m.id
+                 AND pm.prompt_id = t.id
+                LEFT JOIN llm_task_defaults d
+                  ON d.category = ?
+                 AND IFNULL(d.subcategory,'') = IFNULL(lower(?),'')
+                 AND d.model_id = m.id
+                WHERE m.is_active = 1
+                  AND (m.category = 'doc_gen' OR m.category = 'all')
+                ORDER BY IFNULL(pm.rouge_score,-1) DESC,
+                         m.trained_at DESC,
+                         m.id DESC
                 """,
-                (category,)
+                (cat, sub, cat, sub),
             )
-        rows = cur.fetchall()
+            rows = cur.fetchall()
+        else:
+            # 기존 동작: 카테고리 또는 all
+            cur.execute(
+                """
+                SELECT
+                  id, name, provider, category,
+                  is_active AS isActive,
+                  trained_at, created_at
+                  FROM llm_models
+                 WHERE is_active = 1
+                   AND (category = ? OR category = 'all')
+                 ORDER BY trained_at DESC, id DESC
+                """,
+                (cat,),
+            )
+            rows = cur.fetchall()
     finally:
         conn.close()
 
@@ -975,40 +989,28 @@ def get_model_list(category: str) -> Dict[str, Any]:
         logging.getLogger(__name__).exception("failed to gather loaded keys")
         loaded_keys = set()
 
-    # 활성 모델 이름 집합 계산
-    if category == "base":
-        active_names = {
-            _active_model_name_for_category("qa"),
-            _active_model_name_for_category("doc_gen"),
-            _active_model_name_for_category("summary"),
-        } - {None}
-    else:
-        active_name = _active_model_name_for_category(category)
-        active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # 일반 카테고리 요청 시: base 중복 방지는 유지
-        if category != "base":
-            row_type = str((r["type"] or "")).lower()
-            row_cat  = str((r["category"] or "")).lower()
-            if (row_type == "base") and (row_cat != "all"):
-                continue
         name = r["name"]
         cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
+        
         models.append({
             "id": r["id"],
             "name": name,
             "loaded": bool(loaded_flag),
-            "active": (name in active_names) and bool(loaded_flag),
+            "active": bool(r.get("isDefaultForTask", 0)) if cat == "doc_gen" and sub else False,
             "category": r["category"],
-            "subcategory": r["subcategory"],
-            "isActive": bool(r["is_active"]),
+            "subcategory": sub if (cat == "doc_gen" and sub) else None,
+            "isActive": bool(r["isActive"]),
             "createdAt": r["created_at"],
+            "rougeScore": r.get("rouge_score") if cat == "doc_gen" and sub else None,
         })
+
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
-    return {"category": category, "models": models}
+    
+    return {"category": cat, "models": models}
 
 
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
@@ -1112,122 +1114,16 @@ def unload_model(model_name: str) -> Dict[str, Any]:
 
 
 # ===== 기본 모델 매핑(테스크/서브테스크) =====
-class DefaultModelBody(BaseModel):
-    category: str
-    subcategory: Optional[str] = None
-    modelName: str
+# moved to service/admin/manage_test_LLM.py: DefaultModelBody
 
 
-def set_default_model(body: DefaultModelBody) -> Dict[str, Any]:
-    _migrate_llm_models_if_needed()
-    cat = _norm_category(body.category)
-    sub = (body.subcategory or "").strip().lower() or None
-    conn = _connect(); cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM llm_models WHERE name=?", (body.modelName,))
-        row = cur.fetchone()
-        if not row:
-            return {"success": False, "message": f"모델이 없습니다: {body.modelName}"}
-        model_id = int(row[0])
-        cur.execute(
-            """
-            INSERT INTO llm_task_defaults(category, subcategory, model_id)
-            VALUES(?,?,?)
-            ON CONFLICT(category, IFNULL(subcategory,'')) DO UPDATE SET model_id=excluded.model_id, updated_at=CURRENT_TIMESTAMP
-            """,
-            (cat, sub, model_id)
-        )
-        conn.commit()
-        return {"success": True, "category": cat, "subcategory": sub, "modelId": model_id, "modelName": body.modelName}
-    finally:
-        conn.close()
+## moved to service/admin/manage_test_LLM.py: set_default_model
 
 
-def get_default_model(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
-    cat = _norm_category(category)
-    sub = (subcategory or "").strip().lower() or None
-    conn = _connect(); cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT m.id, m.name FROM llm_task_defaults d
-            JOIN llm_models m ON m.id=d.model_id
-            WHERE d.category=? AND IFNULL(d.subcategory,'')=IFNULL(?, '')
-            LIMIT 1
-            """,
-            (cat, sub)
-        )
-        row = cur.fetchone()
-        model = {"id": row[0], "name": row[1]} if row else None
-        return {"category": cat, "subcategory": sub, "model": model}
-    finally:
-        conn.close()
+## moved to service/admin/manage_test_LLM.py: get_default_model
 
 
-def select_model_for_task(category: str, subcategory: Optional[str] = None) -> Optional[str]:
-    """
-    우선순위:
-      1) llm_task_defaults 매핑
-      2) 해당 과업(및 서브테스크) 활성 모델
-      3) category='all' 활성 베이스
-    반환: 모델 name (없으면 None)
-    """
-    cat = _norm_category(category)
-    sub = (subcategory or "").strip().lower() or None
-    conn = _connect(); cur = conn.cursor()
-    try:
-        # 1) explicit default mapping
-        cur.execute(
-            """
-            SELECT m.name
-              FROM llm_task_defaults d JOIN llm_models m ON m.id=d.model_id
-             WHERE d.category=? AND IFNULL(d.subcategory,'')=IFNULL(?, '')
-             LIMIT 1
-            """,
-            (cat, sub)
-        )
-        r = cur.fetchone()
-        if r:
-            return r[0]
-
-        # 2) task-specific active model (doc_gen with subcategory first)
-        if cat == "doc_gen" and sub:
-            cur.execute(
-                """
-                SELECT name FROM llm_models
-                 WHERE is_active=1 AND category='doc_gen' AND IFNULL(subcategory,'')=?
-                 ORDER BY trained_at DESC, id DESC LIMIT 1
-                """,
-                (sub,)
-            )
-            r = cur.fetchone()
-            if r:
-                return r[0]
-
-        cur.execute(
-            """
-            SELECT name FROM llm_models
-             WHERE is_active=1 AND category=?
-             ORDER BY trained_at DESC, id DESC LIMIT 1
-            """,
-            (cat,)
-        )
-        r = cur.fetchone()
-        if r:
-            return r[0]
-
-        # 3) fallback base(all)
-        cur.execute(
-            """
-            SELECT name FROM llm_models
-             WHERE is_active=1 AND category='all'
-             ORDER BY trained_at DESC, id DESC LIMIT 1
-            """
-        )
-        r = cur.fetchone()
-        return r[0] if r else None
-    finally:
-        conn.close()
+## moved to service/admin/manage_test_LLM.py: select_model_for_task
 
 
 def unload_model_for_category(category: str, model_name: str) -> Dict[str, Any]:
@@ -1252,52 +1148,7 @@ def list_loaded_models() -> Dict[str, Any]:
         return {"loaded": []}
 
 
-def compare_models(payload: CompareModelsBody) -> Dict[str, Any]:
-    """
-    event_logs(event='model_eval')에 저장된 최근 테스트 결과 중,
-    요청 category 기준으로 모델별 최신 결과 최대 3개 반환.
-    """
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-      SELECT metadata, occurred_at FROM event_logs
-      WHERE event='model_eval'
-      ORDER BY occurred_at DESC, id DESC
-      LIMIT 200
-    """)
-    rows = cur.fetchall()
-    conn.close()
-
-    results: Dict[str, Dict[str, Any]] = {}
-    for r in rows:
-        try:
-            meta = json.loads(r["metadata"])
-        except Exception:
-            continue
-        if meta.get("category") != payload.category:
-            continue
-        if payload.modelId and meta.get("modelId") != payload.modelId:
-            continue
-        if payload.promptId and meta.get("promptId") != payload.promptId:
-            continue
-        if payload.prompt and meta.get("promptText") != payload.prompt:
-            continue
-
-        mname = meta.get("modelName", f"model-{meta.get('modelId','?')}")
-        # 모델별 최신 1개만 유지
-        if mname not in results:
-            results[mname] = {
-                "modelId": meta.get("modelId"),
-                "modelName": mname,
-                "answer": meta.get("answer", ""),
-                "rougeScore": meta.get("rougeScore", None) or 0,
-                "occurred_at": r["occurred_at"],
-            }
-        if len(results) >= 3:
-            break
-
-    model_list = sorted(results.values(), key=lambda x: x["occurred_at"], reverse=True)[:3]
-    return {"modelList": model_list}
+## moved to service/admin/manage_test_LLM.py: compare_models
 
 
 def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]:
@@ -1387,8 +1238,7 @@ def _fetch_prompt_full(prompt_id: int) -> Tuple[sqlite3.Row, List[Dict[str, Any]
     """, (prompt_id,))
     vars_rows = cur.fetchall()
     conn.close()
-    variables = [{"id": r["id"], "type": r["type"], "key": r["key"], "value": r["value"], "description": r["description"]}
-                 for r in vars_rows]
+    variables = [{"id": r["id"], "type": r["type"], "key": r["key"], "value": r["value"], "description": r["description"]} for r in vars_rows]
     return tmpl, variables
 
 
@@ -1460,6 +1310,8 @@ def _fill_template(content: str, variables: Dict[str, Any]) -> str:
     return out
 
 
+## moved to service/admin/manage_test_LLM.py: test_prompt
+
 def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     프롬프트 테스트 실행:
@@ -1484,31 +1336,33 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     temperature = float(body.get("temperature", 0.7))
 
     tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
-    # 템플릿 name = subcategory
     subcategory = (tmpl["name"] if isinstance(tmpl, dict) else getattr(tmpl, "name", None)) or None
 
     if body.get("modelName"):
         model_name = body["modelName"]
     else:
-        model_name = select_model_for_task(category, subcategory)
+        try:
+            # helper는 test 모듈의 것을 재사용
+            from service.admin.manage_test_LLM import select_model_for_task
+            model_name = select_model_for_task(category, subcategory)
+        except Exception:
+            logging.getLogger(__name__).exception("select_model_for_task failed in admin test_prompt")
+            model_name = None
         if not model_name:
             return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
+
     required = json.loads(tmpl["required_vars"] or "[]")
-    # 필수 변수 체크(간단)
     missing = [k for k in required if k not in variables]
     if missing:
         return {"success": False, "error": f"필수 변수 누락: {', '.join(missing)}"}
 
-    # system/user prompt 각각 치환하고, 최종 프롬프트는 system + "\n" + user 로 합성
     system_prompt_text = _fill_template(tmpl["content"], variables)
     user_prompt_raw = (tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None)) or ""
     user_prompt_text = _fill_template(user_prompt_raw, variables)
     prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
 
-    # 간단 추론
     answer = _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
 
-    # (선택) ROUGE 점수 산출 – reference 제공 시 1-gram overlap만 간단 계산
     rouge = 0
     ref = body.get("reference")
     if isinstance(ref, str) and ref.strip():
@@ -1521,8 +1375,6 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
         except Exception:
             rouge = 0
 
-    # 로그 적재
-    # 모델 메타(ID) 조회
     row = _lookup_model_by_name(model_name)
     model_id = int(row["id"]) if row else None
 
@@ -1539,9 +1391,193 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
     }
     conn = _connect()
     cur = conn.cursor()
-    cur.execute("INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
-                ("model_eval", _json(meta)))
-    conn.commit()
-    conn.close()
+    try:
+        cur.execute(
+            "INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
+            ("model_eval", _json(meta)),
+        )
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to insert model_eval event")
+    finally:
+        conn.close()
 
     return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
+
+
+# ==== (추가) LORA/QLORA 베이스/어댑터 경로 인식 강화 ====
+
+def _db_get_model_record(model_name: str) -> Optional[sqlite3.Row]:
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def _resolve_paths_for_model(model_name: str) -> Dict[str, Optional[str]]:
+    """
+    모델 이름으로부터 로딩에 필요한 경로를 정리해서 반환.
+    - LORA/QLORA: {'base': mather_path(abs), 'adapter': model_path(abs)}
+    - FULL:      {'full': model_path(abs)}
+    - BASE:      {'base': mather_path(abs)} (실제 로드는 외부 규칙에 따름)
+    경로는 가능한 경우 절대경로로 환원.
+    """
+    row = _db_get_model_record(model_name)
+    base_abs = adap_abs = full_abs = None
+
+    def _to_abs_from_rel_or_name(p: Optional[str]) -> Optional[str]:
+        if not p:
+            return None
+        pp = p.replace("\\", "/")
+        if pp.startswith("./"):
+            cand = (BASE_BACKEND / pp.lstrip("./"))
+            return str(cand)
+        # 이름/폴더만 온 경우도 지원
+        return _resolve_model_fs_path(pp)
+
+    if row:
+        t = (row["type"] or "").upper()
+        if t in ("LORA", "QLORA"):
+            base_abs = _to_abs_from_rel_or_name(row["mather_path"])
+            adap_abs = _to_abs_from_rel_or_name(row["model_path"])
+            return {"base": base_abs, "adapter": adap_abs, "full": None}
+        elif t == "FULL":
+            full_abs = _to_abs_from_rel_or_name(row["model_path"]) or _resolve_model_fs_path(model_name)
+            return {"base": None, "adapter": None, "full": full_abs}
+        elif t == "BASE":
+            base_abs = _to_abs_from_rel_or_name(row["mather_path"])
+            return {"base": base_abs, "adapter": None, "full": None}
+
+    # DB에 없거나 메타가 빈 경우: 기존 해석으로 폴백
+    return {"base": None, "adapter": None, "full": _resolve_model_fs_path(model_name)}
+
+
+# (기존) _db_get_model_path 는 아래처럼 소폭 조정하여 '단일 경로'가 필요한 코드만 위해 유지
+def _db_get_model_path(model_name: str) -> Optional[str]:
+    """
+    단일 경로가 필요한 호출자 호환용.
+    - LORA/QLORA는 어댑터 경로(model_path) 우선 반환
+    - FULL은 model_path 또는 규칙 경로 반환
+    - BASE는 mather_path 반환(있으면)
+    """
+    rec = _resolve_paths_for_model(model_name)
+    return rec.get("adapter") or rec.get("full") or rec.get("base")
+
+
+# ==== (선택) 로딩 로직에서 LORA/QLORA 조합 고려 (간단 폴백) ====
+def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
+    """
+    최초 사용시 지연 로딩.
+    여기서는 경량 호환: FULL은 통짜 로딩, LORA/QLORA는 어댑터 경로만 우선 로딩 시도.
+    (실제 어댑터-베이스 merge/inject는 추론 경로에서 구성하거나 외부 추론기 사용을 권장)
+    """
+    try:
+        if _is_model_loaded(model_name):
+            return {"loaded": True, "message": "already loaded", "modelName": model_name}
+
+        paths = _resolve_paths_for_model(model_name)
+        # 우선순위: full -> adapter -> name
+        candidate = paths.get("full") or paths.get("adapter") or _resolve_model_fs_path(model_name)
+
+        try:
+            _MODEL_MANAGER.load(candidate)
+            return {"loaded": True, "message": "loaded", "modelName": model_name}
+        except Exception:
+            logging.getLogger(__name__).exception("lazy load failed - fallback adapter preload")
+            if _preload_via_adapters(model_name):
+                return {"loaded": True, "message": "adapter preloaded (fallback)", "modelName": model_name}
+            return {"loaded": False, "message": "load failed", "modelName": model_name}
+    except Exception:
+        logging.getLogger(__name__).exception("lazy_load_if_needed unexpected error")
+        return {"loaded": False, "message": "unexpected error", "modelName": model_name}
+
+
+# ===== (추가) 테스크별 디폴트 모델 확인 =====
+
+## moved to service/admin/manage_test_LLM.py: SelectModelQuery
+
+
+def get_selected_model(q):
+    """
+    요구사항: 테스크별 default model은 '프롬프트 테이블'에서 확인.
+    절차:
+      1) system_prompt_template에서 category(및 선택적 name=subcategory) + is_default=1 템플릿 1건을 고른다.
+         - 여러 개면 최신 id 우선
+      2) 해당 템플릿(prompt_id)에 연결된 llm_prompt_mapping 중 rouge_score가 가장 높은 1건을 선택
+      3) 그 llm_id로 llm_models 조회 후 모델 메타 반환
+    스키마의 unique 제약(테스크별 default는 1개)은 '확인만' 수행하고, 위반 시에도 가장 높은 rouge_score 1건만 반환.
+    """
+    category = _norm_category(q.category)
+    subcat = (getattr(q, "subcategory", None) or "").strip().lower() or None
+
+    conn = _connect(); cur = conn.cursor()
+    try:
+        # 1) default 템플릿 선택
+        if subcat:
+            cur.execute("""
+                SELECT id, name FROM system_prompt_template
+                 WHERE category=? AND lower(name)=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+                 ORDER BY id DESC LIMIT 1
+            """, (category, subcat))
+        else:
+            cur.execute("""
+                SELECT id, name FROM system_prompt_template
+                 WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+                 ORDER BY id DESC LIMIT 1
+            """, (category,))
+        tmpl = cur.fetchone()
+        if not tmpl:
+            return {"category": category, "subcategory": subcat, "default": None, "note": "기본 템플릿 없음"}
+
+        prompt_id = int(tmpl["id"])
+
+        # 2) prompt 매핑 중 최고 rouge_score 1건
+        cur.execute("""
+            SELECT llm_id, prompt_id, rouge_score
+              FROM llm_prompt_mapping
+             WHERE prompt_id=?
+             ORDER BY IFNULL(rouge_score, -1) DESC, llm_id DESC
+             LIMIT 1
+        """, (prompt_id,))
+        mp = cur.fetchone()
+        if not mp:
+            return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "프롬프트-모델 매핑 없음"}
+
+        # 3) llm_models 메타
+        cur.execute("""
+            SELECT id, name, provider, type, model_path, mather_path, category, is_active, trained_at, created_at
+              FROM llm_models WHERE id=?
+        """, (mp["llm_id"],))
+        mdl = cur.fetchone()
+        if not mdl:
+            return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "llm_models에 모델 없음"}
+
+        # 스키마 제약 확인(참고 메시지)
+        # 카테고리/서브카테고리별 default가 1개라는 제약을 코드에서는 강제하지 않음(요구대로 '확인만')
+        cur.execute("""
+            SELECT COUNT(*) AS cnt
+              FROM system_prompt_template
+             WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
+               AND (? IS NULL OR lower(name)=?)
+        """, (category, subcat, subcat))
+        cnt = (cur.fetchone() or {"cnt": 0})["cnt"]
+
+        return {
+            "category": category,
+            "subcategory": (tmpl["name"] or None),
+            "default": {
+                "promptId": prompt_id,
+                "llmId": mdl["id"],
+                "modelName": mdl["name"],
+                "type": mdl["type"],
+                "modelPath": mdl["model_path"],
+                "matherPath": mdl["mather_path"],
+                "rougeScore": mp["rouge_score"],
+            },
+            "note": ("default 템플릿 다수" if (cnt and cnt > 1) else None)
+        }
+    finally:
+        conn.close()
