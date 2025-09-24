@@ -913,24 +913,24 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 #     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
 #     return {"success": True}
 
-
-def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
+def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
-    sub = (subcategory or "").strip()
-    
+    sub = (subcategory or "").strip()   # = system_prompt_template.name
+
     conn = _connect()
     cur = conn.cursor()
     try:
         if cat == "doc_gen" and sub:
-            # system_prompt_template.name = sub 에 매핑된 모델만 반환
+            # 1) category+name으로 활성 템플릿 1건(디폴트 우선) 선정
             cur.execute(
                 """
                 WITH t AS (
                   SELECT id
                     FROM system_prompt_template
                    WHERE category = ?
-                     AND lower(name) = lower(?)
+                     AND name = ?
                      AND IFNULL(is_active,1) = 1
+                   ORDER BY IFNULL(is_default,0) DESC, id DESC
                    LIMIT 1
                 )
                 SELECT
@@ -938,31 +938,25 @@ def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str
                   m.name,
                   m.provider,
                   m.category,
-                  m.is_active AS isActive,
+                  m.is_active         AS isActive,
                   m.trained_at,
                   m.created_at,
-                  CASE WHEN d.model_id = m.id THEN 1 ELSE 0 END AS isDefaultForTask,
-                  pm.rouge_score
+                  IFNULL(pm.rouge_score,-1) AS rougeScore
                 FROM llm_models m
-                JOIN t ON 1=1
                 JOIN llm_prompt_mapping pm
-                  ON pm.llm_id = m.id
-                 AND pm.prompt_id = t.id
-                LEFT JOIN llm_task_defaults d
-                  ON d.category = ?
-                 AND IFNULL(d.subcategory,'') = IFNULL(lower(?),'')
-                 AND d.model_id = m.id
+                  ON pm.llm_id   = m.id
+                 AND pm.prompt_id = (SELECT id FROM t)
                 WHERE m.is_active = 1
                   AND (m.category = 'doc_gen' OR m.category = 'all')
                 ORDER BY IFNULL(pm.rouge_score,-1) DESC,
                          m.trained_at DESC,
                          m.id DESC
                 """,
-                (cat, sub, cat, sub),
+                (cat, sub),
             )
             rows = cur.fetchall()
         else:
-            # 기존 동작: 카테고리 또는 all
+            # 카테고리 전체 조회(all 포함) – 종전 로직 유지
             cur.execute(
                 """
                 SELECT
@@ -980,36 +974,23 @@ def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str
     finally:
         conn.close()
 
-    # Compute loaded set by resolved paths and basenames (category-agnostic)
-    try:
-        loaded_keys = set(_MODEL_MANAGER.list_loaded()) | set(_ADAPTER_LOADED)
-        basenames = {os.path.basename(k) for k in loaded_keys}
-        loaded_keys |= basenames
-    except Exception:
-        logging.getLogger(__name__).exception("failed to gather loaded keys")
-        loaded_keys = set()
-
+    # 상위 1개(rougeScore 최대)를 active=True로 표시
     models = []
-    for r in rows:
-        name = r["name"]
-        cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
-        loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
+    for i, r in enumerate(rows):
+        cols = r.keys()  # 컬럼 목록 확인
+        rouge = r["rougeScore"] if "rougeScore" in cols else None
         
         models.append({
             "id": r["id"],
-            "name": name,
-            "loaded": bool(loaded_flag),
-            "active": bool(r.get("isDefaultForTask", 0)) if cat == "doc_gen" and sub else False,
+            "name": r["name"],
+            "loaded": False,
+            "active": (i == 0 and cat == "doc_gen" and bool(sub)),  # doc_gen+서브카테고리일 때만 1위 True
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),
+            "isActive": bool(r["isActive"]),   # llm_models.is_active
             "createdAt": r["created_at"],
-            "rougeScore": r.get("rouge_score") if cat == "doc_gen" and sub else None,
+            "rougeScore": rouge,
         })
-
-    if not models:
-        models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
-    
     return {"category": cat, "models": models}
 
 
