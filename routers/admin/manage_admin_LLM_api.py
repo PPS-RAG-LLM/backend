@@ -44,13 +44,12 @@ def test_prompt_route(prompt_id: int, body: dict | None = None):
 # def set_settings(body: TopKSettingsBody):
 #     return set_topk_settings(body.topK)
 
-@router.get("/settings/model-list", summary="모델 목록과 로드/활성 상태 조회 (카테고리별 또는 base 전용)")
+@router.get("/settings/model-list", summary="모델 목록과 로드/활성 상태 조회 (카테고리/서브테스크별)")
 def model_list(
-    category: str = Query(..., description="base | qa | doc_gen | summary | all (또는 'doc_gen:report' 형식 지원)"),
-    subcategory: str | None = Query(None, description="서브카테고리. 지정 시 category와 결합하여 'cat:subcat'으로 전달"),
+    category: str = Query(..., description="qa | doc_gen | summary | base | all"),
+    subcategory: str | None = Query(None, description="doc_gen 서브테스크(=template.name, 예: '출장계획서')"),
 ):
-    cat_key = f"{category}:{subcategory}" if subcategory else category
-    return get_model_list(cat_key)
+    return get_model_list(category, subcategory)
 
 @router.post("/settings/model-load", summary="모델명을 기준으로 로드 (베이스 모델은 모든 카테고리에 로드로 간주)")
 def model_load(body: ModelLoadBody = ...):

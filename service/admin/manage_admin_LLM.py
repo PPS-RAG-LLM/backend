@@ -914,48 +914,69 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 #     return {"success": True}
 
 
-def get_model_list(category: str) -> Dict[str, Any]:
-    # 카테고리 정규화 + 서브카테고리 분리("cat:sub" → cat만 사용)
-    raw = _norm_category(category)
-    if ":" in raw:
-        base_cat = raw.split(":", 1)[0].strip()
-    else:
-        base_cat = raw
-    category = base_cat
-    _ensure_models_from_fs(category)
-
+def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
+    cat = _norm_category(category)
+    sub = (subcategory or "").strip()
+    
     conn = _connect()
+    cur = conn.cursor()
     try:
-        cur = conn.cursor()
-        # ✅ is_active 필터를 제거하여 '등록된 모든 모델'을 보여준다.
-        if category == "base":
+        if cat == "doc_gen" and sub:
+            # system_prompt_template.name = sub 에 매핑된 모델만 반환
             cur.execute(
                 """
-                SELECT id, name, type, category, model_path, is_active, created_at
-                FROM llm_models
-                ORDER BY trained_at DESC, id DESC
-                """
-            )
-        elif category == "all":
-            cur.execute(
-                """
-                SELECT id, name, type, category, model_path, is_active, created_at
-                FROM llm_models
-                WHERE lower(category)='all'
-                ORDER BY trained_at DESC, id DESC
-                """
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, name, type, category, model_path, is_active, created_at
-                FROM llm_models
-                WHERE (lower(category)=? OR lower(category)='all')
-                ORDER BY trained_at DESC, id DESC
+                WITH t AS (
+                  SELECT id
+                    FROM system_prompt_template
+                   WHERE category = ?
+                     AND lower(name) = lower(?)
+                     AND IFNULL(is_active,1) = 1
+                   LIMIT 1
+                )
+                SELECT
+                  m.id,
+                  m.name,
+                  m.provider,
+                  m.category,
+                  m.is_active AS isActive,
+                  m.trained_at,
+                  m.created_at,
+                  CASE WHEN d.model_id = m.id THEN 1 ELSE 0 END AS isDefaultForTask,
+                  pm.rouge_score
+                FROM llm_models m
+                JOIN t ON 1=1
+                JOIN llm_prompt_mapping pm
+                  ON pm.llm_id = m.id
+                 AND pm.prompt_id = t.id
+                LEFT JOIN llm_task_defaults d
+                  ON d.category = ?
+                 AND IFNULL(d.subcategory,'') = IFNULL(lower(?),'')
+                 AND d.model_id = m.id
+                WHERE m.is_active = 1
+                  AND (m.category = 'doc_gen' OR m.category = 'all')
+                ORDER BY IFNULL(pm.rouge_score,-1) DESC,
+                         m.trained_at DESC,
+                         m.id DESC
                 """,
-                (category,)
+                (cat, sub, cat, sub),
             )
-        rows = cur.fetchall()
+            rows = cur.fetchall()
+        else:
+            # 기존 동작: 카테고리 또는 all
+            cur.execute(
+                """
+                SELECT
+                  id, name, provider, category,
+                  is_active AS isActive,
+                  trained_at, created_at
+                  FROM llm_models
+                 WHERE is_active = 1
+                   AND (category = ? OR category = 'all')
+                 ORDER BY trained_at DESC, id DESC
+                """,
+                (cat,),
+            )
+            rows = cur.fetchall()
     finally:
         conn.close()
 
@@ -968,42 +989,28 @@ def get_model_list(category: str) -> Dict[str, Any]:
         logging.getLogger(__name__).exception("failed to gather loaded keys")
         loaded_keys = set()
 
-    # 활성 모델 이름 집합 계산
-    if category == "base":
-        active_names = {
-            _active_model_name_for_category("qa"),
-            _active_model_name_for_category("doc_gen"),
-            _active_model_name_for_category("summary"),
-        } - {None}
-    else:
-        active_name = _active_model_name_for_category(category)
-        active_names = {active_name} if active_name else set()
     models = []
     for r in rows:
-        # 일반 카테고리 요청 시: BASE 타입도 category='all'이면 항상 노출
-        if category != "base":
-            row_type = str((r["type"] or "")).lower()
-            row_cat  = str((r["category"] or "")).lower()
-            if (row_type == "base") and (row_cat != "all"):
-                # 'BASE'가 특정 카테고리에만 속한 경우: 현재 카테고리와 일치하는 레코드만 이미 쿼리에서 선택됨
-                # 추가 필터 없이 통과
-                pass
         name = r["name"]
         cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
         loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
+        
         models.append({
             "id": r["id"],
             "name": name,
             "loaded": bool(loaded_flag),
-            "active": (name in active_names) and bool(loaded_flag),
+            "active": bool(r.get("isDefaultForTask", 0)) if cat == "doc_gen" and sub else False,
             "category": r["category"],
-            "subcategory": None,  # subcategory 컬럼 제거됨
-            "isActive": bool(r["is_active"]),
+            "subcategory": sub if (cat == "doc_gen" and sub) else None,
+            "isActive": bool(r["isActive"]),
             "createdAt": r["created_at"],
+            "rougeScore": r.get("rouge_score") if cat == "doc_gen" and sub else None,
         })
+
     if not models:
         models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
-    return {"category": category, "models": models}
+    
+    return {"category": cat, "models": models}
 
 
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
