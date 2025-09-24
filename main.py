@@ -30,8 +30,8 @@ from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
 
-from routers.users.summary_templates import router as summary_router
-from routers.users.doc_gen_templates import router as doc_gen_templates_router
+from routers.commons.summary_templates import router as summary_router
+from routers.commons.doc_gen_templates import router as doc_gen_templates_router
 logger = logger(__name__)
 
 
