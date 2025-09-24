@@ -355,7 +355,7 @@ class SystemPromptTemplate(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(
         Text, nullable=False
-    )  # Business_Trip_Plan, Meeting_Minutes, Business_Trip_Report
+    )  # 회의록, 보고서, 출장 계획서
     category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
     content = Column(Text, nullable=False)  # 시스템 프롬프트
     sub_content = Column(Text)  # 유저 프롬프트
