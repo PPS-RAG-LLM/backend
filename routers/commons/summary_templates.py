@@ -11,7 +11,7 @@ router = APIRouter(tags=["summary"], prefix="/v1/summary")
 class TemplateListItem(BaseModel):
     id: int
     name: str
-    content: str
+    system_prompt: str
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateListItem]
@@ -19,7 +19,7 @@ class TemplateListResponse(BaseModel):
 class TemplateContentResponse(BaseModel):
     id: int
     name: str
-    content: str
+    system_prompt: str
 
 @router.get("/templates", response_model=TemplateListResponse, summary="요약용 템플릿 전체 목록(상세 포함)")
 def list_summary_templates_route():
@@ -31,4 +31,4 @@ def get_summary_template_route(template_id: int):
     row = get_summary_template(template_id)
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
-    return {"id": row["id"], "name": row["name"], "content": row["content"]}
+    return {"id": row["id"], "name": row["name"], "system_prompt": row["system_prompt"]}

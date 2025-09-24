@@ -50,7 +50,7 @@ INSERT INTO
         "trained_at",
         "created_at"
     )
-VALUES (1,'huggingface','gpt_oss_20b',0,'./service/storage/model/gpt-oss-20b',
+VALUES (1,'huggingface','gpt-oss-20b',0,'./service/storage/model/gpt-oss-20b',
         'all','base',1,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (2,'huggingface','qwen_2.5_7b_instruct',0,'./service/storage/model/Qwen2.5-7B-Instruct-1M',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');

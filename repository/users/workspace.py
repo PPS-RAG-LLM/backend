@@ -174,7 +174,7 @@ def get_default_system_prompt_content(category: str) -> Optional[str]:
     """기본값 프롬프트 조회"""
     with get_session() as session:
         stmt = (
-            select(SystemPromptTemplate.content)
+            select(SystemPromptTemplate.system_prompt)
             .where(
                 SystemPromptTemplate.category == category,
                 SystemPromptTemplate.is_default == True,

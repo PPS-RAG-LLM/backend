@@ -4,14 +4,14 @@ from sqlalchemy import select
 from utils.database import get_session
 from storage.db_models import SystemPromptTemplate, PromptMapping, SystemPromptVariable
 
-def repo_list_doc_gen_templates() -> List[Dict[str, object]]:
+def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
     with get_session() as session:
         tmpl_stmt = (
             select(
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
-                SystemPromptTemplate.content,
-                SystemPromptTemplate.sub_content,
+                SystemPromptTemplate.system_prompt,
+                SystemPromptTemplate.user_prompt,
             )
             .where(
                 SystemPromptTemplate.category == "doc_gen",
@@ -19,6 +19,9 @@ def repo_list_doc_gen_templates() -> List[Dict[str, object]]:
             )
             .order_by(SystemPromptTemplate.id.desc())
         )
+        if default_only:
+            tmpl_stmt = tmpl_stmt.where(SystemPromptTemplate.is_default == True)
+
         tmpl_rows = session.execute(tmpl_stmt).all()
         if not tmpl_rows:
             return []
@@ -48,8 +51,8 @@ def repo_list_doc_gen_templates() -> List[Dict[str, object]]:
             out.append({
                 "id": r.id,
                 "name": r.name,
-                "content": r.content,
-                "sub_content": r.sub_content,
+                "system_prompt": r.system_prompt,
+                "user_prompt": r.user_prompt,
                 "variables": by_tid.get(r.id, []),
             })
         return out
@@ -60,8 +63,8 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
             select(
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
-                SystemPromptTemplate.content,
-                SystemPromptTemplate.sub_content,
+                SystemPromptTemplate.system_prompt,
+                SystemPromptTemplate.user_prompt,
             )
             .where(
                 SystemPromptTemplate.id == template_id,
@@ -94,7 +97,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
         return {
             "id": tmpl.id,
             "name": tmpl.name,
-            "content": tmpl.content,
-            "sub_content": tmpl.sub_content,
+            "system_prompt": tmpl.system_prompt,
+            "user_prompt": tmpl.user_prompt,
             "variables": variables,
         }

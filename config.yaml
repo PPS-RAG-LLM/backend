@@ -38,7 +38,7 @@ default:
   repetition_penalty: 1.2
   no_repeat_ngram_size: 3
   early_stopping: true
-  max_tokens: 8000
+  max_tokens: 20000
 
 workspace:
   chat_history: 20
