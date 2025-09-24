@@ -260,13 +260,18 @@ class LlmModel(Base):
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+    prompt_mappings = relationship(
+        "LlmPromptMapping",
+        back_populates="llm_model",
+        cascade="all, delete-orphan",
+    )
 
 
 class LlmPromptMapping(Base):
     __tablename__ = "llm_prompt_mapping"
-
-    llm_id = Column(Integer, primary_key=True, autoincrement=True)
-    prompt_id = Column(Text, unique=True)
+    id = Column(Integer,  primary_key=True, autoincrement=True)
+    llm_id = Column(Integer, ForeignKey("llm_models.id"))
+    prompt_id = Column(Integer, ForeignKey("system_prompt_template.id"))
     rouge_score = Column(Float)
     response = Column(Text)
     created_at = Column(
@@ -275,7 +280,12 @@ class LlmPromptMapping(Base):
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
-
+    # 관계 정의
+    llm_model = relationship("LlmModel", back_populates="prompt_mappings")
+    prompt_template = relationship(
+        "SystemPromptTemplate",
+        back_populates="llm_mappings",
+    )
 
 class EmbeddingModel(Base):
     __tablename__ = "embedding_models"
@@ -336,17 +346,22 @@ class SecurityLevelKeywordsTask(Base):
     keyword = Column(Text, nullable=False)
 
 
-# 누락된 테이블들 추가
 class SystemPromptVariable(Base):
     __tablename__ = "system_prompt_variables"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     type = Column(
         Text, nullable=False
-    )  # 'integer', 'text', 'datetime', 'float', 'bool'
-    key = Column(Text, nullable=False)
-    value = Column(Text)
-    description = Column(Text, nullable=False)
+    )  # 'integer', 'text', 'datetime'
+    required = Column(Boolean, server_default=text("false"))
+    key = Column(Text, nullable=False) # 사용자측에 표시될 키값
+    value = Column(Text) # 관리자 테스트 시 사용될 value
+    description = Column(Text, nullable=False) # 사용자측에 표시될 설명
+    template_mappings = relationship(
+        "PromptMapping",
+        back_populates="variable",
+        cascade="all, delete-orphan",
+    )
 
 
 class SystemPromptTemplate(Base):
@@ -355,14 +370,22 @@ class SystemPromptTemplate(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(
         Text, nullable=False
-    )  # Business_Trip_Plan, Meeting_Minutes, Business_Trip_Report
+    )  #CHECK business_trip, meeting, report
     category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
-    content = Column(Text, nullable=False)  # 시스템 프롬프트
-    sub_content = Column(Text)  # 유저 프롬프트
-    required_vars = Column(Text)  # JSON 배열
+    system_prompt = Column(Text, nullable=False)  # 시스템 프롬프트
+    user_prompt = Column(Text)  # 유저 프롬프트 - DocGen 카테고리만 적용될 부분
     is_default = Column(Boolean, server_default=text("false"))
     is_active = Column(Boolean, server_default=text("true"))
-
+    variable_mappings = relationship(
+        "PromptMapping",
+        back_populates="template",
+        cascade="all, delete-orphan",
+    )
+    llm_mappings = relationship(
+        "LlmPromptMapping",
+        back_populates="prompt_template",
+        cascade="all, delete-orphan",
+    )
 
 class PromptMapping(Base):
     __tablename__ = "prompt_mapping"
@@ -376,16 +399,17 @@ class PromptMapping(Base):
     )
     variable_id = Column(
         Integer,
-        ForeignKey("system_prompt_variables.id", ondelete="CASCADE"),
+        ForeignKey("system_prompt_variables.id", onupdate="CASCADE"),
         nullable=False,
-    )  # 변하는 프롬프트트
+    ) 
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
-
+    template = relationship("SystemPromptTemplate", back_populates="variable_mappings")
+    variable = relationship("SystemPromptVariable", back_populates="template_mappings")
 
 # 누락된 테이블들 추가
 class CacheData(Base):
