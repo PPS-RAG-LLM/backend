@@ -34,8 +34,8 @@
 
 # 파인튜닝 테스트
 {
-  "category": "doc_gen",
-  "subcategory": "doc_gen",
+  "category": "qa",
+  "subcategory": "qa",
   "baseModelName": "Qwen2.5-7B-Instruct-1M",
   "saveModelName": "Qwen2.5-7B-Instruct-1M-질의응답",
   "systemPrompt": "위 글을 참고하여 대답해 주세요",
@@ -53,7 +53,7 @@
   "category": "summary",
   "subcategory": "summary",
   "baseModelName": "gpt-oss-20b",
-  "saveModelName": "gpt-oss-20b-summary",
+  "saveModelName": "gpt_oss_20b_summary-요약",
   "systemPrompt": "위 글을 참고하여 요약해 주세요",
   "batchSize": 4,
   "epochs": 3,

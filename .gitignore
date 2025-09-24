@@ -1,5 +1,5 @@
 /unsloth_compiled_cache/
-
+storage/train_data/**/*.csv
 __pycache__/
 *.py[cod]
 *.egg
