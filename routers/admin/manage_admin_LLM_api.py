@@ -7,12 +7,10 @@ from service.admin.manage_admin_LLM import (
     ModelLoadBody,
     CreatePromptBody,
     UpdatePromptBody,
-    CompareModelsBody,
     ActivePromptBody,
     # set_topk_settings,
     get_model_list,
     load_model,
-    compare_models,
     list_prompts,
     create_prompt,
     get_prompt,
@@ -20,18 +18,12 @@ from service.admin.manage_admin_LLM import (
     delete_prompt,
     test_prompt,
     # DownloadModelBody,
-    InferBody,
     # download_model,
-    infer_local,
     # InsertBaseModelBody,
     # insert_base_model,
     unload_model_for_category,
     get_active_prompt,
     set_active_prompt,
-    DefaultModelBody,
-    set_default_model,
-    get_default_model,
-    select_model_for_task,
 )
 
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM"], responses={200: {"description": "Success"}})
@@ -44,9 +36,9 @@ router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM"], responses={200: {
 
 # 파인튜닝 관련 API는 routers/admin/LLM_finetuning_api.py 에서 제공합니다.
 
-@router.post("/infer", summary="로컬 모델로 단발 추론 실행(테스트용)")
-def infer_route(body: InferBody):
-    return infer_local(body)
+@router.post("/prompt/{prompt_id}", summary="프롬프트 테스트 실행(치환/추론/평가 로그 적재)")
+def test_prompt_route(prompt_id: int, body: dict | None = None):
+    return test_prompt(prompt_id, body)
 
 # @router.post("/settings", summary="RAG에서 반환할 문서 수(topK) 설정")
 # def set_settings(body: TopKSettingsBody):
@@ -71,22 +63,7 @@ def model_unload(body: ModelLoadBody = ...):
     from service.admin.manage_admin_LLM import unload_model
     return unload_model(body.modelName)
 
-@router.get("/compare-models", summary="최근 평가 결과 기준 모델 비교 목록")
-def compare_models_list(
-    category: str = Query(..., description="qa | doc_gen | summary"),
-    subcategory: str | None = Query(None, description="세부 테스크 (doc_gen 확장 포함)"),
-    modelId: int | None = Query(None),
-    promptId: int | None = Query(None),
-    prompt: str | None = Query(None, description="치환 완료된 프롬프트 원문(옵션)"),
-):
-    payload = CompareModelsBody(
-        category=category,
-        subcategory=subcategory,
-        modelId=modelId,
-        promptId=promptId,
-        prompt=prompt,
-    )
-    return compare_models(payload)
+## moved to /v1/test/llm
 
 # ---------- 프롬프트(6개 구조) ----------
 # 카테고리: doc_gen | summary | qna(=qa)
@@ -119,9 +96,7 @@ def update_prompt_route(prompt_id: int, body: UpdatePromptBody = ...):
 def delete_prompt_route(prompt_id: int):
     return delete_prompt(prompt_id)
 
-@router.post("/prompt/{prompt_id}", summary="프롬프트 테스트 실행(치환/추론/평가 로그 적재)")
-def test_prompt_route(prompt_id: int, body: dict | None = None):
-    return test_prompt(prompt_id, body)
+## moved to /v1/test/llm
 
 # ---------- 사용자 선택(활성 프롬프트) ----------
 @router.get("/prompt/active", summary="현재 선택된(활성) 프롬프트 조회")
@@ -135,24 +110,4 @@ def get_active_prompt_route(
 def set_active_prompt_route(body: ActivePromptBody):
     return set_active_prompt(body)
 
-# ===== 기본 모델(테스크/서브테스크) 매핑 =====
-@router.get("/settings/default-model", summary="(카테고리/서브테스크) 기본 모델 조회")
-def get_default_model_route(
-    category: str = Query(..., description="qa | qna | doc_gen | summary"),
-    subcategory: str | None = Query(None, description="doc_gen 서브테스크")
-):
-    return get_default_model(category, subcategory)
-
-@router.post("/settings/default-model", summary="(카테고리/서브테스크) 기본 모델 지정(단일 보장)")
-def set_default_model_route(body: DefaultModelBody):
-    return set_default_model(body)
-
-@router.get("/settings/select-model", summary="테스크별 디폴트 모델 확인(프롬프트 테이블 기반)")
-def select_model_route(
-    category: str = Query(..., description="qa | qna | doc_gen | summary"),
-    subcategory: str | None = Query(None, description="doc_gen 서브테스크")
-):
-    from service.admin.manage_admin_LLM import SelectModelQuery, get_selected_model
-    query = SelectModelQuery(category=category, subcategory=subcategory)
-    return get_selected_model(query)
-
+## 기본 모델 관련 엔드포인트는 /v1/test/llm로 이동
