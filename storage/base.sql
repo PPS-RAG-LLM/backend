@@ -240,5 +240,32 @@ VALUES
      'llm응답 예시-이슈 보고서 초안입니다. 요청 사항을 재확인하세요.',
      '2025-09-01 10:40:00', '2025-09-01 10:40:00');
 
+-- fine_tune_datasets 테이블 예시 데이터
+INSERT INTO
+    "fine_tune_datasets" (
+        "id",
+        "name", 
+        "category",
+        "prompt_id",
+        "path",
+        "record_count",
+        "created_at",
+        "updated_at"
+    )
+VALUES 
+    -- doc_gen 카테고리 데이터셋 (각 프롬프트별로)
+    (1, 'business_trip_dataset_v1', 'doc_gen', 101, './storage/train_data/business_trip_v1.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (2, 'business_trip_dataset_v2', 'doc_gen', 102, './storage/train_data/business_trip_v2.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (3, 'meeting_formal_dataset', 'doc_gen', 103, './storage/train_data/meeting_formal.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (4, 'meeting_decision_dataset', 'doc_gen', 104, './storage/train_data/meeting_decision.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (5, 'meeting_action_dataset', 'doc_gen', 105, './storage/train_data/meeting_action.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (6, 'report_weekly_dataset', 'doc_gen', 106, './storage/train_data/report_weekly.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (7, 'report_risk_dataset', 'doc_gen', 107, './storage/train_data/report_risk.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    (8, 'report_issue_dataset', 'doc_gen', 108, './storage/train_data/report_issue.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    -- summary 카테고리 데이터셋 (프롬프트 ID 5)
+    (9, 'summary_general_dataset', 'summary', 5, './storage/train_data/summary_general.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
+    -- qa 카테고리 데이터셋 (프롬프트 ID 100)
+    (10, 'qa_general_dataset', 'qa', 100, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
+
 
 COMMIT;

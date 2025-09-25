@@ -522,14 +522,22 @@ class FineTuneDataset(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(Text, nullable=False)
     category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
+    prompt_id = Column(
+        Integer,
+        ForeignKey("system_prompt_template.id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=True,  # qa 카테고리는 prompt_id가 없을 수 있음
+    )
     path = Column(Text, nullable=False)
-    record_count = Column(Integer)
+    record_count = Column(Integer, server_default=text("0"))
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+    
+    # 관계 정의
+    prompt_template = relationship("SystemPromptTemplate")
 
 
 class FineTuneJob(Base):
