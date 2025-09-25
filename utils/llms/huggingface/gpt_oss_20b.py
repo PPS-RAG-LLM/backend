@@ -31,7 +31,7 @@ def load_gpt_oss_20b(model_dir):
     model = AutoModelForCausalLM.from_pretrained(
         model_dir, 
         device_map="auto",          # 모델 분산 처리
-        torch_dtype= torch.bfloat16,      # gpt-oss-20b는 기본이 MXFP4 양자화된 MoE 경로이다.
+        torch_dtype=torch.bfloat16, # gpt-oss-20b는 기본이 MXFP4 양자화된 MoE 경로이다.
                                     # Triton 커널이 bf16 입력을 전제해(tl.static_assert(x_format == "bf16")) 
                                     # FP16로 로드하면 컴파일/런타임이 깨짐. 
         trust_remote_code=True,     # 모델 코드 신뢰

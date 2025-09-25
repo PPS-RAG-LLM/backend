@@ -8,13 +8,22 @@ import time
 import gc
 import logging
 import importlib
+import re
 from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
+from glob import glob
 
 from pydantic import BaseModel, Field
 from utils.database import get_db as _get_db
+
+import torch  # device_map='auto' 사용 시 필요
+from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
+try:
+    from peft import PeftModel
+except Exception:
+    PeftModel = None  # peft 미설치 환경 보호
 
 # ===== In-memory temp settings (kept for backward-compat) =====
 _DEFAULT_TOPK: int = 5
@@ -210,6 +219,137 @@ def _db_set_active_by_path(rel_path: str, active: bool) -> None:
 
 # no-op: initialization is handled in main.py via init_db()
 
+
+# ===== 새로운 로딩 로직 (일원화) =====
+def _is_pathlike(s: str) -> bool:
+    if not s: 
+        return False
+    return os.path.isabs(s) or s.startswith("./") or s.startswith("../") or "/" in s
+
+def _detect_gguf(base: str) -> Tuple[bool, Optional[str]]:
+    """base가 .gguf 파일이거나 gguf를 포함한 디렉터리인지 판별."""
+    if not base:
+        return False, None
+    if base.endswith(".gguf") and os.path.exists(base):
+        return True, base
+    if os.path.isdir(base):
+        files = sorted(glob(os.path.join(base, "*.gguf")))
+        if files:
+            return True, files[0]
+    return False, None
+
+def _fetch_llm_and_ft(conn, model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
+    r = cur.fetchone()
+    llm = dict(r) if r else None
+    if not llm:
+        return None, None
+    # 최신 활성 FT 1건 우선, 없으면 최신 1건
+    cur.execute("""
+        SELECT * FROM fine_tuned_models
+         WHERE model_id=? AND IFNULL(is_active,1)=1
+         ORDER BY id DESC LIMIT 1
+    """, (llm["id"],))
+    ft = cur.fetchone()
+    if not ft:
+        cur.execute("""
+            SELECT * FROM fine_tuned_models
+             WHERE model_id=?
+             ORDER BY id DESC LIMIT 1
+        """, (llm["id"],))
+        ft = cur.fetchone()
+    return llm, (dict(ft) if ft else None)
+
+def _choose_artifacts(llm: dict, ft: Optional[dict]) -> Dict[str, Any]:
+    """DB 컬럼만 사용하여 로딩 아티팩트 결정"""
+    llm_type = str(llm.get("type") or "base").upper()
+    base = (llm.get("model_path") or "").strip()
+    adapter = (llm.get("mather_path") or "").strip()  # 오탈자 컬럼 그대로 지원
+
+    if ft:
+        ft_type = str(ft.get("type") or "").upper()
+        ft_base = (ft.get("base_model_path") or "").strip()
+        ft_repo = (ft.get("provider_model_id") or "").strip()
+        ft_adapter = (ft.get("lora_weights_path") or "").strip()
+
+        if ft_type in ("LORA", "QLORA"):
+            base = ft_base or base
+            adapter = ft_adapter or adapter
+            llm_type = ft_type  # 실행 타입을 FT 타입으로
+        elif ft_type in ("FULL", "BASE"):
+            # FULL/BASE 결과물 우선순위: provider_model_id(경로/레포) > base_model_path > llm.model_path
+            if _is_pathlike(ft_repo) or ("/" in ft_repo and not os.path.exists(ft_repo)):  # HF repo 형태 지원
+                base = ft_repo
+            else:
+                base = ft_base or base
+            adapter = ""  # FULL/BASE은 어댑터 불필요
+
+    return {
+        "base": base,                      # 로드 대상 (로컬 디렉터리 / .gguf / HF repo id)
+        "adapter": adapter or None,        # LoRA/QLoRA 어댑터 경로(있을 때만)
+        "exec_type": llm_type,             # 'BASE' | 'LORA' | 'QLORA' | 'FULL'
+        "provider": llm.get("provider"),
+        "name": llm.get("name"),
+    }
+
+def _load_with_transformers(base_ref: str, adapter_path: Optional[str], exec_type: str):
+    # 로컬 디렉터리면 config.json 확인, 아니면 HF repo로 간주
+    if os.path.isdir(base_ref):
+        cfg = os.path.join(base_ref, "config.json")
+        if not os.path.exists(cfg):
+            raise FileNotFoundError(f"[preload] config.json not found in local dir: {base_ref}")
+    else:
+        # HF repo 검증(오프라인 환경이면 캐시로 해결)
+        AutoConfig.from_pretrained(base_ref)
+
+    tok = AutoTokenizer.from_pretrained(base_ref, use_fast=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        base_ref,
+        torch_dtype="auto",
+        device_map="auto",
+    )
+
+    if exec_type in ("LORA", "QLORA"):
+        if not adapter_path:
+            raise RuntimeError("adapter path missing for LORA/QLORA")
+        if PeftModel is None:
+            raise RuntimeError("peft not available for LORA/QLORA loading")
+        # 디렉터리/파일 유효성
+        if not os.path.isdir(adapter_path) and not os.path.exists(adapter_path):
+            raise FileNotFoundError(f"adapter not found: {adapter_path}")
+        model = PeftModel.from_pretrained(model, adapter_path)
+
+    return {"model": model, "tokenizer": tok}
+
+def _load_with_llama_cpp(gguf_path: str):
+    # llama.cpp 바인딩 연결 지점
+    raise NotImplementedError("llama.cpp loader is not wired here; bind your implementation.")
+
+def load_model_unified(model_name: str):
+    """통합 모델 로더: 이름 → 메타 조회 → 경로 결정 → 로드"""
+    conn = _connect()
+    try:
+        llm, ft = _fetch_llm_and_ft(conn, model_name)
+    finally:
+        conn.close()
+    if not llm:
+        raise RuntimeError(f"unknown model: {model_name}")
+
+    art = _choose_artifacts(llm, ft)
+    base = art["base"]
+    adapter = art["adapter"]
+    exec_type = art["exec_type"]
+
+    if not base:
+        raise RuntimeError(f"model_path is empty for model: {model_name}")
+
+    is_gguf, gguf_path = _detect_gguf(base)
+    if is_gguf:
+        return _load_with_llama_cpp(gguf_path)
+
+    # Transformers 경로/레포 로드
+    return _load_with_transformers(base, adapter, exec_type)
 
 # ===== Utilities =====
 def _json(obj: Any) -> str:
@@ -913,24 +1053,24 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 #     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
 #     return {"success": True}
 
-
-def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str, Any]:
+def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
-    sub = (subcategory or "").strip()
-    
+    sub = (subcategory or "").strip()   # = system_prompt_template.name
+
     conn = _connect()
     cur = conn.cursor()
     try:
         if cat == "doc_gen" and sub:
-            # system_prompt_template.name = sub 에 매핑된 모델만 반환
+            # 1) category+name으로 활성 템플릿 1건(디폴트 우선) 선정
             cur.execute(
                 """
                 WITH t AS (
                   SELECT id
                     FROM system_prompt_template
                    WHERE category = ?
-                     AND lower(name) = lower(?)
+                     AND name = ?
                      AND IFNULL(is_active,1) = 1
+                   ORDER BY IFNULL(is_default,0) DESC, id DESC
                    LIMIT 1
                 )
                 SELECT
@@ -938,31 +1078,25 @@ def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str
                   m.name,
                   m.provider,
                   m.category,
-                  m.is_active AS isActive,
+                  m.is_active         AS isActive,
                   m.trained_at,
                   m.created_at,
-                  CASE WHEN d.model_id = m.id THEN 1 ELSE 0 END AS isDefaultForTask,
-                  pm.rouge_score
+                  IFNULL(pm.rouge_score,-1) AS rougeScore
                 FROM llm_models m
-                JOIN t ON 1=1
                 JOIN llm_prompt_mapping pm
-                  ON pm.llm_id = m.id
-                 AND pm.prompt_id = t.id
-                LEFT JOIN llm_task_defaults d
-                  ON d.category = ?
-                 AND IFNULL(d.subcategory,'') = IFNULL(lower(?),'')
-                 AND d.model_id = m.id
+                  ON pm.llm_id   = m.id
+                 AND pm.prompt_id = (SELECT id FROM t)
                 WHERE m.is_active = 1
                   AND (m.category = 'doc_gen' OR m.category = 'all')
                 ORDER BY IFNULL(pm.rouge_score,-1) DESC,
                          m.trained_at DESC,
                          m.id DESC
                 """,
-                (cat, sub, cat, sub),
+                (cat, sub),
             )
             rows = cur.fetchall()
         else:
-            # 기존 동작: 카테고리 또는 all
+            # 카테고리 전체 조회(all 포함) – 종전 로직 유지
             cur.execute(
                 """
                 SELECT
@@ -980,36 +1114,23 @@ def get_model_list(category: str, subcategory: Optional[str] = None) -> Dict[str
     finally:
         conn.close()
 
-    # Compute loaded set by resolved paths and basenames (category-agnostic)
-    try:
-        loaded_keys = set(_MODEL_MANAGER.list_loaded()) | set(_ADAPTER_LOADED)
-        basenames = {os.path.basename(k) for k in loaded_keys}
-        loaded_keys |= basenames
-    except Exception:
-        logging.getLogger(__name__).exception("failed to gather loaded keys")
-        loaded_keys = set()
-
+    # 상위 1개(rougeScore 최대)를 active=True로 표시
     models = []
-    for r in rows:
-        name = r["name"]
-        cand = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name) or name
-        loaded_flag = (cand in loaded_keys) or (os.path.basename(cand) in loaded_keys) or _is_model_loaded(name)
+    for i, r in enumerate(rows):
+        cols = r.keys()  # 컬럼 목록 확인
+        rouge = r["rougeScore"] if "rougeScore" in cols else None
         
         models.append({
             "id": r["id"],
-            "name": name,
-            "loaded": bool(loaded_flag),
-            "active": bool(r.get("isDefaultForTask", 0)) if cat == "doc_gen" and sub else False,
+            "name": r["name"],
+            "loaded": False,
+            "active": (i == 0 and cat == "doc_gen" and bool(sub)),  # doc_gen+서브카테고리일 때만 1위 True
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),
+            "isActive": bool(r["isActive"]),   # llm_models.is_active
             "createdAt": r["created_at"],
-            "rougeScore": r.get("rouge_score") if cat == "doc_gen" and sub else None,
+            "rougeScore": rouge,
         })
-
-    if not models:
-        models = [{"id": 0, "name": "None", "loaded": False, "active": False}]
-    
     return {"category": cat, "models": models}
 
 
