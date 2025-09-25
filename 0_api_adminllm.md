@@ -1,4 +1,20 @@
+==/v1/test/llm/runs/ensure==
 
+{
+  "category": "doc_gen",
+  "subcategory": "business_trip",
+  "modelName": "Qwen3-8B",
+  "userPrompt": "부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.",
+  "promptId": 101,
+  "pdfList": [
+    "string"
+  ],
+  "max_tokens": 512,
+  "temperature": 0.7
+}
+
+
+====
 
 /v1/admin/llm/model/insert-base
 {
