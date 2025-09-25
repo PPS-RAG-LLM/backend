@@ -89,3 +89,31 @@ def repo_create_summary_template(
         except IntegrityError as exc:
             session.rollback()
             raise DatabaseError(f"Summary Prompt template create failed: {exc}") from exc
+
+def repo_update_summary_template(
+    template_id: int, system_prompt: str, user_prompt: Optional[str] = ""
+    )-> Optional[Dict[str, str]]:
+    with get_session() as session:
+        template = session.get(SystemPromptTemplate, template_id)
+        if not template or template.category != "summary":
+            return None
+        template.system_prompt = system_prompt
+        template.user_prompt = user_prompt
+        session.commit()
+        session.refresh(template)
+        return {
+            "id": template.id,
+            "name": template.name,
+            "system_prompt": template.system_prompt,
+            "user_prompt": template.user_prompt 
+        }
+
+def repo_delete_summary_template(template_id: int) -> bool:
+    with get_session() as session:
+        template = session.get(SystemPromptTemplate, template_id)
+        if not template or template.category != "summary":
+            return False
+        
+        session.delete(template)
+        session.commit()
+        return True

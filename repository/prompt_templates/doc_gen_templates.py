@@ -146,3 +146,54 @@ def repo_create_doc_gen_template(
                 session.rollback()
                 raise DatabaseError(f"QA Prompt template create failed: {exc}") from exc
     
+def repo_update_doc_gen_template(
+    template_id: int, name: str, system_prompt: str, user_prompt: Optional[str], variables: Optional[List[Dict[str, object]]]
+    ):
+    with get_session() as session:
+        template = session.get(SystemPromptTemplate, template_id)
+        if not template or template.category != "doc_gen":
+            return None
+        template.name = name
+        template.system_prompt = system_prompt
+        template.user_prompt = user_prompt
+
+        for mapping in list(template.variable_mappings):
+            if mapping.variable:
+                session.delete(mapping.variable)
+            session.delete(mapping)
+        session.flush()
+
+        for var in variables or []:
+            variable = SystemPromptVariable(
+                type=var["type"],
+                key=var["key"],
+                value=var.get("value"),
+                description=var["description"],
+                required=var.get("required", False),
+            )
+            template.variable_mappings.append(PromptMapping(variable=variable))
+
+        session.commit()
+        session.refresh(template)
+        return {
+            "id": template.id,
+            "name": template.name,
+            "system_prompt": template.system_prompt,
+            "user_prompt": template.user_prompt,
+            "variables": variables or [],
+        }
+
+def repo_delete_doc_gen_template(template_id: int) -> bool:
+    with get_session() as session:
+        template = session.get(SystemPromptTemplate, template_id)
+        if not template or template.category != "doc_gen":
+            return False
+
+        for mapping in list(template.variable_mappings):
+            if mapping.variable:
+                session.delete(mapping.variable)
+            session.delete(mapping)
+
+        session.delete(template)
+        session.commit()
+        return True
