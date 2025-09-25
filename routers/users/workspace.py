@@ -78,7 +78,7 @@ class WorkspaceDetailResponse(BaseModel):
     temperature: Optional[float] = None
     updatedAt: str
     chatHistory: int
-    systemPrompt: Optional[str] = None
+    systemPrompt: Optional[str] = ""
     documents: List[Any] = []
     threads: List[Any] = []
 
@@ -87,12 +87,12 @@ class WorkspaceUpdateBody(BaseModel):
     name: Optional[str] = None
     temperature: Optional[float] = None
     chatHistory: Optional[int] = None
-    systemPrompt: Optional[str] = None
+    systemPrompt: Optional[str] = ""
 
 
 class WorkspaceUpdateResponse(BaseModel):
     workspace: WorkspaceDetailResponse
-    message: Optional[str] = None
+    message: Optional[str] = ""
 
 
 ### 워크스페이스 사용자별 목록 조회

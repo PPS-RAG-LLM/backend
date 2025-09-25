@@ -2,9 +2,10 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from service.users.doc_gen_templates import (
+from service.commons.doc_gen_templates import (
     list_doc_gen_templates,
     get_doc_gen_template,
+    list_doc_gen_templates_all,
 )
 
 router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
@@ -18,8 +19,8 @@ class VariableItem(BaseModel):
 class TemplateListItem(BaseModel):
     id: int
     name: str
-    content: str
-    sub_content: str | None = None
+    system_prompt: str
+    user_prompt: str | None = None
     variables: List[VariableItem]
 
 class TemplateListResponse(BaseModel):
@@ -28,13 +29,18 @@ class TemplateListResponse(BaseModel):
 class TemplateContentResponse(BaseModel):
     id: int
     name: str
-    content: str
-    sub_content: str | None = None
+    system_prompt: str
+    user_prompt: str | None = None
     variables: List[VariableItem]
 
-@router.get("/templates", response_model=TemplateListResponse, summary="문서생성용 템플릿 전체 목록(상세+변수 포함)")
+@router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 관리자 측에서 기본값으로 정해진 문서생성용 템플릿 각 세부 테스크 목록")
 def list_doc_gen_templates_route():
     items = list_doc_gen_templates()
+    return {"templates": items}
+
+@router.get("/templates/all", response_model=TemplateListResponse, summary="관리자용 | 문서생성용 템플릿 전체 목록(상세+변수+score 포함)")
+def list_doc_gen_templates_all_route():
+    items = list_doc_gen_templates_all()
     return {"templates": items}
 
 @router.get("/template/{template_id}", response_model=TemplateContentResponse, summary="문서생성 템플릿 단건(상세+변수)")

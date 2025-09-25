@@ -4,13 +4,13 @@ from sqlalchemy import select
 from utils.database import get_session
 from storage.db_models import SystemPromptTemplate
 
-def repo_list_summary_templates() -> List[Dict[str, str]]:
+def repo_list_summary_templates(default_only:bool) -> List[Dict[str, str]]:
     with get_session() as session:
         stmt = (
             select(
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
-                SystemPromptTemplate.content,
+                SystemPromptTemplate.system_prompt,
             )
             .where(
                 SystemPromptTemplate.category == "summary",
@@ -18,8 +18,11 @@ def repo_list_summary_templates() -> List[Dict[str, str]]:
             )
             .order_by(SystemPromptTemplate.id.desc())
         )
+        if default_only:
+            stmt = stmt.where(SystemPromptTemplate.is_default == True)
         rows = session.execute(stmt).all()
-        return [{"id": r.id, "name": r.name, "content": r.content} for r in rows]
+        return [{"id": r.id, "name": r.name, "system_prompt": r.system_prompt} for r in rows]
+        
 
 def repo_get_summary_template_by_id(template_id: int) -> Optional[Dict[str, str]]:
     with get_session() as session:
@@ -27,7 +30,7 @@ def repo_get_summary_template_by_id(template_id: int) -> Optional[Dict[str, str]
             select(
                 SystemPromptTemplate.id,
                 SystemPromptTemplate.name,
-                SystemPromptTemplate.content,
+                SystemPromptTemplate.system_prompt,
             )
             .where(
                 SystemPromptTemplate.id == template_id,
@@ -39,4 +42,4 @@ def repo_get_summary_template_by_id(template_id: int) -> Optional[Dict[str, str]
         row = session.execute(stmt).first()
         if not row:
             return None
-        return {"id": row.id, "name": row.name, "content": row.content}
+        return {"id": row.id, "name": row.name, "system_prompt": row.system_prompt}

@@ -46,14 +46,18 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     if not model:
         raise InternalServerError("no default llm model for category")
     
-    system_prompt = get_default_system_prompt_content(category)
+    if category == "qa":
+        system_prompt = get_default_system_prompt_content(category)
+        chat_history  = defaults["chat_history"]
+    else:
+        system_prompt = None
+        chat_history  = 0
 
     provider                = model["provider"]
     chat_model              = model["chat_model"]
     # 3) 요청 본문으로 오버라이드 (provider/chat_model은 오버라이드 불가)
     chat_mode               = payload.get("chatMode")
     temperature             = defaults["temperature"]
-    chat_history            = defaults["chat_history"]
     similarity_threshold    = defaults["similarity_threshold"]
     top_n                   = defaults["top_n"]
     query_refusal_response  = defaults["query_refusal_response"]
@@ -82,13 +86,16 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
 
+    logger.debug(f"Creating default thread for {category} workspace: name={name}")
     if category =="qa":
-        logger.debug(f"Creating default thread for qa workspace: name={name}")
         thread_name = f"thread-{name}"
         thread_slug = generate_thread_slug(thread_name)
         logger.info(f"thread_name: {thread_name}, thread_slug: {thread_slug}")
         thread_id = create_default_thread(user_id=user_id, name=thread_name, thread_slug=thread_slug, workspace_id=ws_id)
         logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
+    else:
+        logger.debug(f"No default thread for {category} workspace: name={name}")
+        thread_id = None
 
 
     ws = get_workspace_by_id(ws_id)
@@ -103,8 +110,8 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "createdAt": ws["created_at"],
         "temperature": ws["temperature"],
         "UpdatedAt": ws["updated_at"],
-        "chatHistory": ws["chat_history"],
-        "systemPrompt": ws["system_prompt"],
+        "chatHistory": ws["chat_history"] ,
+        "systemPrompt": ws["system_prompt"] or "",
     }
     logger.info({"workspace_created": result})
     return result
@@ -128,7 +135,7 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
             "temperature": ws["temperature"],
             "UpdatedAt": ws["updated_at"],
             "chatHistory": ws["chat_history"],
-            "systemPrompt": ws["system_prompt"],
+            "systemPrompt": ws["system_prompt"] or "",
             "threads": [
                 {
                     "id": thread["id"],

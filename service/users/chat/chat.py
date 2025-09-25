@@ -8,8 +8,8 @@ from repository.users.workspace_chat import (
     get_chat_history_by_thread_id,
     insert_chat_history,
 )
-from service.users.doc_gen_templates import get_doc_gen_template
-from service.users.summary_templates import get_summary_template
+from service.commons.doc_gen_templates import get_doc_gen_template
+from service.commons.summary_templates import get_summary_template
 from utils import logger
 import json, time
 from .retrieval import (
