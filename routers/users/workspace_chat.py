@@ -6,7 +6,7 @@ from service.users.chat import (
     stream_chat_for_workspace,
     preflight_stream_chat_for_workspace,
 )
-from service.users.doc_gen_templates import get_doc_gen_template
+from service.commons.doc_gen_templates import get_doc_gen_template
 from utils import logger
 from errors import BadRequestError
 import time

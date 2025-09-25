@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
-from service.users.summary_templates import (
+from service.commons.summary_templates import (
     list_summary_templates,
+    list_summary_templates_all,
     get_summary_template,
 )
 
@@ -21,9 +22,14 @@ class TemplateContentResponse(BaseModel):
     name: str
     system_prompt: str
 
-@router.get("/templates", response_model=TemplateListResponse, summary="요약용 템플릿 전체 목록(상세 포함)")
+@router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 요약용 템플릿 전체 목록(상세 포함)")
 def list_summary_templates_route():
     items = list_summary_templates()
+    return {"templates": items}
+    
+@router.get("/templates/all", response_model=TemplateListResponse, summary="관리자용 | 요약용 템플릿 전체 목록(상세 포함)")
+def list_summary_templates_route():
+    items = list_summary_templates_all()
     return {"templates": items}
 
 @router.get("/template/{template_id}", response_model=TemplateContentResponse, summary="선택 템플릿 콘텐츠 조회")

@@ -1,6 +1,6 @@
 # /home/work/CoreIQ/yb/backend/service/users/doc_gen_templates.py
 from typing import List, Dict, Optional
-from repository.users.doc_gen_templates import (
+from repository.prompt_templates.doc_gen_templates import (
     repo_list_doc_gen_templates,
     repo_get_doc_gen_template_by_id_with_vars,
 )
