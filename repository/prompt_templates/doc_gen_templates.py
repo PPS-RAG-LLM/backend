@@ -1,9 +1,13 @@
 # /home/work/CoreIQ/yb/backend/repository/users/doc_gen_templates.py
 from typing import List, Dict, Optional
-from sqlalchemy import select
+from sqlalchemy import select, true
+from sqlalchemy.exc import IntegrityError
 from utils.database import get_session
 from storage.db_models import SystemPromptTemplate, PromptMapping, SystemPromptVariable
+from errors import DatabaseError
+from utils import logger
 
+logger = logger(__name__)
 def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
     with get_session() as session:
         tmpl_stmt = (
@@ -101,3 +105,44 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
             "user_prompt": tmpl.user_prompt,
             "variables": variables,
         }
+
+def repo_create_doc_gen_template(
+    name, system_prompt, user_prompt, variables
+):
+    with get_session() as session:
+        try :
+            template = SystemPromptTemplate(
+                name= name,
+                category = "doc_gen",
+                system_prompt = system_prompt,
+                user_prompt = user_prompt,
+                is_default=False,
+                is_active=True,
+            )
+            session.add(template)
+            session.flush() # template.id 확보
+
+            for var in variables or []:
+                variable = SystemPromptVariable(
+                    type = var["type"],  # null 오류
+                    key = var["key"],
+                    value = var.get("value"), # 유연
+                    description=var["description"],
+                    required=True,
+                )
+                # variable_id 세팅
+                template.variable_mappings.append(PromptMapping(variable=variable))
+            session.commit()
+            session.refresh(template)
+
+            return {
+                "id": template.id,
+                "name": template.name,
+                "system_prompt": template.system_prompt,
+                "user_prompt": template.user_prompt,
+                "variables": variables or [],
+            }
+        except IntegrityError as exc:
+                session.rollback()
+                raise DatabaseError(f"QA Prompt template create failed: {exc}") from exc
+    

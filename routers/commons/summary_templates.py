@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import List
+from fastapi import APIRouter, Body, HTTPException
+from pydantic import BaseModel, Field
+from typing import Annotated, List, Optional
 from service.commons.summary_templates import (
+    generate_summary_template,
     list_summary_templates,
     list_summary_templates_all,
     get_summary_template,
@@ -13,6 +14,7 @@ class TemplateListItem(BaseModel):
     id: int
     name: str
     system_prompt: str
+    user_prompt: Optional[str]=""
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateListItem]
@@ -21,6 +23,7 @@ class TemplateContentResponse(BaseModel):
     id: int
     name: str
     system_prompt: str
+    user_prompt: Optional[str]=""
 
 @router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 요약용 템플릿 전체 목록(상세 포함)")
 def list_summary_templates_route():
@@ -37,4 +40,13 @@ def get_summary_template_route(template_id: int):
     row = get_summary_template(template_id)
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
-    return {"id": row["id"], "name": row["name"], "system_prompt": row["system_prompt"]}
+    return {"id": row["id"], "name": row["name"], "system_prompt": row["system_prompt"], "user_prompt": row["user_prompt"]}
+
+class CreateTemplateRequest(BaseModel):
+    system_prompt: str 
+    user_prompt: Optional[str] =""
+
+@router.post("/template", summary="관리자용 | QA 시스템 프롬프트 생성")
+def create_qa_system_prompt(body:CreateTemplateRequest):
+    item = generate_summary_template(body.system_prompt, body.user_prompt)
+    return {"templates": item}

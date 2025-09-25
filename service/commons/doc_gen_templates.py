@@ -3,6 +3,7 @@ from typing import List, Dict, Optional
 from repository.prompt_templates.doc_gen_templates import (
     repo_list_doc_gen_templates,
     repo_get_doc_gen_template_by_id_with_vars,
+    repo_create_doc_gen_template
 )
 
 def list_doc_gen_templates() -> List[Dict[str, str]]:
@@ -13,3 +14,6 @@ def list_doc_gen_templates_all() -> List[Dict[str, str]]:
 
 def get_doc_gen_template(template_id: int) -> Optional[Dict[str, object]]:
     return repo_get_doc_gen_template_by_id_with_vars(template_id)
+
+def generate_new_doc_gen_prompt(name, system_prompt, user_prompt, variables) ->  Optional[Dict[str, object]]:
+    return repo_create_doc_gen_template(name, system_prompt, user_prompt, variables)

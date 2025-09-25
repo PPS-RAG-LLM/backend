@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional
 from repository.prompt_templates.summary_templates import (
+    repo_create_summary_template,
     repo_list_summary_templates,
     repo_get_summary_template_by_id,
 )
@@ -14,3 +15,6 @@ def list_summary_templates_all() -> List[Dict[str, str]]:
 
 def get_summary_template(template_id: int) -> Optional[Dict[str, str]]:
     return repo_get_summary_template_by_id(template_id)
+
+def generate_summary_template(system_prompt:str, user_prompt: Optional[str]=""):
+    return repo_create_summary_template(system_prompt, user_prompt)
