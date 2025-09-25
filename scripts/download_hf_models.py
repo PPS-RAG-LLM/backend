@@ -84,6 +84,19 @@ def download_default_two(
                 "merges.txt",
             ],
         },
+        {
+            "model_id": "Qwen/Qwen3-8B",
+            "dst": os.path.join(base_dir, "Qwen3-8B"),
+            "include": [
+                "*.safetensors",             # 가중치/샤드 및 index.json 포함
+                "*.json",                    # config.json, generation_config.json 등
+                "tokenizer.*",               # tokenizer.json / tokenizer.model 등 변형 호환
+                "vocab.json",                # BPE 계열 호환 (존재 시)
+                "merges.txt",                # BPE merge 테이블 (존재 시)
+                "special_tokens_map.json",   # 존재 시
+                "chat_template*",            # 존재 시
+            ],
+        },
     ]
     out = {}
     for p in plans:
