@@ -584,3 +584,23 @@ class FineTunedModel(Base):
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+
+
+class LlmEvalRun(Base):
+    """LLM 평가 실행 결과 저장"""
+    __tablename__ = "llm_eval_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mapping_id = Column(Integer)  # llm_prompt_mapping.id (nullable)
+    llm_id = Column(Integer, ForeignKey("llm_models.id"), nullable=False)
+    prompt_id = Column(Integer, ForeignKey("system_prompt_template.id"), nullable=False)
+    category = Column(Text, nullable=False)  # qa | doc_gen | summary
+    subcategory = Column(Text)  # template.name (세부테스크)
+    model_name = Column(Text, nullable=False)  # 조회 편의용 중복 저장
+    prompt_text = Column(Text, nullable=False)  # 최종 입력 프롬프트(system + user + RAG)
+    user_prompt = Column(Text)  # 사용자가 추가 입력한 프롬프트
+    rag_refs = Column(Text)  # JSON: ["milvus://collection/id", "file://..."]
+    answer_text = Column(Text, nullable=False)  # 모델 생성 답변
+    acc_score = Column(Float, nullable=False, server_default=text("0"))  # 입력-답변 토큰 겹침 기반 acc
+    meta = Column(Text)  # JSON: 기타 정보(토큰수, latency 등)
+    created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)

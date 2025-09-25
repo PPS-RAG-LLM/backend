@@ -1,44 +1,37 @@
 from fastapi import APIRouter, Query
 
 from service.admin.manage_test_LLM import (
-    InferBody,
-    infer_local,
-    CompareModelsBody,
-    compare_models,
     DefaultModelBody,
     set_default_model,
     get_default_model,
     SelectModelQuery,
     get_selected_model,
+    # 신규
+    RunEvalBody,
+    run_eval_once,
+    EvalQuery,
+    list_eval_runs,
 )
 
 
 router = APIRouter(prefix="/v1/test/llm", tags=["Test LLM"], responses={200: {"description": "Success"}})
 
 
-@router.post("/infer", summary="로컬 모델로 단발 추론 실행(테스트용)")
-def infer_route(body: InferBody):
-    return infer_local(body)
+# ====== 신규: 평가 실행 및 조회 ======
+@router.post("/run", summary="선택된 템플릿/모델/사용자프롬프트(+RAG)로 단발 평가 실행 및 저장")
+def run_eval_route(body: RunEvalBody):
+    return run_eval_once(body)
 
-
-@router.get("/compare-models", summary="최근 평가 결과 기준 모델 비교 목록")
-def compare_models_list(
-    category: str = Query(..., description="qa | doc_gen | summary"),
-    subcategory: str | None = Query(None, description="세부 테스크 (doc_gen 확장 포함)"),
-    modelId: int | None = Query(None),
-    promptId: int | None = Query(None),
-    prompt: str | None = Query(None, description="치환 완료된 프롬프트 원문(옵션)"),
+@router.get("/runs", summary="평가 결과 조회(테스크/서브테스크/모델/사용자프롬프트 일치)")
+def list_eval_runs_route(
+    category: str = Query(..., description="qa | qna | doc_gen | summary"),
+    subcategory: str | None = Query(None, description="세부 테스크(=template.name)"),
+    modelName: str | None = Query(None, description="llm_models.name"),
+    userPrompt: str | None = Query(None, description="사용자 입력 프롬프트(완전일치 비교)"),
+    limit: int = Query(50, ge=1, le=200)
 ):
-    payload = CompareModelsBody(
-        category=category,
-        modelId=modelId,
-        promptId=promptId,
-        prompt=prompt,
-    )
-    return compare_models(payload)
-
-
-## moved to /v1/admin/llm
+    q = EvalQuery(category=category, subcategory=subcategory, modelName=modelName, userPrompt=userPrompt, limit=limit)
+    return list_eval_runs(q)
 
 
 # ===== 기본 모델(테스크/서브테스크) 매핑 =====
