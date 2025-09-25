@@ -267,5 +267,105 @@ VALUES
     -- qa 카테고리 데이터셋 (프롬프트 ID 100)
     (10, 'qa_general_dataset', 'qa', 100, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
 
+-- LLM 평가 실행 결과 테이블
+CREATE TABLE IF NOT EXISTS "llm_eval_runs" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "mapping_id" INTEGER,  -- llm_prompt_mapping.id (nullable)
+    "llm_id" INTEGER NOT NULL,  -- llm_models.id
+    "prompt_id" INTEGER NOT NULL,  -- system_prompt_template.id
+    "category" TEXT NOT NULL,  -- qa | doc_gen | summary
+    "subcategory" TEXT,  -- template.name (세부테스크)
+    "model_name" TEXT NOT NULL,  -- 조회 편의용 중복 저장
+    "prompt_text" TEXT NOT NULL,  -- 최종 입력 프롬프트(system + user + RAG)
+    "user_prompt" TEXT,  -- 사용자가 추가 입력한 프롬프트
+    "rag_refs" TEXT,  -- JSON: ["milvus://collection/id", "file://..."]
+    "answer_text" TEXT NOT NULL,  -- 모델 생성 답변
+    "acc_score" REAL NOT NULL DEFAULT 0,  -- 입력-답변 토큰 겹침 기반 acc
+    "meta" TEXT,  -- JSON: 기타 정보(토큰수, latency 등)
+    "pdf_list" TEXT,  -- PDF 파일 목록 JSON
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY("llm_id") REFERENCES "llm_models"("id"),
+    FOREIGN KEY("prompt_id") REFERENCES "system_prompt_template"("id")
+);
+
+-- 인덱스 생성
+CREATE INDEX IF NOT EXISTS "idx_eval_runs_cat_sub_model" 
+    ON "llm_eval_runs" ("category", "subcategory", "model_name");
+CREATE INDEX IF NOT EXISTS "idx_eval_runs_prompt" 
+    ON "llm_eval_runs" ("prompt_id", "llm_id", "mapping_id");
+
+INSERT INTO "llm_eval_runs" (
+    "id","mapping_id","llm_id","prompt_id","category","subcategory","model_name",
+    "prompt_text","user_prompt","rag_refs","pdf_list",
+    "answer_text","acc_score","meta","created_at"
+) VALUES
+-- business_trip 테스트
+(501, 401, 1, 101, 'doc_gen', 'business_trip', 'gpt-oss-20b',
+ '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.\n다음 주 일본 도쿄 출장 계획서를 작성해주세요. 기간은 2025년 10월 15일부터 17일까지이며, 목적은 파트너사 미팅입니다.',
+ '다음 주 일본 도쿄 출장 계획서를 작성해주세요. 기간은 2025년 10월 15일부터 17일까지이며, 목적은 파트너사 미팅입니다.',
+ '["milvus://test_20250924_123456/doc_tokyo_trip","file://business_travel_policy.pdf"]',
+ '["business_travel_policy.pdf","doc_tokyo_trip.pdf"]',
+ '# 일본 도쿄 출장 계획서\n\n## 출장 개요\n- 출장 제목: 파트너사 미팅\n- 출장 기간: 2025년 10월 15일(화) ~ 17일(목)\n- 출장 목적: 파트너사와의 협업 방안 논의\n\n## 일정\n### 10월 15일(화)\n- 07:00 인천공항 출발\n- 10:30 나리타공항 도착\n- 14:00 파트너사 방문\n\n### 10월 16일(수)\n- 09:00 기술 세미나 참석\n- 14:00 비즈니스 미팅\n\n### 10월 17일(목)\n- 10:00 최종 협의\n- 15:00 나리타공항 출발\n- 17:30 인천공항 도착',
+ 78.5, '{"tokens_input":95,"tokens_output":187,"latency_ms":2340}',
+ '2025-09-24 14:30:15'),
+
+(502, 402, 2, 101, 'doc_gen', 'business_trip', 'Qwen2.5-7B-Instruct-1M',
+ '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.\n부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
+ '부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
+ '["milvus://test_20250924_123456/doc_busan_visit","file://quarterly_review_template.pdf"]',
+ '["doc_busan_visit.pdf","quarterly_review_template.pdf"]',
+ '# 부산 지사 방문 계획서\n\n## 출장 개요\n- 출장 제목: 분기 실적 점검\n- 출장 기간: 2025년 10월 20일(일) ~ 21일(월)\n- 출장 목적: 3분기 실적 점검 및 4분기 계획 수립\n\n## 주요 일정\n### 10월 20일(일)\n- 09:00 KTX 서울역 출발\n- 12:30 부산역 도착\n- 14:00 부산 지사 방문\n- 15:00 실적 점검 회의\n\n### 10월 21일(월)\n- 09:00 4분기 계획 회의\n- 11:00 현장 점검\n- 14:00 KTX 부산역 출발\n- 17:30 서울역 도착',
+ 82.3, '{"tokens_input":98,"tokens_output":165,"latency_ms":1890}',
+ '2025-09-24 15:15:22'),
+
+-- meeting 테스트
+(503, 404, 1, 103, 'doc_gen', 'meeting', 'gpt-oss-20b',
+ '당신은 공식 회의록을 작성하는 AI 비서입니다. [회의명], [회의일시], [참석자], [주요논의] 항목을 활용해 명확한 회의록을 만드세요.\n2025년 9월 기획회의 회의록을 작성해주세요. 참석자는 김팀장, 박과장, 이대리이며, 신제품 출시 일정에 대해 논의했습니다.',
+ '2025년 9월 기획회의 회의록을 작성해주세요. 참석자는 김팀장, 박과장, 이대리이며, 신제품 출시 일정에 대해 논의했습니다.',
+ '["milvus://test_20250924_123456/doc_meeting_sept","file://product_launch_schedule.pdf"]',
+ '["doc_meeting_sept.pdf","product_launch_schedule.pdf"]',
+ '# 2025년 9월 기획회의 회의록\n\n## 회의 개요\n- 회의명: 신제품 출시 기획회의\n- 일시: 2025년 9월 24일(화) 14:00~16:00\n- 참석자: 김팀장, 박과장, 이대리\n\n## 주요 논의사항\n### 1. 신제품 출시 일정\n- 개발 완료: 2025년 11월 말\n- 베타 테스트: 2025년 12월 1일~15일\n- 정식 출시: 2026년 1월 초\n\n### 2. 마케팅 전략\n- 타겟 고객층 분석 완료\n- SNS 마케팅 예산 책정 필요\n\n## 결정사항\n1. 출시 일정 확정\n2. 마케팅팀과 협의 진행\n\n## 후속조치\n- 박과장: 마케팅팀 미팅 일정 조율\n- 이대리: 베타 테스트 계획 수립',
+ 85.7, '{"tokens_input":112,"tokens_output":203,"latency_ms":2650}',
+ '2025-09-24 16:45:33'),
+
+-- report 테스트
+(504, 407, 1, 106, 'doc_gen', 'report', 'gpt-oss-20b',
+ '당신은 주간 업무 보고서를 작성하는 AI 비서입니다. [보고제목], [보고기간], [성과요약], [주요지표]를 활용해 구조화된 보고서를 작성하세요.\n9월 3주차 개발팀 주간 보고서를 작성해주세요. 이번 주 주요 성과는 API 개발 완료와 테스트 커버리지 80% 달성입니다.',
+ '9월 3주차 개발팀 주간 보고서를 작성해주세요. 이번 주 주요 성과는 API 개발 완료와 테스트 커버리지 80% 달성입니다.',
+ '["milvus://test_20250924_123456/doc_weekly_dev","file://dev_team_metrics.pdf"]',
+ '["dev_team_metrics.pdf","doc_weekly_dev.pdf"]',
+ '# 개발팀 주간 보고서 (9월 3주차)\n\n## 보고 개요\n- 보고 기간: 2025년 9월 16일 ~ 22일\n- 보고 부서: 개발팀\n\n## 주요 성과\n### 1. API 개발 완료\n- 사용자 인증 API 구현 완료\n- 데이터 조회 API 성능 최적화\n- 문서화 작업 완료\n\n## 주요 지표\n| 항목 | 목표 | 실적 | 달성률 |\n|------|------|------|--------|\n| API 개발 | 8개 | 8개 | 100% |\n| 테스트 커버리지 | 75% | 80% | 107% |\n| 버그 수정 | 15개 | 18개 | 120% |\n\n## 향후 계획\n- 다음 주: 프론트엔드 연동 작업\n- 성능 모니터링 대시보드 구축',
+ 79.2, '{"tokens_input":128,"tokens_output":245,"latency_ms":3120}',
+ '2025-09-24 17:20:45'),
+
+-- summary 테스트
+(505, NULL, 2, 5, 'summary', '요약 프롬프트', 'Qwen2.5-7B-Instruct-1M',
+ '당신은 요약 전문 AI 어시스턴트 입니다. 사용자가 요청한 [Context]를 [USER_PROMPT]에 따라 요약하세요.\n다음 회의록을 3줄로 요약해주세요: 2025년 상반기 실적 검토 회의에서 매출 목표 달성률 105%를 기록했으며, 하반기 신사업 진출을 위한 예산 배정과 인력 충원 계획을 논의했습니다. 특히 AI 부문 투자 확대와 해외 시장 진출 전략을 중점적으로 다뤘습니다.',
+ '다음 회의록을 3줄로 요약해주세요: 2025년 상반기 실적 검토 회의에서 매출 목표 달성률 105%를 기록했으며, 하반기 신사업 진출을 위한 예산 배정과 인력 충원 계획을 논의했습니다. 특히 AI 부문 투자 확대와 해외 시장 진출 전략을 중점적으로 다뤘습니다.',
+ '["milvus://test_20250924_789012/doc_half_year_review"]',
+ '["doc_half_year_review.pdf"]',
+ '2025년 상반기 실적 검토 결과 매출 목표 달성률 105%를 달성했습니다. 하반기에는 신사업 진출을 위한 예산 배정과 인력 충원이 계획되어 있습니다. AI 부문 투자 확대와 해외 시장 진출이 핵심 전략으로 설정되었습니다.',
+ 73.8, '{"tokens_input":156,"tokens_output":64,"latency_ms":1540}',
+ '2025-09-24 18:10:12'),
+
+-- qa 테스트
+(506, NULL, 1, 100, 'qa', 'QA Prompt', 'gpt-oss-20b',
+ '당신은 친절하고 이해하기 쉬운 설명을 제공하는 AI 어시스턴트입니다. 사용자의 질문이나 요청에 대해 정확하고 간결하게, 그리고 가능하다면 추가적인 배경 지식과 예시를 곁들여 답변하세요.\n회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
+ '회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
+ '["milvus://test_20250924_789012/doc_vacation_policy","file://hr_manual_2025.pdf"]',
+ '["doc_vacation_policy.pdf","hr_manual_2025.pdf"]',
+ '회사 휴가 정책에 대해 안내드립니다.\n\n## 연차 휴가\n- 신입사원: 연간 15일\n- 근속 3년 이상: 연간 20일\n- 근속 5년 이상: 연간 25일\n\n## 사용 규칙\n- 연차는 당해년도 내 사용 원칙\n- 미사용 연차 최대 5일 이월 가능\n- 연속 5일 이상 사용 시 1주일 전 신청\n\n## 기타 휴가\n- 경조사휴가: 최대 7일\n- 병가: 연간 30일\n- 출산휴가: 90일\n\n자세한 내용은 인사팀에 문의하시거나 사내 포털의 인사 규정을 참조해주세요.',
+ 71.4, '{"tokens_input":142,"tokens_output":198,"latency_ms":2890}',
+ '2025-09-24 19:05:28'),
+
+-- 기타 조합
+(507, 403, 1, 102, 'doc_gen', 'business_trip', 'gpt-oss-20b',
+ '당신은 간단한 출장 계획 메모를 작성하는 도우미입니다. 입력된 변수만 사용해서 핵심 일정과 준비물을 요약하세요.\n서울 본사 방문 일정을 정리해주세요. 내일 오전 미팅이 있습니다.',
+ '서울 본사 방문 일정을 정리해주세요. 내일 오전 미팅이 있습니다.',
+ '["milvus://test_20250924_345678/doc_hq_visit"]',
+ '["doc_hq_visit.pdf"]',
+ '## 서울 본사 방문 메모\n\n**일정**\n- 날짜: 내일\n- 시간: 오전 미팅\n- 장소: 서울 본사\n\n**준비물 체크리스트**\n□ 명함\n□ 노트북\n□ 충전기\n□ 미팅 자료\n□ 신분증\n\n**참고사항**\n- 미팅 시간 사전 확인 필요\n- 주차 공간 예약 권장',
+ 76.9, '{"tokens_input":87,"tokens_output":112,"latency_ms":1820}',
+ '2025-09-24 20:15:40');
 
 COMMIT;

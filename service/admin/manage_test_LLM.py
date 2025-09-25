@@ -29,6 +29,36 @@ def _ensure_val_dir():
     except Exception:
         logging.getLogger(__name__).exception("failed to create val_data directory")
 
+def _ensure_llm_eval_runs_table():
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS llm_eval_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          mapping_id INTEGER,
+          llm_id INTEGER,
+          prompt_id INTEGER,
+          category TEXT NOT NULL,
+          subcategory TEXT,
+          model_name TEXT,
+          prompt_text TEXT NOT NULL,
+          user_prompt TEXT,
+          rag_refs TEXT,
+          answer_text TEXT NOT NULL,
+          acc_score REAL NOT NULL DEFAULT 0,
+          meta TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_runs_cat_sub_model ON llm_eval_runs (category, subcategory, model_name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_runs_prompt ON llm_eval_runs (prompt_id, llm_id, mapping_id)")
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to create llm_eval_runs table")
+    finally:
+        conn.close()
+
 class RunEvalBody(BaseModel):
     category: str = Field(..., description="qa | qna | doc_gen | summary")
     subcategory: Optional[str] = Field(None, description="세부테스크(= template.name)")
@@ -93,6 +123,7 @@ def _find_mapping_id(conn, prompt_id: int, model_name: str) -> Optional[int]:
 
 def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
     _ensure_val_dir()
+    _ensure_llm_eval_runs_table()
 
     category = _norm_category(body.category)
     subcat = (body.subcategory or "").strip().lower() or None

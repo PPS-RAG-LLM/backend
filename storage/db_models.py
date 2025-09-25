@@ -604,3 +604,4 @@ class LlmEvalRun(Base):
     acc_score = Column(Float, nullable=False, server_default=text("0"))  # 입력-답변 토큰 겹침 기반 acc
     meta = Column(Text)  # JSON: 기타 정보(토큰수, latency 등)
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    pdf_list = Column(Text, nullable=True)
