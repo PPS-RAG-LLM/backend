@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path, Body
 from pydantic import BaseModel
 from typing import List, Optional
 from service.commons.qa_templates import (
@@ -38,14 +38,17 @@ def create_qa_system_prompt(body:CreateTemplateRequest):
 
 
 @router.put("/template/{template_id}", response_model=TemplateContentResponse, summary="관리자용 | QA 템플릿 수정")
-def update_qa_template_route(template_id: int, body: CreateTemplateRequest):
+def update_qa_template_route(
+    template_id: int = Path(..., description="프롬프트 템플릿 id"), 
+    body: CreateTemplateRequest =Body(...,description="")
+    ):
     item = update_qa_template(template_id, body.system_prompt, body.user_prompt)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")
     return item
 
 @router.delete("/template/{template_id}", status_code=204, summary="관리자용 | QA 템플릿 삭제")
-def delete_qa_template_route(template_id: int):
+def delete_qa_template_route(template_id: int = Path(..., description="프롬프트 템플릿 id")):
     deleted = delete_qa_template(template_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Template not found")

@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Body, HTTPException
-from pydantic import BaseModel, Field
-from typing import Annotated, List, Optional
+from fastapi import APIRouter, Body, HTTPException, Path
+from pydantic import BaseModel
+from typing import List
 from service.commons.summary_templates import (
     generate_summary_template,
     list_summary_templates,
@@ -45,8 +45,8 @@ def get_summary_template_route(template_id: int):
     return {"id": row["id"], "name": row["name"], "system_prompt": row["system_prompt"], "user_prompt": row["user_prompt"]}
 
 class CreateTemplateRequest(BaseModel):
-    system_prompt: str ="시스템 프롬프트"
-    user_prompt: str  ="유저 프롬프트"
+    system_prompt: str ="(require)시스템 프롬프트"
+    user_prompt: str  ="(require)유저 프롬프트"
 
 @router.post("/template", summary="관리자용 | QA 시스템 프롬프트 생성")
 def create_qa_system_prompt(body:CreateTemplateRequest):
@@ -54,7 +54,8 @@ def create_qa_system_prompt(body:CreateTemplateRequest):
     return item
 
 @router.put("/template/{template_id}", response_model=TemplateContentResponse, summary="관리자용 | 요약 템플릿 수정")
-def update_summary_template_route(template_id: int, body: CreateTemplateRequest):
+def update_summary_template_route(template_id: int = Path(..., description="프롬프트 템플릿 id"), 
+body: CreateTemplateRequest = Body(..., description="")):
     item = update_summary_template(template_id, body.system_prompt, body.user_prompt)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")

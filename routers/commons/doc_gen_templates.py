@@ -1,5 +1,5 @@
 # /home/work/CoreIQ/yb/backend/routers/users/doc_gen_templates.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body, Path
 from pydantic import BaseModel
 from typing import List, Optional
 from service.commons.doc_gen_templates import (
@@ -14,7 +14,7 @@ from service.commons.doc_gen_templates import (
 router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
 
 class VariableItem(BaseModel):
-    type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number' 중 하나의 타입 (프론트에 HINT 주기 위함)"
+    type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number'"
     key: str = "'시작일' | '종료일' | '"
     value: Optional[str] = "관리자 테스트 시 쓰일 예시 답안"
     description: str = "사용자측에 보여줄 설명"
@@ -48,7 +48,7 @@ def list_doc_gen_templates_all_route():
     return {"templates": items}
 
 @router.get("/template/{template_id}", response_model=TemplateContentResponse, summary="문서생성성 템플릿 단건 출력(상세+변수)")
-def get_doc_gen_template_route(template_id: int):
+def get_doc_gen_template_route(template_id: int = Path(..., description="프롬프트 템플릿 id")):
     row = get_doc_gen_template(template_id)
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -69,7 +69,8 @@ def create_doc_gen_prompt(body:TemplatePayload):
     return item
 
 @router.put("/template/{template_id}", response_model=TemplateContentResponse, summary="관리자용 | 문서생성용 프롬프트 템플릿 수정" )
-def update_doc_gen_prompt(template_id: int, body: TemplatePayload):
+def update_doc_gen_prompt(template_id: int = Path(..., description="프롬프트 템플릿 id"),
+ body: TemplatePayload = Body(..., description="")):
     variables = [var.model_dump() for var in body.variables]
     item = update_doc_gen_prompt_service(template_id, body.name, body.system_prompt, body.user_prompt, variables)
     if not item:
@@ -78,7 +79,7 @@ def update_doc_gen_prompt(template_id: int, body: TemplatePayload):
 
 
 @router.delete("/template/{template_id}", status_code=204, summary="관리자용 | 문서생성용 프롬프트 템플릿 삭제" )
-def delete_doc_gen_prompt(template_id: int):
+def delete_doc_gen_prompt(template_id: int = Path(..., description="프롬프트 템플릿 id")):
     deleted = remove_doc_gen_template(template_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Template not found")
