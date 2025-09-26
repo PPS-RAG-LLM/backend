@@ -15,9 +15,9 @@ router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
 
 class VariableItem(BaseModel):
     type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number'"
-    key: str = "'시작일' | '종료일' | '"
+    key: str = "'시작일' | '종료일' | '날짜' | '작성자' | '요청사항' 등 사용자에게 표시될 부분 "
     value: Optional[str] = "관리자 테스트 시 쓰일 예시 답안"
-    description: str = "사용자측에 보여줄 설명"
+    description: str = "사용자에게 보여줄 설명"
     required: Optional[bool] = False
 
 class TemplateListItem(BaseModel):
@@ -53,6 +53,8 @@ def get_doc_gen_template_route(template_id: int = Path(..., description="프롬�
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
     return row
+
+
 
 class TemplatePayload(BaseModel):
     name: str = "'business_trip' | 'report' | 'meeting'"
