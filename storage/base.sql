@@ -369,3 +369,43 @@ INSERT INTO "llm_eval_runs" (
  '2025-09-24 20:15:40');
 
 COMMIT;
+
+-- embedding_models 테이블 예시 데이터
+INSERT INTO
+    "embedding_models" (
+        "id",
+        "name",
+        "provider",
+        "model_path",
+        "is_active",
+        "activated_at",
+        "created_at"
+    )
+VALUES
+    (
+        1,
+        'qwen3_0_6b',
+        NULL,
+        './storage/embedding-models/embedding_qwen3_0_6b',
+        1,
+        '2025-09-20 10:15:00',
+        '2025-09-15 09:00:00'
+    ),
+    (
+        2,
+        'qwen3_4b',
+        NULL,
+        './storage/embedding-models/embedding_qwen3_4b',
+        0,
+        NULL,
+        '2025-09-16 14:30:00'
+    ),
+    (
+        3,
+        'bge_m3',
+        NULL,
+        './storage/embedding-models/embedding_bge_m3',
+        0,
+        NULL,
+        '2025-09-17 11:45:00'
+    );

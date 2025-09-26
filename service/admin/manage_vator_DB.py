@@ -342,16 +342,14 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         if not s:
             s = RagSettings(id=1)
             session.add(s)
-        s.embedding_key = key
+        s.embedding_key = new_key  # BUGFIX: 'key' -> 'new_key'
         # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
         if search_type is not None:
-            s.search_type = (
-                (search_type or "hybrid").lower().replace("vector", "semantic")
-            )
+            s.search_type = new_st.replace("vector", "semantic")  # 정규화된 값 사용
         if chunk_size is not None:
-            s.chunk_size = int(chunk_size)
+            s.chunk_size = int(new_cs)
         if overlap is not None:
-            s.overlap = int(overlap)
+            s.overlap = int(new_ov)
         s.updated_at = now_kst()
         session.commit()
 
@@ -1439,7 +1437,25 @@ async def delete_db():
     cols = client.list_collections()
     for c in cols:
         client.drop_collection(c)
-    return {"message": "삭제 완료(Milvus Server)", "dropped_collections": cols}
+    
+    # === 메타 초기화(요구사항: "백터 DB key도 전부 지우게") ===
+    try:
+        with get_session() as session:
+            # 1) 모든 임베딩 모델 비활성화
+            session.query(EmbeddingModel).filter(EmbeddingModel.is_active == 1).update(
+                {"is_active": 0, "activated_at": None}
+            )
+            # 2) RagSettings의 임베딩 키 제거
+            s = session.query(RagSettings).filter(RagSettings.id == 1).first()
+            if s:
+                s.embedding_key = None
+                s.updated_at = now_kst()
+            session.commit()
+            logger.info("임베딩 모델 상태 및 RagSettings 키 초기화 완료")
+    except Exception as e:
+        logger.error(f"메타데이터 초기화 실패: {e}")
+    
+    return {"message": "삭제 완료(Milvus Server + 메타데이터 초기화)", "dropped_collections": cols}
 
 
 async def list_indexed_files(

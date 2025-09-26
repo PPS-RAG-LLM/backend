@@ -64,7 +64,7 @@ def select_model_route(
 # Test RAG Sessions (이미 존재)
 # ============================
 
-@router.post("/rag/session", summary="테스트 세션 생성(임시 컬렉션 + 세션 폴더)")
+@router.post("/rag/session", summary="1. 테스트 세션 생성(임시 컬렉션 + 세션 폴더)")
 def create_test_session_route():
     from service.admin.manage_vator_DB import create_test_session
     return create_test_session()
@@ -126,7 +126,7 @@ async def drop_test_session_route(sid: str):
 # ============================
 @router.post(
     "/runs/ensure-upload",
-    summary="PDF 업로드 포함: 동일 조건 run 없으면 테스트 세션에 인제스트→RAG+LLM 실행 후 저장"
+    summary="마지막. PDF 업로드 포함: 동일 조건 run 없으면 테스트 세션에 인제스트→RAG+LLM 실행 후 저장"
 )
 async def ensure_run_if_empty_upload_route(
     category: str = Form(..., description="qa | qna | doc_gen | summary"),
