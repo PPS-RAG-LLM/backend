@@ -979,8 +979,6 @@ def _unload_via_adapters(model_name: str) -> bool:
 # ================================================================
 
 
-
-
 def _run_command(cmd: list[str]) -> Tuple[int, str]:
     """Run a shell command and capture (returncode, stdout+stderr)."""
     import subprocess, shlex
@@ -989,69 +987,6 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
     out, _ = proc.communicate()
     return proc.returncode, out
 
-
-# ===== Public service functions =====
-
-# def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
-#     """
-#     기본 모델 등록(단일 레코드):
-#       - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
-#       - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
-#     """
-#     _migrate_llm_models_if_needed()
-#     base_name = body.name.strip()
-#     rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
-
-#     # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
-#     abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
-#     cfg_ok = (abs_new / "config.json").is_file()
-#     if not cfg_ok:
-#         abs_old = LEGACY_STORAGE_ROOT / base_name
-#         cfg_ok = (abs_old / "config.json").is_file()
-
-#     conn = _connect(); cur = conn.cursor()
-#     try:
-#         cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
-#         row = cur.fetchone()
-#         if row:
-#             cur.execute(
-#                 """
-#                 UPDATE llm_models
-#                    SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
-#                  WHERE id=?
-#                 """,
-#                 (body.provider, rel_folder, int(row[0]))
-#             )
-#             mdl_id = int(row[0]); existed = True
-#         else:
-#             cur.execute(
-#                 """
-#                 INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
-#                 VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
-#                 """,
-#                 (body.provider, base_name, 0, rel_folder)
-#             )
-#             mdl_id = int(cur.lastrowid); existed = False
-#         conn.commit()
-#     finally:
-#         conn.close()
-
-#     note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
-#     return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
-
-
-
-
-
-# moved to service/admin/manage_test_LLM.py
-
-
-# ===== Service functions (구현) =====
-# def set_topk_settings(topk: int) -> Dict[str, Any]:
-#     global _DEFAULT_TOPK  # noqa: PLW0603
-#     _DEFAULT_TOPK = int(topk)
-#     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
-#     return {"success": True}
 
 def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
@@ -1114,20 +1049,32 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     finally:
         conn.close()
 
-    # 상위 1개(rougeScore 최대)를 active=True로 표시
+    # 현재 카테고리의 활성 모델명(캐시 기반)
+    active_name = _active_model_name_for_category(cat)
+
     models = []
     for i, r in enumerate(rows):
         cols = r.keys()  # 컬럼 목록 확인
         rouge = r["rougeScore"] if "rougeScore" in cols else None
+        name = r["name"]
+        
+        # ★ 실제 메모리 로딩 여부 확인
+        is_loaded = _is_model_loaded(name)
+        
+        # ★ 활성 여부: 캐시가 있으면 캐시 비교, 없으면 기존 로직 유지(특히 doc_gen+sub일 때 1위)
+        default_active = False
+        if cat == "doc_gen" and sub:
+            default_active = (i == 0)  # 1위 (rougeScore 최대)
+        is_active_runtime = (name == active_name) if active_name else default_active
         
         models.append({
             "id": r["id"],
-            "name": r["name"],
-            "loaded": False,
-            "active": (i == 0 and cat == "doc_gen" and bool(sub)),  # doc_gen+서브카테고리일 때만 1위 True
+            "name": name,
+            "loaded": bool(is_loaded),          # ★ 수정: 실제 메모리 로딩 상태
+            "active": bool(is_active_runtime),  # ★ 수정: 캐시 기반 활성 상태
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),   # llm_models.is_active
+            "isActive": bool(r["isActive"]),   # llm_models.is_active (DB 상태)
             "createdAt": r["created_at"],
             "rougeScore": rouge,
         })
@@ -1235,16 +1182,6 @@ def unload_model(model_name: str) -> Dict[str, Any]:
 
 
 # ===== 기본 모델 매핑(테스크/서브테스크) =====
-# moved to service/admin/manage_test_LLM.py: DefaultModelBody
-
-
-## moved to service/admin/manage_test_LLM.py: set_default_model
-
-
-## moved to service/admin/manage_test_LLM.py: get_default_model
-
-
-## moved to service/admin/manage_test_LLM.py: select_model_for_task
 
 
 def unload_model_for_category(category: str, model_name: str) -> Dict[str, Any]:

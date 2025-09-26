@@ -9,12 +9,13 @@ from typing import Optional, Dict, Any, List
 
 from pydantic import BaseModel, Field
 
-# rouge는 선택 의존성: 있으면 사용
+# rouge는 선택 의존성: 있으면 사용, 없으면 폴백
 try:
     from rouge import Rouge  # type: ignore
 except Exception:
     Rouge = None
 
+# Reuse DB and prompt helpers from admin service (do not duplicate logic)
 from service.admin.manage_admin_LLM import (
     _connect,
     _json,
@@ -34,7 +35,80 @@ def _ensure_val_dir():
     except Exception:
         logging.getLogger(__name__).exception("failed to create val_data directory")
 
+def _norm_list(xs: Optional[List[str]]) -> List[str]:
+    """리스트 정규화: 공백 제거, 빈값 제거, 중복 제거 후 정렬"""
+    if not xs:
+        return []
+    norm = sorted({s.strip() for s in xs if isinstance(s, str) and s.strip()})
+    return norm
 
+def _norm_list_json(xs: Optional[List[str]]) -> str:
+    """정규화된 리스트를 JSON 문자열로 변환"""
+    return json.dumps(_norm_list(xs), ensure_ascii=False)
+
+def _rouge_l_acc(answer: str, reference: str) -> float:
+    """
+    rouge 패키지가 있으면 rouge-L F1 × 100, 없으면 기존 토큰겹침 방식으로 0~100 점수 반환
+    """
+    try:
+        if Rouge is not None:
+            r = Rouge()
+            # 단일 페어를 리스트로 감싸 avg=True로 계산
+            sc = r.get_scores([answer or ""], [reference or ""], avg=True)
+            f = float(sc["rouge-l"]["f"] or 0.0)
+            return round(f * 100.0, 2)
+    except Exception:
+        pass
+    # 폴백: 입력/정답 토큰 겹침율
+    return _acc_from_prompt_and_answer(reference, answer)
+
+def _build_rag_reference_text(hits: List[Dict[str, Any]]) -> str:
+    """hits의 snippet들을 하나의 기준텍스트로 합침"""
+    if not hits:
+        return ""
+    parts = []
+    for h in hits:
+        s = (h.get("snippet") or "").strip()
+        if s:
+            parts.append(s)
+    return "\n".join(parts)
+
+def _ensure_llm_eval_runs_table():
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS llm_eval_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          mapping_id INTEGER,
+          llm_id INTEGER,
+          prompt_id INTEGER,
+          category TEXT NOT NULL,
+          subcategory TEXT,
+          model_name TEXT,
+          prompt_text TEXT NOT NULL,
+          user_prompt TEXT,
+          rag_refs TEXT,
+          answer_text TEXT NOT NULL,
+          acc_score REAL NOT NULL DEFAULT 0,
+          meta TEXT,
+          pdf_list TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        # 기존 DB 마이그레이션: pdf_list 컬럼 확인 후 추가
+        cur.execute("PRAGMA table_info(llm_eval_runs)")
+        cols = {row[1] for row in cur.fetchall()}  # name은 index 1
+        if "pdf_list" not in cols:
+            cur.execute("ALTER TABLE llm_eval_runs ADD COLUMN pdf_list TEXT")
+            
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_runs_cat_sub_model ON llm_eval_runs (category, subcategory, model_name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_runs_prompt ON llm_eval_runs (prompt_id, llm_id, mapping_id)")
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to create llm_eval_runs table")
+    finally:
+        conn.close()
 
 class RunEvalBody(BaseModel):
     category: str = Field(..., description="qa | qna | doc_gen | summary")
@@ -43,6 +117,7 @@ class RunEvalBody(BaseModel):
     modelName: Optional[str] = Field(None, description="명시 모델명(없으면 테스크 기본 선정)")
     userPrompt: Optional[str] = Field(None, description="사용자 추가 프롬프트")
     ragRefs: Optional[List[str]] = Field(default=None, description="['milvus://collection/id', 'file://...']")
+    pdfList: Optional[List[str]] = Field(default=None, description="테스트 시 사용한 PDF 파일명 리스트")
     max_tokens: int = 512
     temperature: float = 0.7
 
@@ -52,48 +127,48 @@ class EvalQuery(BaseModel):
     modelName: Optional[str] = None
     userPrompt: Optional[str] = None
     promptId: Optional[int] = None
-    pdfList: Optional[List[str]] = None  # 업로드 '원본 파일명' 기준 완전일치
+    pdfList: Optional[List[str]] = None
+
+class EnsureRunBody(BaseModel):
+    category: str
+    subcategory: Optional[str] = None
+    modelName: Optional[str] = None
+    userPrompt: Optional[str] = None
+    promptId: int
+    pdfList: Optional[List[str]] = None
+    max_tokens: int = 512
+    temperature: float = 0.7
+
 
 class DefaultModelBody(BaseModel):
     category: str
     subcategory: Optional[str] = None
     modelName: str
 
+
 class SelectModelQuery(BaseModel):
     category: str
-    subcategory: Optional[str] = None
+    subcategory: Optional[str] = None  # template.name (예: doc_gen의 세부 테스크명)
+
 
 def _token_set(s: str) -> set[str]:
+    """한글/영문/숫자 토큰 단순 분해 → 소문자"""
     if not s:
         return set()
     toks = re.findall(r"[0-9A-Za-z가-힣]+", s.lower())
     return set(toks)
 
 def _acc_from_prompt_and_answer(prompt_text: str, answer_text: str) -> float:
+    """
+    정답 텍스트가 없으므로 '입력 프롬프트(= system+user+RAG 주입)' 대비
+    모델 답변의 토큰 겹침 비율을 acc로 정의.
+      acc = |tokens(answer) ∩ tokens(prompt)| / |tokens(prompt)| * 100
+    """
     p = _token_set(prompt_text)
     a = _token_set(answer_text)
     if not p:
         return 0.0
     return round(100.0 * len(p & a) / len(p), 2)
-
-def _norm_list(xs: Optional[List[str]]) -> List[str]:
-    if not xs:
-        return []
-    return sorted({(x or "").strip() for x in xs if isinstance(x, str) and (x or "").strip()})
-
-def _norm_list_json(xs: Optional[List[str]]) -> str:
-    return json.dumps(_norm_list(xs), ensure_ascii=False)
-
-def _rouge_l_acc(answer: str, reference: str) -> float:
-    try:
-        if Rouge is not None:
-            r = Rouge()
-            sc = r.get_scores([answer or ""], [reference or ""], avg=True)
-            f = float(sc["rouge-l"]["f"] or 0.0)
-            return round(f * 100.0, 2)
-    except Exception:
-        pass
-    return _acc_from_prompt_and_answer(reference, answer)
 
 def _find_mapping_id(conn, prompt_id: int, model_name: str) -> Optional[int]:
     cur = conn.cursor()
@@ -109,9 +184,76 @@ def _find_mapping_id(conn, prompt_id: int, model_name: str) -> Optional[int]:
     m = cur.fetchone()
     return int(m["id"]) if m else None
 
+def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
+    _ensure_val_dir()
+    _ensure_llm_eval_runs_table()
+
+    category = _norm_category(body.category)
+    subcat = (body.subcategory or "").strip().lower() or None
+
+    # 1) 템플릿 로드 + 변수 치환
+    tmpl, _ = _fetch_prompt_full(body.promptId)
+    system_prompt_text = _fill_template(tmpl["content"], {})
+    user_prompt_text = (body.userPrompt or "").strip()
+    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
+
+    # 2) 모델 선택
+    if body.modelName:
+        model_name = body.modelName
+    else:
+        model_name = select_model_for_task(category, subcat or tmpl["name"])
+        if not model_name:
+            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
+
+    # 3) 생성
+    answer = _simple_generate(prompt_text, model_name, body.max_tokens, body.temperature)
+
+    # 4) acc 계산
+    acc = _acc_from_prompt_and_answer(prompt_text, answer)
+
+    # 5) 메타/매핑 찾기 + 저장
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        row = _lookup_model_by_name(model_name)
+        llm_id = int(row["id"]) if row else None
+        mapping_id = _find_mapping_id(conn, body.promptId, model_name)
+        rag_json = json.dumps(body.ragRefs or [], ensure_ascii=False)
+
+        pdf_json = _norm_list_json(body.pdfList) if body.pdfList is not None else None
+        
+        cur.execute("""
+            INSERT INTO llm_eval_runs(mapping_id, llm_id, prompt_id, category, subcategory, model_name,
+                                      prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            mapping_id, llm_id, body.promptId, category, (subcat or tmpl["name"]), model_name,
+            prompt_text, user_prompt_text, rag_json, answer, acc, None, pdf_json
+        ))
+        conn.commit()
+        run_id = int(cur.lastrowid)
+    except Exception:
+        logging.getLogger(__name__).exception("failed to save eval run")
+        return {"success": False, "error": "평가 결과 저장 실패"}
+    finally:
+        conn.close()
+
+    return {
+        "success": True,
+        "runId": run_id,
+        "category": category,
+        "subcategory": (subcat or tmpl["name"]),
+        "modelName": model_name,
+        "promptId": body.promptId,
+        "answer": answer,
+        "acc": acc,
+        "pdfList": _norm_list(body.pdfList),
+    }
+
 def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
     cat = _norm_category(q.category)
     sub = (q.subcategory or "").strip().lower() or None
+
     conn = _connect()
     cur = conn.cursor()
     try:
@@ -123,22 +265,22 @@ def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
         """
         params: List[Any] = [cat]
         if sub is not None:
-            sql += " AND lower(IFNULL(subcategory,''))=?"
+            sql += " AND lower(ifnull(subcategory,'')) = ?"
             params.append(sub)
         if q.modelName:
-            sql += " AND model_name=?"
+            sql += " AND model_name = ?"
             params.append(q.modelName)
         if q.userPrompt:
-            sql += " AND user_prompt=?"
+            sql += " AND user_prompt = ?"
             params.append(q.userPrompt)
         if q.promptId is not None:
-            sql += " AND prompt_id=?"
+            sql += " AND prompt_id = ?"
             params.append(int(q.promptId))
         if q.pdfList is not None:
-            sql += " AND IFNULL(pdf_list,'[]')=?"
+            sql += " AND IFNULL(pdf_list, '[]') = ?"
             params.append(_norm_list_json(q.pdfList))
+        sql += " ORDER BY id DESC"
 
-        sql += " ORDER BY id DESC"  # limit 제거: 전체 조회
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
         items = []
@@ -174,94 +316,25 @@ def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
     finally:
         conn.close()
 
-def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
+
+def ensure_run_if_empty(body: EnsureRunBody) -> Dict[str, Any]:
+    """
+    조건 일치 레코드가 없으면 LLM+RAG 실행 후 저장, 있으면 기존 결과 반환
+    """
     _ensure_val_dir()
     _ensure_llm_eval_runs_table()
 
     category = _norm_category(body.category)
     subcat = (body.subcategory or "").strip().lower() or None
+    pdf_norm = _norm_list(body.pdfList)
 
-    tmpl, _ = _fetch_prompt_full(body.promptId)
-    system_prompt_text = _fill_template(tmpl["content"], {})
-    user_prompt_text = (body.userPrompt or "").strip()
-    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
-
-    if body.modelName:
-        model_name = body.modelName
-    else:
-        model_name = select_model_for_task(category, subcat or tmpl["name"])
-        if not model_name:
-            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
-
-    answer = _simple_generate(prompt_text, model_name, body.max_tokens, body.temperature)
-    acc = _acc_from_prompt_and_answer(prompt_text, answer)
-
-    conn = _connect()
-    cur = conn.cursor()
-    try:
-        row = _lookup_model_by_name(model_name)
-        llm_id = int(row["id"]) if row else None
-        mapping_id = _find_mapping_id(conn, body.promptId, model_name)
-        rag_json = json.dumps(body.ragRefs or [], ensure_ascii=False)
-
-        cur.execute("""
-            INSERT INTO llm_eval_runs(mapping_id, llm_id, prompt_id, category, subcategory, model_name,
-                                      prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            mapping_id, llm_id, body.promptId, category, (subcat or tmpl["name"]), model_name,
-            prompt_text, user_prompt_text, rag_json, answer, acc, None, None
-        ))
-        conn.commit()
-        run_id = int(cur.lastrowid)
-    except Exception:
-        logging.getLogger(__name__).exception("failed to save eval run")
-        return {"success": False, "error": "평가 결과 저장 실패"}
-    finally:
-        conn.close()
-
-    return {
-        "success": True,
-        "runId": run_id,
-        "category": category,
-        "subcategory": (subcat or tmpl["name"]),
-        "modelName": model_name,
-        "promptId": body.promptId,
-        "answer": answer,
-        "acc": acc,
-    }
-
-# ===== 업로드 기반 보장 실행(세션 컬렉션) =====
-async def ensure_run_if_empty_uploaded(
-    sid: str,
-    category: str,
-    subcategory: Optional[str],
-    modelName: Optional[str],
-    userPrompt: Optional[str],
-    promptId: int,
-    pdfNames: List[str],
-    max_tokens: int = 512,
-    temperature: float = 0.7,
-) -> Dict[str, Any]:
-    """
-    이미 동일조건 결과가 있으면 그대로 반환.
-    없으면: sid 세션 컬렉션에서만 RAG → LLM 생성 → rouge-L acc → 저장 후 단건 반환
-    pdfNames: 업로드 '원본 파일명' 목록(== pdf_list 저장/비교 기준)
-    """
-    _ensure_val_dir()
-    
-
-    category = _norm_category(category)
-    subcat = (subcategory or "").strip().lower() or None
-    pdf_norm = _norm_list(pdfNames)
-
-    # 캐시 조회
+    # 1) 기존 결과 조회
     q = EvalQuery(
         category=category,
         subcategory=subcat,
-        modelName=modelName,
-        userPrompt=userPrompt,
-        promptId=promptId,
+        modelName=body.modelName,
+        userPrompt=body.userPrompt,
+        promptId=body.promptId,
         pdfList=pdf_norm,
     )
     existing = list_eval_runs(q)
@@ -269,56 +342,92 @@ async def ensure_run_if_empty_uploaded(
         existing["fromCache"] = True
         return existing
 
-    # 프롬프트 준비
-    tmpl, _ = _fetch_prompt_full(promptId)
+    # 2) 프롬프트 구성
+    tmpl, _ = _fetch_prompt_full(body.promptId)
     system_prompt_text = _fill_template(tmpl["content"], {})
-    user_prompt_text = (userPrompt or "").strip()
+    user_prompt_text = (body.userPrompt or "").strip()
 
-    # 세션 RAG 검색
+    # 3) RAG 실행 (pdfList로 소스 제한)
     if category in ("qa", "qna"):
         task_type = "qna"
     else:
         task_type = category  # doc_gen | summary
 
-    from service.admin.manage_vator_DB import RAGSearchRequest, search_documents_test
-    req = RAGSearchRequest(query=user_prompt_text or "", top_k=5, user_level=1, task_type=task_type, model=None)
-    rag_res = await search_documents_test(req, sid=sid, search_type_override=None)
-    rag_hits = (rag_res or {}).get("hits", []) if isinstance(rag_res, dict) else []
+    from service.admin.manage_vator_DB import execute_search
+    import asyncio
 
-    rag_refs: List[str] = []
+    rag_res = None
+    try:
+        # 현재 이벤트 루프가 있는지 확인
+        try:
+            loop = asyncio.get_running_loop()
+            # 이미 루프가 있다면 새 스레드에서 실행
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                async def _exec():
+                    return await execute_search(
+                        question=user_prompt_text or "",
+                        top_k=5,
+                        security_level=1,
+                        source_filter=pdf_norm or None,
+                        task_type=task_type,
+                        model_key=None,
+                        search_type=None,
+                    )
+                future = executor.submit(asyncio.run, _exec())
+                rag_res = future.result()
+        except RuntimeError:
+            # 루프가 없다면 새로 생성
+            async def _exec():
+                return await execute_search(
+                    question=user_prompt_text or "",
+                    top_k=5,
+                    security_level=1,
+                    source_filter=pdf_norm or None,
+                    task_type=task_type,
+                    model_key=None,
+                    search_type=None,
+                )
+            rag_res = asyncio.run(_exec())
+    except Exception:
+        logging.getLogger(__name__).exception("RAG search failed")
+        rag_res = None
+
+    rag_hits = (rag_res or {}).get("hits", []) if isinstance(rag_res, dict) else []
+    rag_refs = []
     for h in rag_hits:
         fn = (h.get("path") or "").split("/")[-1].replace(".txt", ".pdf")
         if fn:
             rag_refs.append(f"file://{fn}")
         doc_id = h.get("doc_id")
         if doc_id:
-            rag_refs.append(f"milvus://{sid}/{doc_id}")
+            rag_refs.append(f"milvus://{task_type}/{doc_id}")
 
-    rag_reference_text = "\n".join([(h.get("snippet") or "").strip() for h in rag_hits if (h.get("snippet") or "").strip()])
+    rag_reference_text = _build_rag_reference_text(rag_hits)
     rag_prompt_block = (rag_res or {}).get("prompt") or ""
     prompt_text = "\n".join([t for t in [system_prompt_text, rag_prompt_block, user_prompt_text] if t]).strip()
 
-    # 모델 선택
-    if modelName:
-        model_name = modelName
+    # 4) 모델 선택
+    if body.modelName:
+        model_name = body.modelName
     else:
         model_name = select_model_for_task(category, subcat or tmpl["name"])
         if not model_name:
             return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다."}
 
-    # 생성
-    answer = _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
+    # 5) 생성
+    answer = _simple_generate(prompt_text, model_name, body.max_tokens, body.temperature)
 
-    # 점수
+    # 6) acc_score(rougeL F1 × 100) 계산
     acc = _rouge_l_acc(answer, rag_reference_text)
 
-    # 저장
+    # 7) 저장
     conn = _connect()
     cur = conn.cursor()
     try:
         row = _lookup_model_by_name(model_name)
         llm_id = int(row["id"]) if row else None
-        mapping_id = _find_mapping_id(conn, promptId, model_name)
+        mapping_id = _find_mapping_id(conn, body.promptId, model_name)
         rag_json = json.dumps(_norm_list(rag_refs), ensure_ascii=False)
         pdf_json = _norm_list_json(pdf_norm)
 
@@ -328,17 +437,18 @@ async def ensure_run_if_empty_uploaded(
                 prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            mapping_id, llm_id, promptId, category, (subcat or tmpl["name"]), model_name,
+            mapping_id, llm_id, body.promptId, category, (subcat or tmpl["name"]), model_name,
             prompt_text, user_prompt_text, rag_json, answer, acc, None, pdf_json
         ))
         conn.commit()
         run_id = int(cur.lastrowid)
     except Exception:
-        logging.getLogger(__name__).exception("failed to save ensured eval run (upload)")
+        logging.getLogger(__name__).exception("failed to save ensured eval run")
         return {"success": False, "error": "평가 결과 저장 실패"}
     finally:
         conn.close()
 
+    # 8) 방금 저장한 1건 반환
     return {
         "success": True,
         "fromCache": False,
@@ -347,7 +457,7 @@ async def ensure_run_if_empty_uploaded(
             "id": run_id,
             "mappingId": mapping_id,
             "llmId": llm_id,
-            "promptId": promptId,
+            "promptId": body.promptId,
             "category": category,
             "subcategory": (subcat or tmpl["name"]),
             "modelName": model_name,
@@ -360,6 +470,7 @@ async def ensure_run_if_empty_uploaded(
             "pdfList": pdf_norm,
         }]
     }
+
 
 def set_default_model(body: DefaultModelBody) -> Dict[str, Any]:
     _migrate_llm_models_if_needed()
