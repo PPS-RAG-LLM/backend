@@ -14,18 +14,18 @@ router = APIRouter(tags=["summary"], prefix="/v1/summary")
 
 class TemplateListItem(BaseModel):
     id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str]=""
+    name: str = "이름"
+    system_prompt: str = "시스템 프롬프트"
+    user_prompt: str ="유저 프롬프트"
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateListItem]
 
 class TemplateContentResponse(BaseModel):
     id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str]=""
+    name: str = "프롬프트 name"
+    system_prompt: str = "시스템 프롬프트"
+    user_prompt: str = "유저 프롬프트"
 
 @router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 요약용 템플릿 전체 목록(상세 포함)")
 def list_summary_templates_route():
@@ -45,8 +45,8 @@ def get_summary_template_route(template_id: int):
     return {"id": row["id"], "name": row["name"], "system_prompt": row["system_prompt"], "user_prompt": row["user_prompt"]}
 
 class CreateTemplateRequest(BaseModel):
-    system_prompt: str 
-    user_prompt: Optional[str] =""
+    system_prompt: str ="시스템 프롬프트"
+    user_prompt: str  ="유저 프롬프트"
 
 @router.post("/template", summary="관리자용 | QA 시스템 프롬프트 생성")
 def create_qa_system_prompt(body:CreateTemplateRequest):

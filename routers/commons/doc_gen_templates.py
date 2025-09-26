@@ -14,17 +14,17 @@ from service.commons.doc_gen_templates import (
 router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
 
 class VariableItem(BaseModel):
-    type: str
-    key: str
-    value: Optional[str] = None
-    description: str
+    type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number' 중 하나의 타입 (프론트에 HINT 주기 위함)"
+    key: str = "'시작일' | '종료일' | '"
+    value: Optional[str] = "관리자 테스트 시 쓰일 예시 답안"
+    description: str = "사용자측에 보여줄 설명"
     required: Optional[bool] = False
 
 class TemplateListItem(BaseModel):
     id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str = "시스템 프롬프트"
+    user_prompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 class TemplateListResponse(BaseModel):
@@ -32,9 +32,9 @@ class TemplateListResponse(BaseModel):
 
 class TemplateContentResponse(BaseModel):
     id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str ="시스템 프롬프트" 
+    user_prompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 @router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 관리자 측에서 기본값으로 정해진 문서생성용 템플릿 각 세부 테스크 목록")
@@ -55,9 +55,9 @@ def get_doc_gen_template_route(template_id: int):
     return row
 
 class TemplatePayload(BaseModel):
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str = "시스템프롬프트"
+    user_prompt: Optional[str] = "유저 프롬프트트"
     variables: List[VariableItem]
 
 @router.post("/template",  response_model=TemplateContentResponse, summary="관리자용 | 문서생성용 프롬프트 템플릿 만들기")
