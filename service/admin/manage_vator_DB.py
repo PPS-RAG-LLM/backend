@@ -342,16 +342,14 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         if not s:
             s = RagSettings(id=1)
             session.add(s)
-        s.embedding_key = key
+        s.embedding_key = new_key  # BUGFIX: 'key' -> 'new_key'
         # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
         if search_type is not None:
-            s.search_type = (
-                (search_type or "hybrid").lower().replace("vector", "semantic")
-            )
+            s.search_type = new_st.replace("vector", "semantic")  # 정규화된 값 사용
         if chunk_size is not None:
-            s.chunk_size = int(chunk_size)
+            s.chunk_size = int(new_cs)
         if overlap is not None:
-            s.overlap = int(overlap)
+            s.overlap = int(new_ov)
         s.updated_at = now_kst()
         session.commit()
 
@@ -1439,7 +1437,25 @@ async def delete_db():
     cols = client.list_collections()
     for c in cols:
         client.drop_collection(c)
-    return {"message": "삭제 완료(Milvus Server)", "dropped_collections": cols}
+    
+    # === 메타 초기화(요구사항: "백터 DB key도 전부 지우게") ===
+    try:
+        with get_session() as session:
+            # 1) 모든 임베딩 모델 비활성화
+            session.query(EmbeddingModel).filter(EmbeddingModel.is_active == 1).update(
+                {"is_active": 0, "activated_at": None}
+            )
+            # 2) RagSettings의 임베딩 키 제거
+            s = session.query(RagSettings).filter(RagSettings.id == 1).first()
+            if s:
+                s.embedding_key = None
+                s.updated_at = now_kst()
+            session.commit()
+            logger.info("임베딩 모델 상태 및 RagSettings 키 초기화 완료")
+    except Exception as e:
+        logger.error(f"메타데이터 초기화 실패: {e}")
+    
+    return {"message": "삭제 완료(Milvus Server + 메타데이터 초기화)", "dropped_collections": cols}
 
 
 async def list_indexed_files(
@@ -1614,3 +1630,500 @@ async def list_indexed_files_overview():
         t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()
     }
     return {"overview": overview, "items": items}
+
+# ============================
+# Test-only RAG Sessions (isolated Milvus collection per session)
+# ============================
+from pathlib import Path
+import uuid
+import json
+import time
+
+# 세션 루트: ./storage/val_data/sessions/<sid> 에 파일/텍스트를 보관
+VAL_SESSION_ROOT = (STORAGE_DIR / "val_data" / "sessions").resolve()
+
+def _session_dir(sid: str) -> Path:
+    return VAL_SESSION_ROOT / sid
+
+def _session_extracted_dir(sid: str) -> Path:
+    return _session_dir(sid) / "extracted_texts"
+
+def _session_meta_path(sid: str) -> Path:
+    return _session_dir(sid) / "session.json"
+
+def _session_collection_name(sid: str) -> str:
+    # 프로덕션 컬렉션과 확실히 분리
+    return f"pdf_chunks_test_{sid}"
+
+def _write_session_meta(sid: str, data: dict):
+    d = _session_dir(sid)
+    d.mkdir(parents=True, exist_ok=True)
+    _session_meta_path(sid).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _read_session_meta(sid: str) -> Optional[dict]:
+    p = _session_meta_path(sid)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def create_test_session() -> Dict:
+    """
+    신규 테스트 세션 생성.
+    - 세션 폴더 생성: ./storage/val_data/sessions/<sid>
+    - (Milvus 컬렉션은 최초 인제스트 때 생성)
+    """
+    sid = uuid.uuid4().hex[:12]
+    d = _session_dir(sid)
+    d.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "sid": sid,
+        "dir": str(d),
+        "extracted_dir": str(_session_extracted_dir(sid)),
+        "collection": _session_collection_name(sid),
+        "created_at": now_kst_string(),
+        "pdf_files": [],   # 세션에 업로드/인제스트한 원본 파일명(표시용)
+    }
+    _write_session_meta(sid, meta)
+    return {"sid": sid, "dir": meta["dir"], "collection": meta["collection"]}
+
+def get_test_session(sid: str) -> Optional[dict]:
+    return _read_session_meta(sid)
+
+def _ensure_collection_and_index_test(client: MilvusClient, emb_dim: int, collection_name: str, metric: str = "IP"):
+    # 프로덕션과 동일 스키마 (필드명/타입 동일)로 만듭니다. 단, 컬렉션명만 세션별로 분리.
+    cols = client.list_collections()
+    if collection_name not in cols:
+        schema = client.create_schema(auto_id=True, enable_dynamic_field=False, description=f"Test PDF chunks ({collection_name})")
+        schema.add_field("pk", DataType.INT64, is_primary=True)
+        schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=int(emb_dim))
+        schema.add_field("path", DataType.VARCHAR, max_length=500)
+        schema.add_field("chunk_idx", DataType.INT64)
+        schema.add_field("task_type", DataType.VARCHAR, max_length=16)  # 'doc_gen'|'summary'|'qna'
+        schema.add_field("security_level", DataType.INT64)
+        schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
+        schema.add_field("version", DataType.INT64)
+
+        # 텍스트/스파스 (가능 시)
+        try:
+            schema.add_field("text", DataType.VARCHAR, max_length=32768, enable_analyzer=True)
+        except TypeError:
+            schema.add_field("text", DataType.VARCHAR, max_length=32768)
+        try:
+            schema.add_field("text_sparse", DataType.SPARSE_FLOAT_VECTOR)
+        except Exception:
+            logger.warning("[Milvus][test] SPARSE_FLOAT_VECTOR 미지원 - hybrid시 RRF 폴백 사용")
+
+        if Function is not None:
+            try:
+                fn = Function(
+                    name="bm25_text2sparse",
+                    function_type=FunctionType.BM25,
+                    input_field_names=["text"],
+                    output_field_names=["text_sparse"],
+                )
+                schema.add_function(fn)
+            except Exception as e:
+                logger.warning(f"[Milvus][test] BM25 Function 추가 실패: {e}")
+
+        client.create_collection(collection_name=collection_name, schema=schema)
+
+    # 인덱스
+    try:
+        idx_dense = client.list_indexes(collection_name=collection_name, field_name="embedding")
+    except Exception:
+        idx_dense = []
+    if not idx_dense:
+        ip = client.prepare_index_params()
+        ip.add_index("embedding", "FLAT", metric_type=metric, params={})
+        client.create_index(collection_name, ip, timeout=180.0, sync=True)
+
+    try:
+        idx_sparse = client.list_indexes(collection_name=collection_name, field_name="text_sparse")
+    except Exception:
+        idx_sparse = []
+    if not idx_sparse:
+        try:
+            ip2 = client.prepare_index_params()
+            try:
+                ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", params={})
+            except TypeError:
+                ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", metric_type="BM25", params={})
+            client.create_index(collection_name, ip2, timeout=180.0, sync=True)
+        except Exception:
+            pass
+
+    # 로드
+    try:
+        client.release_collection(collection_name=collection_name)
+    except Exception:
+        pass
+    client.load_collection(collection_name=collection_name)
+
+async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[List[str]] = None) -> Dict:
+    """
+    세션 컬렉션으로만 인제스트. 프로덕션 콜렉션/데이터에 영향 없음.
+    """
+    meta = get_test_session(sid)
+    if not meta:
+        return {"error": "invalid sid"}
+    coll = meta["collection"]
+    sess_extract = Path(meta["extracted_dir"])
+    sess_extract.mkdir(parents=True, exist_ok=True)
+
+    # 설정/임베딩 로더
+    settings = get_vector_settings()
+    tok, model, device = await _get_or_load_embedder_async(settings["embeddingModel"])
+    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    client = _client()
+    _ensure_collection_and_index_test(client, emb_dim, collection_name=coll, metric="IP")
+
+    # 청크 파라미터
+    MAX_TOKENS = int(settings["chunkSize"])
+    OVERLAP = int(settings["overlap"])
+
+    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
+        words = text.split()
+        chunks: List[str] = []
+        start = 0
+        while start < len(words):
+            end = min(start + max_tokens, len(words))
+            chunk = " ".join(words[start:end]).strip()
+            if chunk:
+                chunks.append(chunk)
+            start += max_tokens - overlap
+        return chunks
+
+    # 보안레벨 규칙
+    all_rules = get_security_level_rules_all()
+
+    # 실제 처리
+    import fitz  # type: ignore
+    added_files: List[str] = []
+    total_chunks = 0
+    tasks = (task_types or list(TASK_TYPES))
+
+    for p in pdf_paths:
+        p = str(p)
+        src = Path(p)
+        if not src.exists():
+            continue
+
+        # 텍스트 추출
+        with fitz.open(src) as doc:
+            text_all = "\n\n".join(pg.get_text("text").strip() for pg in doc)
+
+        # 세션 extracted_texts/<파일명.txt> 로 저장 (중복 방지 타임스탬프)
+        ts = int(time.time())
+        base_name = f"{src.stem}_{ts}"
+        txt_rel = Path(f"{base_name}.txt")
+        txt_path = sess_extract / txt_rel
+        txt_path.write_text(text_all, encoding="utf-8")
+
+        # 보안 레벨 산정
+        sec_map = {task: _determine_level_for_task(text_all, all_rules.get(task, {"maxLevel":1, "levels":{}})) for task in TASK_TYPES}
+
+        # doc_id/version 유추 (세션은 파일명 기반으로 단순화)
+        doc_id, version = _parse_doc_version(base_name)
+
+        # 기존 동일 doc_id/version 삭제 (세션 컬렉션 내)
+        try:
+            client.delete(collection_name=coll, filter=f"doc_id == '{doc_id}' && version <= {int(version)}")
+        except Exception:
+            pass
+
+        # 청크/임베딩
+        chunks = chunk_text(text_all)
+        batch = []
+        for task in tasks:
+            lvl = int(sec_map.get(task, 1))
+            for idx, c in enumerate(chunks):
+                vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
+                batch.append({
+                    "embedding": vec.tolist(),
+                    "path": str(txt_rel.as_posix()),  # 세션 로컬 텍스트 경로(상대)
+                    "chunk_idx": int(idx),
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(version),
+                    "text": c,
+                })
+                if len(batch) >= 128:
+                    client.insert(coll, batch); total_chunks += len(batch); batch = []
+        if batch:
+            client.insert(coll, batch); total_chunks += len(batch)
+
+        try:
+            client.flush(coll)
+        except Exception:
+            pass
+
+        added_files.append(src.name)
+
+    # 메타 업데이트
+    if added_files:
+        cur = get_test_session(sid) or {}
+        files_prev = list(set(cur.get("pdf_files") or []))
+        files_new = sorted(list(set(files_prev + added_files)))
+        cur.update({"pdf_files": files_new})
+        _write_session_meta(sid, cur)
+
+    return {"sid": sid, "collection": coll, "ingested_files": added_files, "chunks": total_chunks}
+
+async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None) -> Dict:
+    """
+    세션 컬렉션에서만 검색. 반환 구조는 프로덕션 search_documents와 최대한 동일.
+    """
+    meta = get_test_session(sid)
+    if not meta:
+        return {"error": "invalid sid"}
+    coll = meta["collection"]
+    sess_extract = Path(meta["extracted_dir"])
+
+    t0 = time.perf_counter()
+    if req.task_type not in TASK_TYPES:
+        return { "error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}" }
+
+    settings = get_vector_settings()
+    model_key = req.model or settings["embeddingModel"]
+    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
+
+    tok, model, device = await _get_or_load_embedder_async(model_key)
+    q_emb = _embed_text(tok, model, device, req.query)
+
+    client = _client()
+    _ensure_collection_and_index_test(client, emb_dim=len(q_emb), collection_name=coll, metric="IP")
+    if coll not in client.list_collections():
+        return {"error": "session collection missing"}
+
+    base_limit = int(req.top_k)
+    candidate = min(50, max(base_limit, base_limit * 4))
+    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
+
+    def _dense_search(limit=candidate):
+        return client.search(
+            collection_name=coll,
+            data=[q_emb.tolist()],
+            anns_field="embedding",
+            limit=int(limit),
+            search_params={"metric_type": "IP", "params": {}},
+            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+            filter=filter_expr,
+        )
+
+    def _sparse_search(query_text: str, limit=candidate):
+        try:
+            return client.search(
+                collection_name=coll,
+                data=[query_text],
+                anns_field="text_sparse",
+                limit=int(limit),
+                search_params={"params": {}},
+                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+                filter=filter_expr,
+            )
+        except Exception as e:
+            logger.warning(f"[Milvus][test] sparse search unavailable: {e}")
+            return [[]]
+
+    def _load_snippet_session(path_rel: str, cidx: int, max_tokens: int = int(settings["chunkSize"]), overlap: int = int(settings["overlap"])) -> str:
+        try:
+            full_txt = (sess_extract / path_rel).read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        words = full_txt.split()
+        if not words:
+            return ""
+        start = cidx * (max_tokens - overlap)
+        snippet = " ".join(words[start: start + max_tokens]).strip()
+        return snippet or " ".join(words[:max_tokens]).strip()
+
+    hits_raw = []
+    if search_type == "vector":
+        res = _dense_search(limit=candidate)
+        for hit in res[0]:
+            if isinstance(hit, dict):
+                ent = hit.get("entity", {})
+                path = ent.get("path"); cidx = int(ent.get("chunk_idx", 0))
+                ttype = ent.get("task_type"); lvl = int(ent.get("security_level", 1))
+                doc_id = ent.get("doc_id"); score_vec = float(hit.get("distance", 0.0))
+            else:
+                path = hit.entity.get("path"); cidx = int(hit.entity.get("chunk_idx", 0))
+                ttype = hit.entity.get("task_type"); lvl = int(hit.entity.get("security_level", 1))
+                doc_id = hit.entity.get("doc_id"); score_vec = float(hit.score)
+            snippet = _load_snippet_session(path, cidx)
+            hits_raw.append({"path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl,
+                             "doc_id": doc_id, "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet})
+    else:
+        res_dense = _dense_search(limit=candidate)
+        res_sparse = _sparse_search(req.query, limit=candidate)
+
+        def _collect(res):
+            out = []
+            for hit in (res[0] if res and len(res) > 0 else []):
+                if isinstance(hit, dict):
+                    ent = hit.get("entity", {})
+                    path = ent.get("path"); cidx = int(ent.get("chunk_idx", 0))
+                    ttype = ent.get("task_type"); lvl = int(ent.get("security_level", 1))
+                    doc_id = ent.get("doc_id"); score = float(hit.get("distance", 0.0))
+                else:
+                    path = hit.entity.get("path"); cidx = int(hit.entity.get("chunk_idx", 0))
+                    ttype = hit.entity.get("task_type"); lvl = int(hit.entity.get("security_level", 1))
+                    doc_id = hit.entity.get("doc_id"); score = float(hit.score)
+                out.append(((path, cidx, ttype, lvl, doc_id), score))
+            return out
+
+        dense_list = _collect(res_dense)
+        sparse_list = _collect(res_sparse)
+
+        # RRF
+        rrf = {}
+        K = 60.0
+        for rank, (key, _s) in enumerate(dense_list, start=1):
+            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+        for rank, (key, _s) in enumerate(sparse_list, start=1):
+            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+        merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
+        for (path, cidx, ttype, lvl, doc_id), fused in merged:
+            snippet = _load_snippet_session(path, cidx)
+            s_vec = next((s for (k, s) in dense_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            s_spa = next((s for (k, s) in sparse_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            hits_raw.append({"path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl,
+                             "doc_id": doc_id, "score_vec": float(s_vec), "score_sparse": float(s_spa),
+                             "score_fused": float(fused), "snippet": snippet})
+
+    # 정렬/상위 K
+    if search_type == "bm25":
+        for h in hits_raw:
+            h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
+    elif search_type == "hybrid":
+        if any("score_fused" in h for h in hits_raw):
+            for h in hits_raw: h["score"] = h.get("score_fused", 0.0)
+        else:
+            for h in hits_raw: h["score"] = 0.5*h.get("score_vec",0.0) + 0.5*h.get("score_sparse",0.0)
+    else:
+        for h in hits_raw: h["score"] = h.get("score_vec", 0.0)
+    hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+
+    # 프롬프트 컨텍스트 + check_file
+    context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
+    prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
+    check_files: List[str] = []
+    try:
+        for h in hits_sorted:
+            # 세션은 원본 파일명이 세션 메타에만 있으므로, path(doc_id)에서 stem을 추출
+            did = h.get("doc_id")
+            if did:
+                check_files.append(f"{did}.pdf")
+    except Exception:
+        pass
+    elapsed = round(time.perf_counter() - t0, 4)
+
+    return {
+        "elapsed_sec": elapsed,
+        "settings_used": {"model": model_key, "searchType": search_type},
+        "hits": [{
+            "score": float(h["score"]),
+            "path": h["path"],
+            "chunk_idx": int(h["chunk_idx"]),
+            "task_type": h["task_type"],
+            "security_level": int(h["security_level"]),
+            "doc_id": h.get("doc_id"),
+            "snippet": h["snippet"],
+        } for h in hits_sorted],
+        "prompt": prompt,
+        "check_file": sorted(list(set(check_files))),
+    }
+
+async def delete_test_files_by_names(sid: str, file_names: List[str], task_type: Optional[str] = None) -> Dict:
+    meta = get_test_session(sid)
+    if not meta:
+        return {"deleted": 0, "requested": len(file_names), "error": "invalid sid"}
+    coll = meta["collection"]
+    sess_dir = Path(meta["dir"])
+    sess_extract = Path(meta["extracted_dir"])
+
+    if not file_names:
+        return {"deleted": 0, "requested": 0}
+
+    client = _client()
+    if coll not in client.list_collections():
+        return {"deleted": 0, "requested": len(file_names)}
+
+    # task_type 필터
+    task_filter = ""
+    if task_type:
+        if task_type not in TASK_TYPES:
+            return {"deleted": 0, "requested": len(file_names), "error": f"invalid taskType: {task_type}"}
+        task_filter = f" && task_type == '{task_type}'"
+
+    deleted_total = 0
+    per_file: dict[str, int] = {}
+    for name in file_names:
+        stem = Path(name).stem
+        try:
+            base_id, _ver = _parse_doc_version(stem)
+        except Exception:
+            base_id = stem
+        try:
+            client.delete(collection_name=coll, filter=f"doc_id == '{base_id}'{task_filter}")
+            deleted_total += 1
+            per_file[name] = per_file.get(name, 0) + 1
+        except Exception:
+            logger.exception("[test] Milvus delete failed: %s", name)
+            per_file[name] = per_file.get(name, 0)
+
+        # 세션 로컬 파일 제거 (txt, 원본 pdf)
+        try:
+            # extracted_texts/*.txt 중 base_id로 시작하는 것들 삭제
+            for t in sess_extract.glob(f"{base_id}_*.txt"):
+                t.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            # 업로드 폴더 내 원본 pdf (타임스탬프 붙어서 정확 일치 어렵지만 base_id로 매칭 시도)
+            for p in sess_dir.glob(f"{base_id}_*.pdf"):
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    try:
+        client.flush(coll)
+    except Exception:
+        pass
+
+    # 메타 업데이트
+    cur = get_test_session(sid) or {}
+    if cur:
+        prev = list(set(cur.get("pdf_files") or []))
+        left = [f for f in prev if Path(f).stem not in {Path(n).stem for n in file_names}]
+        cur.update({"pdf_files": sorted(left)})
+        _write_session_meta(sid, cur)
+
+    return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file}
+
+async def drop_test_session(sid: str) -> Dict:
+    meta = get_test_session(sid)
+    if not meta:
+        return {"message": "session not found", "sid": sid}
+
+    coll = meta["collection"]
+    client = _client()
+    try:
+        if coll in client.list_collections():
+            client.drop_collection(coll)
+    except Exception:
+        logger.exception("[test] failed to drop collection: %s", coll)
+
+    # 세션 폴더 삭제
+    try:
+        import shutil
+        shutil.rmtree(_session_dir(sid), ignore_errors=True)
+    except Exception:
+        logger.exception("[test] failed to remove session dir")
+
+    return {"message": "session dropped", "sid": sid}
