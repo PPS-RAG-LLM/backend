@@ -38,6 +38,6 @@ def resolve(provider: str, model_key: str) -> Streamer:
 # LLM 클래스: 워크스페이스 정보를 기반으로 Streamer를 생성
 class LLM:
     @staticmethod
-    def from_workspace(ws: dict) -> Streamer:
+    def from_workspace(provider: str, model_key: str) -> Streamer:
         # 주어진 워크스페이스 정보에서 프로바이더와 모델 키를 사용하여 Streamer 생성
-        return resolve(ws["provider"], ws["chat_model"])
+        return resolve(provider, model_key)
