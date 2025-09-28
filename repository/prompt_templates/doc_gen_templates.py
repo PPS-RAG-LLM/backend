@@ -39,6 +39,7 @@ def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
                 SystemPromptVariable.key,
                 SystemPromptVariable.value,
                 SystemPromptVariable.description,
+                SystemPromptVariable.required,
             )
             .join(SystemPromptVariable, SystemPromptVariable.id == PromptMapping.variable_id)
             .where(PromptMapping.template_id.in_(ids))
@@ -48,7 +49,7 @@ def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
         by_tid: Dict[int, List[Dict[str, str]]] = {}
         for r in vars_rows:
             by_tid.setdefault(r.template_id, []).append(
-                {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description}
+                {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description, "required": r.required}
             )
 
         out: List[Dict[str, object]] = []
@@ -89,6 +90,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
                 SystemPromptVariable.key,
                 SystemPromptVariable.value,
                 SystemPromptVariable.description,
+                SystemPromptVariable.required,
             )
             .join(PromptMapping, PromptMapping.variable_id == SystemPromptVariable.id)
             .where(PromptMapping.template_id == template_id)
@@ -96,7 +98,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
         )
         var_rows = session.execute(vars_stmt).all()
         variables = [
-            {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description}
+            {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description, "required": r.required}
             for r in var_rows
         ]
 
@@ -131,7 +133,7 @@ def repo_create_doc_gen_template(
                     key = var["key"],
                     value = var.get("value"), # 유연
                     description=var["description"],
-                    required=True,
+                    required=var.get("required", False),
                 )
                 # variable_id 세팅
                 template.variable_mappings.append(PromptMapping(variable=variable))
