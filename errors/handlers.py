@@ -1,4 +1,5 @@
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from .exceptions import (
     BaseAPIException,
@@ -60,8 +61,9 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
-async def validation_exception_handler(request: Request, exc: Exception):
-    """FastAPI 검증 오류 핸들러"""
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"validation error: {exc.errors()}")
     return JSONResponse(
-        status_code=422, content={"detail": "요청 데이터의 형식이 올바르지 않습니다"}
+        status_code=422,
+        content={"detail": exc.errors()},
     )
