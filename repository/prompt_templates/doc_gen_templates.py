@@ -34,6 +34,7 @@ def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
         vars_stmt = (
             select(
                 PromptMapping.template_id,
+                SystemPromptVariable.id,
                 SystemPromptVariable.type,
                 SystemPromptVariable.key,
                 SystemPromptVariable.value,
@@ -47,7 +48,7 @@ def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
         by_tid: Dict[int, List[Dict[str, str]]] = {}
         for r in vars_rows:
             by_tid.setdefault(r.template_id, []).append(
-                {"type": r.type, "key": r.key, "value": r.value, "description": r.description}
+                {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description}
             )
 
         out: List[Dict[str, object]] = []
@@ -197,3 +198,31 @@ def repo_delete_doc_gen_template(template_id: int) -> bool:
         session.delete(template)
         session.commit()
         return True
+
+def repo_delete_doc_gen_prompt_variable(template_id: int, variable_id: int) -> bool:
+    with get_session() as session:
+        try:
+            mapping = session.execute(
+                    select(PromptMapping).where(
+                        PromptMapping.template_id == template_id,
+                        PromptMapping.variable_id == variable_id,
+                    )
+                ).scalars().first()
+            if not mapping:
+                return False
+            other_refs = session.execute(
+                    select(PromptMapping.id).where(
+                        PromptMapping.variable_id == mapping.variable_id,
+                        PromptMapping.id != mapping.id,
+                    ).limit(1)
+                ).scalars().first()
+
+            if not other_refs and mapping.variable:
+                session.delete(mapping.variable)
+
+            session.delete(mapping)
+            session.commit()
+            return True
+        except IntegrityError as exc:
+            session.rollback()
+            raise DatabaseError(f"Doc gen prompt mapping delete failed: {exc}") from exc

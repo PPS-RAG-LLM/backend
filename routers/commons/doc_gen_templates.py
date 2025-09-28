@@ -1,5 +1,5 @@
 # /home/work/CoreIQ/yb/backend/routers/users/doc_gen_templates.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body, Path, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from service.commons.doc_gen_templates import (
@@ -8,16 +8,18 @@ from service.commons.doc_gen_templates import (
     list_doc_gen_templates_all,
     generate_new_doc_gen_prompt,
     update_doc_gen_prompt_service,
-    remove_doc_gen_template
+    remove_doc_gen_template,
+    remove_doc_gen_prompt_variable
 )
 
 router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
 
 class VariableItem(BaseModel):
-    type: str
-    key: str
-    value: Optional[str] = None
-    description: str
+    id: int
+    type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number'"
+    key: str = "'시작일' | '종료일' | '날짜' | '작성자' | '요청사항' 등 사용자에게 표시될 부분 "
+    value: Optional[str] = "관리자 테스트 시 쓰일 예시 답안"
+    description: str = "사용자에게 보여줄 설명"
     required: Optional[bool] = False
 
 class TemplateListItem(BaseModel):
@@ -80,5 +82,15 @@ def update_doc_gen_prompt(template_id: int, body: TemplatePayload):
 @router.delete("/template/{template_id}", status_code=204, summary="관리자용 | 문서생성용 프롬프트 템플릿 삭제" )
 def delete_doc_gen_prompt(template_id: int):
     deleted = remove_doc_gen_template(template_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+
+@router.delete("/template/{template_id}/variable", status_code=204, summary="관리자용 | 문서생성용 프롬프트 템플릿 레이블 삭제")
+def delete_doc_gen_prompt_variable(
+    template_id: int = Path(..., description="프롬프트 템플릿 id"),
+    variable_id: int = Query(..., description="레이블 id")
+):
+    deleted = remove_doc_gen_prompt_variable(template_id, variable_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Template not found")
