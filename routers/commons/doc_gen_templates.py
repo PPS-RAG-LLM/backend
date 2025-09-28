@@ -24,19 +24,18 @@ class VariableItem(BaseModel):
 
 class TemplateListItem(BaseModel):
     id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str = "시스템 프롬프트"
+    user_prompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateListItem]
 
 class TemplateContentResponse(BaseModel):
-    id: int
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str ="시스템 프롬프트" 
+    user_prompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 @router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 관리자 측에서 기본값으로 정해진 문서생성용 템플릿 각 세부 테스크 목록")
@@ -50,17 +49,24 @@ def list_doc_gen_templates_all_route():
     return {"templates": items}
 
 @router.get("/template/{template_id}", response_model=TemplateContentResponse, summary="문서생성성 템플릿 단건 출력(상세+변수)")
-def get_doc_gen_template_route(template_id: int):
+def get_doc_gen_template_route(template_id: int = Path(..., description="프롬프트 템플릿 id")):
     row = get_doc_gen_template(template_id)
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
     return row
 
+class VariableItemRequest(BaseModel):
+    type: str = "'start_date'| 'end_date' | 'date' | 'text' | 'textarea' | 'number'"
+    key: str = "'시작일' | '종료일' | '날짜' | '작성자' | '요청사항' 등 사용자에게 표시될 부분 "
+    value: Optional[str] = "관리자 테스트 시 쓰일 예시 답안"
+    description: str = "사용자에게 보여줄 설명"
+    required: Optional[bool] = False
+
 class TemplatePayload(BaseModel):
-    name: str
-    system_prompt: str
-    user_prompt: Optional[str] = ""
-    variables: List[VariableItem]
+    name: str = "'business_trip' | 'report' | 'meeting'"
+    system_prompt: str = "시스템프롬프트"
+    user_prompt: Optional[str] = "유저 프롬프트트"
+    variables: List[VariableItemRequest]
 
 @router.post("/template",  response_model=TemplateContentResponse, summary="관리자용 | 문서생성용 프롬프트 템플릿 만들기")
 def create_doc_gen_prompt(body:TemplatePayload):
@@ -71,7 +77,8 @@ def create_doc_gen_prompt(body:TemplatePayload):
     return item
 
 @router.put("/template/{template_id}", response_model=TemplateContentResponse, summary="관리자용 | 문서생성용 프롬프트 템플릿 수정" )
-def update_doc_gen_prompt(template_id: int, body: TemplatePayload):
+def update_doc_gen_prompt(template_id: int = Path(..., description="프롬프트 템플릿 id"),
+ body: TemplateContentResponse = Body(..., description="")):
     variables = [var.model_dump() for var in body.variables]
     item = update_doc_gen_prompt_service(template_id, body.name, body.system_prompt, body.user_prompt, variables)
     if not item:
@@ -80,7 +87,7 @@ def update_doc_gen_prompt(template_id: int, body: TemplatePayload):
 
 
 @router.delete("/template/{template_id}", status_code=204, summary="관리자용 | 문서생성용 프롬프트 템플릿 삭제" )
-def delete_doc_gen_prompt(template_id: int):
+def delete_doc_gen_prompt(template_id: int = Path(..., description="프롬프트 템플릿 id")):
     deleted = remove_doc_gen_template(template_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Template not found")

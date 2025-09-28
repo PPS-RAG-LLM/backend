@@ -84,6 +84,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
 
         vars_stmt = (
             select(
+                SystemPromptVariable.id,
                 SystemPromptVariable.type,
                 SystemPromptVariable.key,
                 SystemPromptVariable.value,
@@ -95,7 +96,7 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
         )
         var_rows = session.execute(vars_stmt).all()
         variables = [
-            {"type": r.type, "key": r.key, "value": r.value, "description": r.description}
+            {"id": r.id, "type": r.type, "key": r.key, "value": r.value, "description": r.description}
             for r in var_rows
         ]
 
@@ -125,6 +126,7 @@ def repo_create_doc_gen_template(
 
             for var in variables or []:
                 variable = SystemPromptVariable(
+                    id = var["id"],
                     type = var["type"],  # null 오류
                     key = var["key"],
                     value = var.get("value"), # 유연
@@ -148,34 +150,79 @@ def repo_create_doc_gen_template(
                 raise DatabaseError(f"QA Prompt template create failed: {exc}") from exc
     
 def repo_update_doc_gen_template(
-    template_id: int, name: str, system_prompt: str, user_prompt: Optional[str], variables: Optional[List[Dict[str, object]]]
-    ):
+    template_id: int,
+    name: str,
+    system_prompt: str,
+    user_prompt: Optional[str],
+    variables: Optional[List[Dict[str, object]]],
+) -> Optional[Dict[str, object]]:
     with get_session() as session:
         template = session.get(SystemPromptTemplate, template_id)
         if not template or template.category != "doc_gen":
             return None
+
         template.name = name
         template.system_prompt = system_prompt
         template.user_prompt = user_prompt
 
-        for mapping in list(template.variable_mappings):
-            if mapping.variable:
-                session.delete(mapping.variable)
-            session.delete(mapping)
-        session.flush()
+        existing_mappings = {mapping.variable_id: mapping for mapping in template.variable_mappings}
+        seen_variable_ids: set[int] = set()
 
         for var in variables or []:
-            variable = SystemPromptVariable(
-                type=var["type"],
-                key=var["key"],
-                value=var.get("value"),
-                description=var["description"],
-                required=var.get("required", False),
+            var_id = var.get("id")
+            if var_id is not None:
+                seen_variable_ids.add(var_id)
+                mapping = existing_mappings.pop(var_id, None)
+
+                if not mapping:
+                    variable = session.get(SystemPromptVariable, var_id)
+                    if not variable:
+                        raise DatabaseError(f"Variable not found: {var_id}")
+                    mapping = PromptMapping(variable=variable)
+                    template.variable_mappings.append(mapping)
+                else:
+                    variable = mapping.variable
+
+                variable.type = var["type"]
+                variable.key = var["key"]
+                variable.value = var.get("value")
+                variable.description = var["description"]
+                variable.required = var.get("required", False)
+            else:
+                variable = SystemPromptVariable(
+                    type=var["type"],
+                    key=var["key"],
+                    value=var.get("value"),
+                    description=var["description"],
+                    required=var.get("required", False),
+                )
+                template.variable_mappings.append(PromptMapping(variable=variable))
+
+        for mapping in existing_mappings.values():
+            variable = mapping.variable
+            session.delete(mapping)
+
+            if not variable:
+                continue
+
+            other_reference_exists = (
+                session.execute(
+                    select(PromptMapping.id)
+                    .where(
+                        PromptMapping.variable_id == variable.id,
+                        PromptMapping.template_id != template.id,
+                    )
+                    .limit(1)
+                )
+                .scalars()
+                .first()
             )
-            template.variable_mappings.append(PromptMapping(variable=variable))
+            if not other_reference_exists:
+                session.delete(variable)
 
         session.commit()
         session.refresh(template)
+
         return {
             "id": template.id,
             "name": template.name,
