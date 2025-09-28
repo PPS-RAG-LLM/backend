@@ -9,7 +9,8 @@ from service.commons.doc_gen_templates import (
     generate_new_doc_gen_prompt,
     update_doc_gen_prompt_service,
     remove_doc_gen_template,
-    remove_doc_gen_prompt_variable
+    remove_doc_gen_prompt_variable,
+    create_doc_gen_prompt_variable_service
 )
 
 router = APIRouter(tags=["doc_gen"], prefix="/v1/doc-gen")
@@ -93,6 +94,16 @@ def delete_doc_gen_prompt(template_id: int = Path(..., description="프롬프트
         raise HTTPException(status_code=404, detail="Template not found")
 
 
+@router.post("/template/{template_id}/variable", response_model=VariableItem, summary="관리자용 | 문서생성용 프롬프트 템플릿 레이블 추가")
+def create_doc_gen_prompt_variable(
+    template_id: int = Path(..., description="프롬프트 템플릿 id"),
+    variables: VariableItemRequest = Body(..., description="레이블 추가 요청")
+):
+    item = create_doc_gen_prompt_variable_service(template_id, variables.model_dump())
+    if not item:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return item
+
 @router.delete("/template/{template_id}/variable", status_code=204, summary="관리자용 | 문서생성용 프롬프트 템플릿 레이블 삭제")
 def delete_doc_gen_prompt_variable(
     template_id: int = Path(..., description="프롬프트 템플릿 id"),
@@ -101,3 +112,4 @@ def delete_doc_gen_prompt_variable(
     deleted = remove_doc_gen_prompt_variable(template_id, variable_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Template not found")
+

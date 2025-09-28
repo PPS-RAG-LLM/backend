@@ -1,11 +1,12 @@
 # /home/work/CoreIQ/yb/backend/repository/users/doc_gen_templates.py
+from tempfile import template
 from typing import List, Dict, Optional
 from sqlalchemy import select, true
 from sqlalchemy.exc import IntegrityError
 from utils.database import get_session
 from storage.db_models import SystemPromptTemplate, PromptMapping, SystemPromptVariable
 from errors import DatabaseError
-from utils import logger
+from utils import logger, now_kst
 
 logger = logger(__name__)
 def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
@@ -136,7 +137,7 @@ def repo_create_doc_gen_template(
                     required=var.get("required", False),
                 )
                 # variable_id 세팅
-                template.variable_mappings.append(PromptMapping(variable=variable))
+                template.variable_mappings.append(PromptMapping(variable=variable, created_at=now_kst(), updated_at=now_kst()))
             session.commit()
             session.refresh(template)
 
@@ -180,7 +181,7 @@ def repo_update_doc_gen_template(
                     variable = session.get(SystemPromptVariable, var_id)
                     if not variable:
                         raise DatabaseError(f"Variable not found: {var_id}")
-                    mapping = PromptMapping(variable=variable)
+                    mapping = PromptMapping(variable=variable, updated_at=now_kst())
                     template.variable_mappings.append(mapping)
                 else:
                     variable = mapping.variable
@@ -198,7 +199,7 @@ def repo_update_doc_gen_template(
                     description=var["description"],
                     required=var.get("required", False),
                 )
-                template.variable_mappings.append(PromptMapping(variable=variable))
+                template.variable_mappings.append(PromptMapping(variable=variable, updated_at=now_kst()))
 
         for mapping in existing_mappings.values():
             variable = mapping.variable
@@ -247,6 +248,33 @@ def repo_delete_doc_gen_template(template_id: int) -> bool:
         session.delete(template)
         session.commit()
         return True
+
+def repo_create_doc_gen_prompt_variable(template_id: int, variables: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    with get_session() as session:
+        try:
+            variable = SystemPromptVariable(
+                type=variables["type"],
+                key=variables["key"],
+                value=variables.get("value"),
+                description=variables["description"],
+                required=variables.get("required", False),
+            )
+            session.add(variable)
+            session.flush() # variable.id 확보
+            mapping = PromptMapping(template_id=template_id, variable_id=variable.id, created_at=now_kst(), updated_at=now_kst())
+            session.add(mapping)
+            session.commit()
+            return {
+                "id": variable.id,
+                "type": variable.type,
+                "key": variable.key,
+                "value": variable.value,
+                "description": variable.description,
+                "required": variable.required,
+            }
+        except IntegrityError as exc:
+            session.rollback()
+            raise DatabaseError(f"Doc gen prompt variable create failed: {exc}") from exc
 
 def repo_delete_doc_gen_prompt_variable(template_id: int, variable_id: int) -> bool:
     with get_session() as session:

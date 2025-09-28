@@ -6,7 +6,8 @@ from repository.prompt_templates.doc_gen_templates import (
     repo_create_doc_gen_template,
     repo_update_doc_gen_template,
     repo_delete_doc_gen_template,
-    repo_delete_doc_gen_prompt_variable
+    repo_delete_doc_gen_prompt_variable,
+    repo_create_doc_gen_prompt_variable
 )
 
 def list_doc_gen_templates() -> List[Dict[str, str]]:
@@ -28,6 +29,9 @@ def update_doc_gen_prompt_service(
 
 def remove_doc_gen_template(template_id: int) -> bool:
     return repo_delete_doc_gen_template(template_id)
+
+def create_doc_gen_prompt_variable_service(template_id: int, variables: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    return repo_create_doc_gen_prompt_variable(template_id, variables)
 
 def remove_doc_gen_prompt_variable(template_id: int, variable_id: int) -> bool:
     return repo_delete_doc_gen_prompt_variable(template_id, variable_id)
