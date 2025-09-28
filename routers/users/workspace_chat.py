@@ -3,8 +3,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Path, Query, Body
 from starlette.responses import StreamingResponse
 from service.users.chat import (
-    stream_chat_for_workspace,
+    stream_chat_for_qa,
     preflight_stream_chat_for_workspace,
+    stream_chat_for_doc_gen,
+    stream_chat_for_summary,
 )
 from service.commons.doc_gen_templates import get_doc_gen_template
 from utils import logger
@@ -25,17 +27,11 @@ class Attachment(BaseModel):
 class StreamChatRequest(BaseModel):
     message: str
     mode: Optional[str] = Field(None, pattern="^(chat|query)$")
+    provider: Optional[str] = None
+    model: Optional[str] = None
     sessionId: Optional[str] = None
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    # 템플릿 통합용(선택): doc_gen/summary 전용
-    templateId: Optional[int] = None
-    templateVariables: dict[str, str] = Field(default_factory=dict)
-    templateText: Optional[str] = None
-    # 시스템 프롬프트 오버라이드(선택)
-    systemPrompt: Optional[str] = None
 
 
 @chat_router.post(
@@ -57,7 +53,7 @@ def stream_chat_qa_endpoint(
     #     body=body.model_dump(exclude_unset=True),
     #     thread_slug=thread_slug,
     # )
-    gen = stream_chat_for_workspace(
+    gen = stream_chat_for_qa(
         user_id=user_id,
         slug=slug,
         thread_slug=thread_slug,
@@ -94,8 +90,11 @@ def to_see(gen):
 
 # ====== Unified POST APIs ======
 class SummaryRequest(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
     systemPrompt: Optional[str] = None
-    userPrompt: str
+    originalText: Optional[str] = "텍스트원문"
+    userPrompt: Optional[str] = "요청사항"
     attachments: List[Attachment] = Field(default_factory=list)
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")
@@ -112,15 +111,18 @@ def summary_stream_endpoint(
     #     thread_slug=None,
     # )
     message = body.userPrompt.strip()
-    gen = stream_chat_for_workspace(
+    gen = stream_chat_for_summary(
         user_id=user_id,
         slug=slug,
         category="summary",
         body={
+            "provider": body.provider,
+            "model": body.model,
             "message": message,
             "mode": "chat",
             "attachments": [a.model_dump() for a in body.attachments],
             "systemPrompt": body.systemPrompt,
+            "originalText": body.originalText,
         },
     )
     return StreamingResponse(to_see(gen), media_type="text/event-stream")
@@ -130,9 +132,11 @@ class VariableItem(BaseModel):
     value: str
 
 class DocGenRequest(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    templateId: int
     systemPrompt: Optional[str] = None
     userPrompt: Optional[str] = None
-    templateId: int
     variables: List[VariableItem] = Field(default_factory=list)
     attachments: List[Attachment] = Field(default_factory=list)
 
@@ -147,11 +151,12 @@ def doc_gen_stream_endpoint(
     if not tmpl:
         raise BadRequestError("유효하지 않은 templateId 입니다.")
     allowed_keys = {str(v.get("key") or "") for v in (tmpl.get("variables") or []) if v.get("key")}
-    provided_keys = set((body.variables or {}).keys())
-    missing = allowed_keys - provided_keys
+    variables = [item.key.strip() for item in (body.variables or []) if (item.key or "").strip()]
+    provided_keys = {key for key, _ in variables}
+    missing = {key for key in allowed_keys if key and key not in provided_keys}
     if missing:
         raise BadRequestError(f"필수 변수 누락: {sorted(missing)}")
-    filtered_vars = {k: v for k, v in (body.variables or {}).items() if k in allowed_keys}
+    filtered_vars = {key: value for key, value in variables if key in allowed_keys}
 
     # preflight_stream_chat_for_workspace(
     #     user_id=user_id,
@@ -161,11 +166,13 @@ def doc_gen_stream_endpoint(
     #     thread_slug=None,
     # )
     message = (body.userPrompt or "").strip() or "요청된 템플릿에 따라 문서를 작성해 주세요."
-    gen = stream_chat_for_workspace(
+    gen = stream_chat_for_doc_gen(
         user_id=user_id,
         slug=slug,
         category="doc_gen",
         body={
+            "provider": body.provider,
+            "model": body.model,
             "message": message,
             "mode": "chat",
             "attachments": [a.model_dump() for a in body.attachments],

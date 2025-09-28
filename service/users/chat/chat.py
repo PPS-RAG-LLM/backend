@@ -1,6 +1,6 @@
 from typing import Dict, Any, Generator, List
 from errors import NotFoundError, BadRequestError
-from utils.llms.registry import LLM
+from utils.llms.registry import LLM, Streamer
 from repository.users.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
 from repository.users.workspace_thread import get_thread_id_by_slug_for_user
 from repository.documents import list_doc_ids_by_workspace, delete_document_vectors_by_doc_ids
@@ -124,47 +124,13 @@ def preflight_stream_chat_for_workspace(
     return {"ws": ws, "workspace_id": workspace_id, "thread_id": thread_id, "mode": mode}
 
 
-
-def stream_chat_for_workspace(
-    user_id: int, 
-    slug: str, 
-    category: str,
-    body: Dict[str, Any], 
-    thread_slug: str=None
-) -> Generator[str, None, None]:
+def insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any], messages: List[Dict[str, Any]]) -> Generator[str, None, None]:
     """
-    주: 이 함수는 스트리밍만 담당한다고 가정. 검증/조회 예외는 preflight에서 끝낸다.
+    RAG 컨텍스트 주입
     """
-    # 프리플라이트 결과를 재활용하려면 엔드포인트에서 전달받아도 되고,
-    # 간단히 여기서 한 번 더 호출해도 됨(중복 조회 허용 시).
-    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body, thread_slug)
-    ws = pre["ws"]
-    thread_id = pre["thread_id"]
-
-    # QA일 때만 history 포함
-    messages: List[Dict[str, Any]] = []
-    if category == "qa":
-        limit = ws["chat_history"]
-        if limit > 0 and thread_id is not None:
-            chat_history = get_chat_history_by_thread_id(user_id, thread_id, limit)
-            for chat in chat_history[::-1]:  # 오래된 것부터 추가
-                messages.append({"role": "user", "content": chat["prompt"]})
-                # response는 문자열 -> text만 추출
-                assistant_text = chat["response"]
-                try:
-                    assistant_text = json.loads(assistant_text).get("text", assistant_text)
-                except Exception:
-                    pass
-                messages.append({"role": "assistant", "content": assistant_text})
-
-    runner = LLM.from_workspace(ws) 
-
-    ###### RAG 컨텍스트 주입 ######
-    temp_docs_ids : List[str] = []
-    ctx = ""
     try:
+        candidate_doc_ids = []
         #후보 문서 : 워크 스페이스 전역 + 첨부 임시 문서
-        candidate_doc_ids: List[str] = []
         try:
             if ws.get("id"):
                 ws_docs = list_doc_ids_by_workspace(ws["id"]) or []
@@ -188,71 +154,193 @@ def stream_chat_for_workspace(
             logger.info(f"\n## CONTEXT 주입 결과: \n{ctx}\n")
             if ctx:
                 messages.insert(0, {"role": "system", "content": ctx})
+            return ctx, temp_doc_ids
     except Exception as e:
         logger.error(f"RAG context build failed: {e}")
 
-    # 메시지 구성 : [system = system_prompt + ctx] + [history] + [user]
-    messages : List[Dict[str, Any]] = []
 
-    # 1) system : (요청 오버라이드 또는 워크스페이스) 시스템 프롬프트 + RAG 컨텍스트 + 템플릿
-    system_parts: List[str] = []
-    effective_system_prompt = (body.get("systemPrompt") or ws.get("system_prompt"))
-    if effective_system_prompt:
-        system_parts.append(str(effective_system_prompt) + ". 반드시 한국어로 대답하세요.")
-    if ctx:
-        system_parts.append(ctx)
-    if category in ("doc_gen", "summary"):
-        try:
-            tpl = _render_template(category, body)
-            if tpl:
-                system_parts.append("### TEMPLATE\n" + tpl)
-        except Exception as e:
-            logger.error(f"template render failed: {e}")
-    if system_parts:
-        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+def _compose_summary_message(user_prompt: str, original_text: str) -> str:
+    original = str(original_text or "").strip()
+    detail = str(user_prompt or "").strip()
+    if not original and not detail:
+        raise BadRequestError("originalText 또는 userPrompt 중 하나는 필수입니다.")
+    if detail:
+        suffix = "[User Prompt]\n" + detail
+        return f"{original}\n\n{suffix}" if original else suffix
+    return original
 
-    # 2) history (QA일 때만)
-    if category == "qa":
-        limit = ws["chat_history"]
-        if limit > 0  and thread_id is not None:
-            chat_history = get_chat_history_by_thread_id(user_id, thread_id, limit)
-            for chat in chat_history[::-1]:
-                messages.append({"role": "user", "content": chat["prompt"]})
-                assistant_text = chat["response"]
-                try:
-                    assistant_text = json.loads(assistant_text).get("text", assistant_text)
-                except Exception:
-                    pass
-                messages.append({"role": "assistant", "content": assistant_text})
+
+
+def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any]) -> str:
+    base = str(user_prompt or "").strip()
+    if template_vars:
+        var_lines = "\n".join(f"- {key} : {value}" for key, value in template_vars.items())
+        block = "[User Prompt]\n" + var_lines
+        return f"{base}\n\n{block}" if base else block
+    return base or "요청된 템플릿에 따라 문서를 작성해 주세요."
+
     
-    # 3) user: system 중복 방지를 위해 system_prompt 제거한 ws로 사용자 메시지만 추가
+def _resolve_runner(ws: Dict[str, Any], body: Dict[str, Any]) -> Streamer:
+    provider = body.get("provider") or ws.get("provider")
+    model_key = body.get("model") or ws.get("chat_model")
+    if not provider or not model_key:
+        raise BadRequestError("provider와 model 정보를 확인할 수 없습니다.")
+    return LLM.from_workspace(provider, model_key)
+
+
+def _build_system_message(ctx: str, base_prompt: str, category: str, body: Dict[str, Any]) -> Dict[str, str]:
+    system_text = (base_prompt + "\n\n반드시 한국어로 대답하세요.").strip()
+    segments = [system_text or "반드시 한국어로 대답하세요."]
+    if ctx:
+        segments.append(ctx)
+    if category == "doc_gen":
+        tpl = _render_template("doc_gen", body)
+        if tpl:
+            segments.append("### TEMPLATE\n" + tpl)
+    return {"role": "system", "content": "\n\n".join(segments)}
+
+
+def stream_chat_for_qa(
+    user_id: int,
+    slug: str,
+    category: str,
+    body: Dict[str, Any],
+    thread_slug: str | None = None,
+) -> Generator[str, None, None]:
+    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body, thread_slug)
+    ws = pre["ws"]
+    thread_id = pre["thread_id"]
+
+    body = dict(body)
+    body["message"] = str(body.get("message") or "").strip()
+    if not body["message"]:
+        raise BadRequestError("message is required")
+
+    runner = _resolve_runner(ws, body)
+
+    messages: List[Dict[str, Any]] = []
+    if category == "qa" and ws["chat_history"] > 0 and thread_id is not None:
+        history = get_chat_history_by_thread_id(user_id, thread_id, ws["chat_history"])
+        for chat in history[::-1]:
+            messages.append({"role": "user", "content": chat["prompt"]})
+            assistant_text = chat["response"]
+            try:
+                assistant_text = json.loads(assistant_text).get("text", assistant_text)
+            except Exception:
+                pass
+            messages.append({"role": "assistant", "content": assistant_text})
+
+    ctx = ""
+    temp_doc_ids: List[str] = []
+    ctx_result = insert_rag_context(ws, body, messages)
+    if ctx_result:
+        ctx, temp_doc_ids = ctx_result
+
+    system_prompt = str(body.get("systemPrompt") or ws.get("system_prompt") or "").strip()
+    messages.insert(0, _build_system_message(ctx, system_prompt, category, body))
+
     ws_no_sys = dict(ws)
     ws_no_sys["system_prompt"] = None
     messages.extend(_build_messages(ws_no_sys, body))
 
-    logger.info(f"\n\nretrieval: \n\n{messages}\n\n")
+    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, temp_doc_ids, thread_id)
+
+
+def stream_chat_for_summary(
+    user_id: int,
+    slug: str,
+    category: str,
+    body: Dict[str, Any],
+) -> Generator[str, None, None]:
+    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body)
+    ws = pre["ws"]
+
+    body = dict(body)
+    body["message"] = _compose_summary_message(
+        original_text=body.get("originalText"),
+        user_prompt=body.get("userPrompt"),
+    )
+
+    runner = _resolve_runner(ws, body)
+
+    messages: List[Dict[str, Any]] = []
+    ctx = ""
+    temp_doc_ids: List[str] = []
+    ctx_result = insert_rag_context(ws, body, messages)
+    if ctx_result:
+        ctx, temp_doc_ids = ctx_result
+
+    system_prompt = str(body.get("systemPrompt") or "").strip()
+    messages.insert(0, _build_system_message(ctx, system_prompt, category, body))
+
+    ws_no_sys = dict(ws)
+    ws_no_sys["system_prompt"] = None
+    messages.extend(_build_messages(ws_no_sys, body))
+
+    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, temp_doc_ids)
+
+
+def stream_chat_for_doc_gen(
+    user_id: int,
+    slug: str,
+    category: str,
+    body: Dict[str, Any],
+) -> Generator[str, None, None]:
+    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body)
+    ws = pre["ws"]
+
+    body = dict(body)
+    body["message"] = _compose_doc_gen_message(
+        user_prompt=body.get("userPrompt"),
+        template_vars=body.get("templateVariables") or {},
+    )
+
+    runner = _resolve_runner(ws, body)
+
+    messages: List[Dict[str, Any]] = []
+    ctx = ""
+    temp_doc_ids: List[str] = []
+    ctx_result = insert_rag_context(ws, body, messages)
+    if ctx_result:
+        ctx, temp_doc_ids = ctx_result
+
+    system_prompt = str(body.get("systemPrompt") or "").strip()
+    messages.insert(0, _build_system_message(ctx, system_prompt, category, body))
+
+    ws_no_sys = dict(ws)
+    ws_no_sys["system_prompt"] = None
+    messages.extend(_build_messages(ws_no_sys, body))
+
+    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, temp_doc_ids)
+
+def _stream_and_persist(
+    user_id: int,
+    category: str,
+    ws: Dict[str, Any],
+    body: Dict[str, Any],
+    runner: Streamer,
+    messages: List[Dict[str, Any]],
+    temp_doc_ids: List[str],
+    thread_id: int | None = None,
+) -> Generator[str, None, None]:
     temperature = ws.get("temperature")
-
-    # logger.info(f"\n\nmessages: \n\n{messages}\n\n")
-    # logger.info(f"temperature: {temperature}\n\n")
-
-    acc_text = []
+    acc_text: List[str] = []
     t0 = time.perf_counter()
     for chunk in runner.stream(messages, temperature=temperature):
         if chunk:
             acc_text.append(chunk)
             yield chunk
     duration = max(time.perf_counter() - t0, 0.0)
-    # 스트리밍 완료 후 저장
+
     response_json = {
         "text": "".join(acc_text),
-        "sources": [],                          # TODO: 소스 추가
+        "sources": [],
         "type": "chat",
-        "attachments": body.get("attachments") or [], # TODO: 첨부파일 추가
+        "attachments": body.get("attachments") or [],
         "metrics": {
-            "completion_tokens": 0,             # TODO: 토큰 카운트 추가
-            "prompt_tokens": 0,                 # TODO: 토큰 카운트 추가
-            "total_tokens": 0,                  # TODO: 토큰 카운트 추가
+            "completion_tokens": 0,
+            "prompt_tokens": 0,
+            "total_tokens": 0,
             "outputTps": 0.0 if duration == 0 else len("".join(acc_text)) / max(duration, 1e-6),
             "duration": round(duration, 3),
         },
@@ -266,7 +354,7 @@ def stream_chat_for_workspace(
         thread_id=thread_id,
     )
     try:
-        if temp_doc_ids:  # 임시 문서 삭제
+        if temp_doc_ids:
             delete_document_vectors_by_doc_ids(temp_doc_ids)
-    except Exception as e:
-        logger.error(f"vector clenup failed: {e}")
+    except Exception as exc:
+        logger.error(f"vector cleanup failed: {exc}")
