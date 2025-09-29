@@ -11,6 +11,24 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from pydantic import BaseModel, Field
 
+
+def _row_to_dict(row) -> dict:
+    """sqlite3.Row, SQLAlchemy Row 등 다양한 row를 dict로 안정 변환."""
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        return row
+    # sqlite3.Row: keys() 지원
+    try:
+        return {k: row[k] for k in row.keys()}
+    except Exception:
+        # 최후의 보루
+        try:
+            return dict(row)
+        except Exception:
+            return {}
+
+
 # Reuse DB and prompt helpers from admin service
 from service.admin.manage_admin_LLM import (
     _connect,
@@ -121,25 +139,43 @@ def _find_mapping_id(conn, prompt_id: int, model_name: str) -> Optional[int]:
     return int(m["id"]) if m else None
 
 
-def _extract_template_texts(tmpl: Dict[str, Any], variables: Dict[str, Any]) -> Tuple[str, str, str]:
+# 기존 _extract_template_texts(tmpl, variables) 자리에 넣어주세요.
+# 기존 _extract_template_texts(tmpl, variables) 자리에 넣어주세요.
+def _extract_template_texts(tmpl, variables: dict[str, str]):
     """
-    manage_admin_LLM._fetch_prompt_full()가 반환하는 키가 환경마다 다를 수 있어
-    system_prompt/user_prompt(content/sub_content) 모두 대응.
-    반환: (system_text, user_text, tmpl_name)
+    tmpl 은 sqlite3.Row / dict 등일 수 있음 -> dict로 변환 후
+    - system(=content 또는 system_prompt)
+    - user(=sub_content 또는 user_prompt)
+    - name(=name 또는 template_name)
+    를 유연하게 추출.
     """
-    # 가능한 키 찾기
-    sys_key = "system_prompt" if "system_prompt" in tmpl else ("content" if "content" in tmpl else None)
-    usr_key = "user_prompt" if "user_prompt" in tmpl else ("sub_content" if "sub_content" in tmpl else None)
-    name = tmpl.get("name") or tmpl.get("template_name") or "untitled"
+    d = _row_to_dict(tmpl)
 
-    system_raw = tmpl.get(sys_key) if sys_key else ""
-    user_raw = tmpl.get(usr_key) if usr_key else ""
+    # system prompt 본문
+    system_raw = (
+        d.get("content") or
+        d.get("system_prompt") or
+        d.get("systemPrompt") or
+        ""
+    )
+    # user prompt(서브)
+    user_raw = (
+        d.get("sub_content") or
+        d.get("user_prompt") or
+        d.get("userPrompt") or
+        ""
+    )
+    # 템플릿 명
+    name = (
+        d.get("name") or
+        d.get("template_name") or
+        d.get("templateName") or
+        "untitled"
+    )
 
-    system_text = _fill_template(system_raw or "", variables or {})
-    user_text = _fill_template(user_raw or "", variables or {})
-
-    return (system_text, user_text, name)
-
+    system_prompt_text = _fill_template(system_raw, variables or {})
+    user_prompt_text = _fill_template(user_raw, variables or {})
+    return system_prompt_text, user_prompt_text, name
 
 def _normalize_pdf_names(pdf_list: List[str]) -> List[str]:
     return sorted([Path(x).name.strip() for x in (pdf_list or []) if str(x).strip()])
@@ -217,8 +253,8 @@ def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
 
     # 1) 템플릿 로드 + 변수 치환
     tmpl, _ = _fetch_prompt_full(body.promptId)
-    system_prompt_text, user_prompt_text_from_tmpl, tmpl_name = _extract_template_texts(tmpl, {})
-    user_prompt_text = (body.userPrompt or "").strip() or user_prompt_text_from_tmpl
+    system_prompt_text, user_prompt_from_tmpl, _tmpl_name = _extract_template_texts(tmpl, {})
+    user_prompt_text = (body.userPrompt or "").strip() or user_prompt_from_tmpl
     prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
 
     # 2) 모델 선택
