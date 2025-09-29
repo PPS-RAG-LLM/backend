@@ -12,22 +12,22 @@ VALUES
         1,
         'user','ruah0807','김루아','ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f',
         'AI 연구소','연구원',NULL,'',NULL,0,3,
-        '2025-08-13 13:54:54','2025-08-13 13:54:54','2025-08-12 07:01:02'
+        '2025-08-13 13:54:54','2025-08-13 13:54:54', NULL
     ),
      (
         2,'user','rlwjd123','조기정','ee63c6506c68d4613b9553820393f22db66a1dbc9ba6dc5640df9fce741e6258',
         'AI 연구소','선임 연구원',NULL,'',NULL,0,3,
-        '2025-08-14 15:06:03','2025-08-14 15:06:03','2025-08-14 06:06:03'
+        '2025-08-14 15:06:03','2025-08-14 15:06:03', NULL
     ),
     (
         3,'user','mingue123','강민규','03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
         'AI 연구소','연구원',NULL,'',NULL,0,2,
-        '2025-08-14 15:10:22','2025-08-14 15:10:22','2025-08-14 06:10:22'
+        '2025-08-14 15:10:22','2025-08-14 15:10:22', NULL
     ),
     (
         4,'admin','jongwha123','김종화','03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
         'AI 연구소','본부장',NULL,'', NULL,0,3,
-        '2025-08-14 15:11:42','2025-08-14 15:11:42','2025-08-14 06:11:42'
+        '2025-08-14 15:11:42','2025-08-14 15:11:42', NULL
     ),
     (
         5,'user','iju1234','마주이','03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
@@ -55,7 +55,9 @@ VALUES (1,'huggingface','gpt-oss-20b',0,'./service/storage/model/gpt-oss-20b',
         (2,'huggingface','Qwen2.5-7B-Instruct-1M',0,'./service/storage/model/Qwen2.5-7B-Instruct-1M',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (3,'huggingface','Qwen3-8B',0,'./service/storage/model/Qwen3-8B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
+        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./service/storage/model/Qwen3-Omni-30B-A3B-Instruct',
+        'qa','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
 
 INSERT INTO
     "rag_settings" (
@@ -292,6 +294,71 @@ VALUES
     (9, 'summary_general_dataset', 'summary', 91, './storage/train_data/summary_general.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
     -- qa 카테고리 데이터셋 (프롬프트 ID 100)
     (10, 'qa_general_dataset', 'qa', 80, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
+
+-- llm_eval_runs mock rows (pdf_list 포함)
+INSERT INTO "llm_eval_runs" (
+  "id","mapping_id","llm_id","prompt_id","category","subcategory","model_name",
+  "prompt_text","user_prompt","rag_refs","answer_text","acc_score","meta","created_at","pdf_list"
+) VALUES
+  (601, 401, 1, 101, 'doc_gen', 'business_trip', 'gpt-oss-20b',
+   '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.\n다음 주 일본 도쿄 출장 계획서를 작성해주세요. 기간은 2025년 10월 15일부터 17일까지이며, 목적은 파트너사 미팅입니다.',
+   '다음 주 일본 도쿄 출장 계획서를 작성해주세요. 기간은 2025년 10월 15일부터 17일까지이며, 목적은 파트너사 미팅입니다.',
+   '["milvus://test_20250924_123456/doc_tokyo_trip", "file://business_travel_policy.pdf"]',
+   '# 일본 도쿄 출장 계획서\n\n## 출장 개요...\n(생략)',
+   78.5, '{"tokens_input":95,"tokens_output":187,"latency_ms":2340}',
+   '2025-09-24 14:30:15',
+   '["business_travel_policy.pdf"]'
+  ),
+
+  (602, 402, 2, 102, 'doc_gen', 'business_trip', 'Qwen2.5-7B-Instruct-1M',
+   '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.\n부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
+   '부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
+   '["milvus://test_20250924_123456/doc_busan_visit", "file://quarterly_review_template.pdf"]',
+   '# 부산 지사 방문 계획서\n\n## 출장 개요...\n(생략)',
+   82.3, '{"tokens_input":98,"tokens_output":165,"latency_ms":1890}',
+   '2025-09-24 15:15:22',
+   '["quarterly_review_template.pdf"]'
+  ),
+
+  (603, 404, 1, 103, 'doc_gen', 'meeting', 'gpt-oss-20b',
+   '당신은 공식 회의록을 작성하는 AI 비서입니다. [회의명], [회의일시], [참석자], [주요논의] 항목을 활용해 명확한 회의록을 만드세요.\n2025년 9월 기획회의 회의록을 작성해주세요. 참석자는 김팀장, 박과장, 이대리이며, 신제품 출시 일정에 대해 논의했습니다.',
+   '2025년 9월 기획회의 회의록을 작성해주세요. 참석자는 김팀장, 박과장, 이대리이며, 신제품 출시 일정에 대해 논의했습니다.',
+   '["milvus://test_20250924_123456/doc_meeting_sept", "file://product_launch_schedule.pdf"]',
+   '# 2025년 9월 기획회의 회의록\n\n## 회의 개요...\n(생략)',
+   85.7, '{"tokens_input":112,"tokens_output":203,"latency_ms":2650}',
+   '2025-09-24 16:45:33',
+   '["product_launch_schedule.pdf"]'
+  ),
+
+  (604, 407, 1, 106, 'doc_gen', 'report', 'gpt-oss-20b',
+   '당신은 주간 업무 보고서를 작성하는 AI 비서입니다. [보고제목], [보고기간], [성과요약], [주요지표]를 활용해 구조화된 보고서를 작성하세요.\n9월 3주차 개발팀 주간 보고서를 작성해주세요. 이번 주 주요 성과는 API 개발 완료와 테스트 커버리지 80% 달성입니다.',
+   '9월 3주차 개발팀 주간 보고서를 작성해주세요. 이번 주 주요 성과는 API 개발 완료와 테스트 커버리지 80% 달성입니다.',
+   '["milvus://test_20250924_123456/doc_weekly_dev", "file://dev_team_metrics.pdf"]',
+   '# 개발팀 주간 보고서 (9월 3주차)\n\n## 보고 개요...\n(생략)',
+   79.2, '{"tokens_input":128,"tokens_output":245,"latency_ms":3120}',
+   '2025-09-24 17:20:45',
+   '["dev_team_metrics.pdf"]'
+  ),
+
+  (605, NULL, 2, 90, 'summary', '요약 프롬프트', 'Qwen2.5-7B-Instruct-1M',
+   '당신은 요약 전문 AI 어시스턴트 입니다. 사용자가 요청한 [Context]를 [USER_PROMPT]에 따라 요약하세요.\n다음 회의록을 3줄로 요약해주세요: ...',
+   '다음 회의록을 3줄로 요약해주세요: ...',
+   '["milvus://test_20250924_789012/doc_half_year_review"]',
+   '2025년 상반기 실적 검토 결과 매출 목표 달성률 105%를 달성했습니다... (생략)',
+   73.8, '{"tokens_input":156,"tokens_output":64,"latency_ms":1540}',
+   '2025-09-24 18:10:12',
+   '["half_year_review_minutes.pdf"]'
+  ),
+
+  (606, NULL, 1, 80, 'qa', 'QA Prompt', 'gpt-oss-20b',
+   '당신은 친절하고 이해하기 쉬운 설명을 제공하는 AI 어시스턴트입니다. ...\n회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
+   '회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
+   '["milvus://test_20250924_789012/doc_vacation_policy", "file://hr_manual_2025.pdf"]',
+   '회사 휴가 정책에 대해 안내드립니다.\n\n## 연차 휴가...\n(생략)',
+   71.4, '{"tokens_input":142,"tokens_output":198,"latency_ms":2890}',
+   '2025-09-24 19:05:28',
+   '["hr_manual_2025.pdf"]'
+  );
 
 
 COMMIT;

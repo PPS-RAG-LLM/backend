@@ -1131,7 +1131,7 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     finally:
         conn.close()
 
-    # 현재 카테고리 활성 모델명(캐시) 읽기
+    # 현재 카테고리 활성 모델명(캐시)
     try:
         current_active_name = None if cat in ("all", None) else _active_model_name_for_category(cat)
     except Exception:
@@ -1146,15 +1146,13 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         rouge = r["rougeScore"] if ("rougeScore" in cols) else None
 
         name = r["name"]
-        # 실제 메모리 로드 여부 반영
+        # 메모리 로드 여부
         try:
             is_loaded = _is_model_loaded(name)
         except Exception:
             is_loaded = False
 
-        # active 플래그 규칙:
-        # - doc_gen+subcategory: 1위만 True(기존 정책 유지)
-        # - 그 외 카테고리: 캐시에 저장된 활성 모델명과 일치하면 True
+        # active 규칙
         if cat == "doc_gen" and sub:
             active_flag = (i == 0)
         elif cat != "all" and current_active_name:
@@ -1165,17 +1163,18 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         models.append({
             "id": r["id"],
             "name": name,
+            "provider": r["provider"],            # ← 추가: provider 출력
             "loaded": bool(is_loaded),
             "active": bool(active_flag),
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),   # DB의 활성 플래그(표시용)
+            "isActive": bool(r["isActive"]),      # DB의 활성 플래그(표시용)
             "createdAt": r["created_at"],
             "rougeScore": rouge,
         })
 
     return {"category": cat, "models": models}
-
+    
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
     """
     카테고리별 활성 모델을 메모리에 로드하고 active 로 설정한다.
