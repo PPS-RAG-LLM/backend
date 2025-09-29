@@ -1060,8 +1060,25 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     conn = _connect()
     cur = conn.cursor()
     try:
-        if cat == "doc_gen" and sub:
-            # 1) category+name으로 활성 템플릿 1건(디폴트 우선) 선정
+        # 1) category=all → 전체(활/비활 포함)
+        if cat == "all":
+            cur.execute(
+                """
+                SELECT
+                  id, name, provider, category,
+                  is_active AS isActive,
+                  trained_at, created_at
+                  FROM llm_models
+                 ORDER BY
+                  is_active DESC,
+                  trained_at DESC,
+                  id DESC
+                """
+            )
+            rows = cur.fetchall()
+
+        # 2) doc_gen + subcategory → 매핑 rouge 점수순
+        elif cat == "doc_gen" and sub:
             cur.execute(
                 """
                 WITH t AS (
@@ -1084,10 +1101,9 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
                   IFNULL(pm.rouge_score,-1) AS rougeScore
                 FROM llm_models m
                 JOIN llm_prompt_mapping pm
-                  ON pm.llm_id   = m.id
+                  ON pm.llm_id    = m.id
                  AND pm.prompt_id = (SELECT id FROM t)
-                WHERE m.is_active = 1
-                  AND (m.category = 'doc_gen' OR m.category = 'all')
+                WHERE (m.category = 'doc_gen' OR m.category = 'all')
                 ORDER BY IFNULL(pm.rouge_score,-1) DESC,
                          m.trained_at DESC,
                          m.id DESC
@@ -1095,8 +1111,9 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
                 (cat, sub),
             )
             rows = cur.fetchall()
+
+        # 3) 그 외(qa/summary/doc_gen 전체) → 활성만
         else:
-            # 카테고리 전체 조회(all 포함) – 종전 로직 유지
             cur.execute(
                 """
                 SELECT
@@ -1114,25 +1131,50 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     finally:
         conn.close()
 
-    # 상위 1개(rougeScore 최대)를 active=True로 표시
+    # 현재 카테고리 활성 모델명(캐시) 읽기
+    try:
+        current_active_name = None if cat in ("all", None) else _active_model_name_for_category(cat)
+    except Exception:
+        current_active_name = None
+
     models = []
     for i, r in enumerate(rows):
-        cols = r.keys()  # 컬럼 목록 확인
-        rouge = r["rougeScore"] if "rougeScore" in cols else None
-        
+        try:
+            cols = r.keys()
+        except Exception:
+            cols = []
+        rouge = r["rougeScore"] if ("rougeScore" in cols) else None
+
+        name = r["name"]
+        # 실제 메모리 로드 여부 반영
+        try:
+            is_loaded = _is_model_loaded(name)
+        except Exception:
+            is_loaded = False
+
+        # active 플래그 규칙:
+        # - doc_gen+subcategory: 1위만 True(기존 정책 유지)
+        # - 그 외 카테고리: 캐시에 저장된 활성 모델명과 일치하면 True
+        if cat == "doc_gen" and sub:
+            active_flag = (i == 0)
+        elif cat != "all" and current_active_name:
+            active_flag = (name == current_active_name)
+        else:
+            active_flag = False
+
         models.append({
             "id": r["id"],
-            "name": r["name"],
-            "loaded": False,
-            "active": (i == 0 and cat == "doc_gen" and bool(sub)),  # doc_gen+서브카테고리일 때만 1위 True
+            "name": name,
+            "loaded": bool(is_loaded),
+            "active": bool(active_flag),
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),   # llm_models.is_active
+            "isActive": bool(r["isActive"]),   # DB의 활성 플래그(표시용)
             "createdAt": r["created_at"],
             "rougeScore": rouge,
         })
-    return {"category": cat, "models": models}
 
+    return {"category": cat, "models": models}
 
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
     """
