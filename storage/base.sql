@@ -55,7 +55,9 @@ VALUES (1,'huggingface','gpt-oss-20b',0,'./service/storage/model/gpt-oss-20b',
         (2,'huggingface','Qwen2.5-7B-Instruct-1M',0,'./service/storage/model/Qwen2.5-7B-Instruct-1M',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (3,'huggingface','Qwen3-8B',0,'./service/storage/model/Qwen3-8B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
+        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./service/storage/model/Qwen3-Omni-30B-A3B-Instruct',
+        'qa','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
 
 INSERT INTO
     "rag_settings" (
@@ -292,6 +294,7 @@ VALUES
     (9, 'summary_general_dataset', 'summary', 91, './storage/train_data/summary_general.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
     -- qa 카테고리 데이터셋 (프롬프트 ID 100)
     (10, 'qa_general_dataset', 'qa', 80, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
+
 
 
 COMMIT;
