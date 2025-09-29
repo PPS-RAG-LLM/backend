@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from sqlalchemy import (
     Column,
     Integer,
@@ -10,6 +9,7 @@ from sqlalchemy import (
     text,
     UniqueConstraint,
     Float,
+    Index
 )
 from sqlalchemy.orm import relationship
 from utils.database import Base
@@ -589,18 +589,41 @@ class FineTunedModel(Base):
 class LlmEvalRun(Base):
     """LLM 평가 실행 결과 저장"""
     __tablename__ = "llm_eval_runs"
+    __table_args__ = (
+        # 조회 최적화 인덱스(카테고리/서브태스크/모델명)
+        Index("idx_eval_runs_cat_sub_model", "category", "subcategory", "model_name"),
+        # 프롬프트/모델/매핑 조회 인덱스
+        Index("idx_eval_runs_prompt", "prompt_id", "llm_id", "mapping_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    mapping_id = Column(Integer)  # llm_prompt_mapping.id (nullable)
+
+    # 선택적: llm_prompt_mapping.id
+    mapping_id = Column(Integer, nullable=True)
+
+    # 필수 FK
     llm_id = Column(Integer, ForeignKey("llm_models.id"), nullable=False)
     prompt_id = Column(Integer, ForeignKey("system_prompt_template.id"), nullable=False)
-    category = Column(Text, nullable=False)  # qa | doc_gen | summary
-    subcategory = Column(Text)  # template.name (세부테스크)
-    model_name = Column(Text, nullable=False)  # 조회 편의용 중복 저장
-    prompt_text = Column(Text, nullable=False)  # 최종 입력 프롬프트(system + user + RAG)
-    user_prompt = Column(Text)  # 사용자가 추가 입력한 프롬프트
-    rag_refs = Column(Text)  # JSON: ["milvus://collection/id", "file://..."]
-    answer_text = Column(Text, nullable=False)  # 모델 생성 답변
-    acc_score = Column(Float, nullable=False, server_default=text("0"))  # 입력-답변 토큰 겹침 기반 acc
-    meta = Column(Text)  # JSON: 기타 정보(토큰수, latency 등)
+
+    # 필수 메타
+    category = Column(Text, nullable=False)         # 'qa' | 'qna' | 'doc_gen' | 'summary'
+    subcategory = Column(Text)                      # 템플릿 name(세부테스크)
+    model_name = Column(Text, nullable=False)       # 조회 편의용 중복 저장
+
+    # 프롬프트/답변
+    prompt_text = Column(Text, nullable=False)      # 최종(system+user+RAG)
+    user_prompt = Column(Text)                      # 사용자가 입력한 프롬프트
+    rag_refs = Column(Text)                         # JSON: ["milvus://...", "file://..."]
+    answer_text = Column(Text, nullable=False)      # 모델 응답
+
+    # 평가지표/메타
+    acc_score = Column(Float, nullable=False, server_default=text("0"))
+    meta = Column(Text)                             # JSON: 토큰수/latency 등
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # ✅ 추가: 업로드/테스트에 사용된 PDF 목록(이름 리스트 JSON)
+    pdf_list = Column(Text, nullable=True)
+
+    # (선택) 관계
+    # llm_model = relationship("LlmModel")
+    # prompt_template = relationship("SystemPromptTemplate")
