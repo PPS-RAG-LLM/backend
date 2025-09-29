@@ -180,9 +180,9 @@ def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any]) ->
     return base or "요청된 템플릿에 따라 문서를 작성해 주세요."
 
     
-def _resolve_runner(ws: Dict[str, Any], body: Dict[str, Any]) -> Streamer:
-    provider = body.get("provider") or ws.get("provider")
-    model_key = body.get("model") or ws.get("chat_model")
+def _resolve_runner(body: Dict[str, Any]) -> Streamer:
+    provider = body.get("provider")
+    model_key = body.get("model")
     if not provider or not model_key:
         raise BadRequestError("provider와 model 정보를 확인할 수 없습니다.")
     return LLM.from_workspace(provider, model_key)

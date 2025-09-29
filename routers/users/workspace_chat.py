@@ -25,10 +25,10 @@ class Attachment(BaseModel):
 
 
 class StreamChatRequest(BaseModel):
-    message: str
-    mode: Optional[str] = Field(None, pattern="^(chat|query)$")
     provider: Optional[str] = None
     model: Optional[str] = None
+    message: str
+    mode: Optional[str] = Field(None, pattern="^(chat|query)$")
     sessionId: Optional[str] = None
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
