@@ -296,7 +296,6 @@ VALUES
     (10, 'qa_general_dataset', 'qa', 80, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
 
 -- llm_eval_runs mock rows (pdf_list 포함)
--- llm_eval_runs mock rows (pdf_list 포함)
 INSERT INTO "llm_eval_runs" (
   "id","mapping_id","llm_id","prompt_id","category","subcategory","model_name",
   "prompt_text","user_prompt","rag_refs","answer_text","acc_score","meta","created_at","pdf_list"
@@ -311,7 +310,7 @@ INSERT INTO "llm_eval_runs" (
    '["business_travel_policy.pdf"]'
   ),
 
-  (602, 402, 2, 101, 'doc_gen', 'business_trip', 'Qwen2.5-7B-Instruct-1M',
+  (602, 402, 2, 102, 'doc_gen', 'business_trip', 'Qwen2.5-7B-Instruct-1M',
    '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.\n부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
    '부산 지사 방문 계획서를 작성해주세요. 기간은 2025년 10월 20일부터 21일까지이며, 목적은 분기 실적 점검입니다.',
    '["milvus://test_20250924_123456/doc_busan_visit", "file://quarterly_review_template.pdf"]',
@@ -341,7 +340,7 @@ INSERT INTO "llm_eval_runs" (
    '["dev_team_metrics.pdf"]'
   ),
 
-  (605, NULL, 2, 5, 'summary', '요약 프롬프트', 'Qwen2.5-7B-Instruct-1M',
+  (605, NULL, 2, 90, 'summary', '요약 프롬프트', 'Qwen2.5-7B-Instruct-1M',
    '당신은 요약 전문 AI 어시스턴트 입니다. 사용자가 요청한 [Context]를 [USER_PROMPT]에 따라 요약하세요.\n다음 회의록을 3줄로 요약해주세요: ...',
    '다음 회의록을 3줄로 요약해주세요: ...',
    '["milvus://test_20250924_789012/doc_half_year_review"]',
@@ -351,7 +350,7 @@ INSERT INTO "llm_eval_runs" (
    '["half_year_review_minutes.pdf"]'
   ),
 
-  (606, NULL, 1, 100, 'qa', 'QA Prompt', 'gpt-oss-20b',
+  (606, NULL, 1, 80, 'qa', 'QA Prompt', 'gpt-oss-20b',
    '당신은 친절하고 이해하기 쉬운 설명을 제공하는 AI 어시스턴트입니다. ...\n회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
    '회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
    '["milvus://test_20250924_789012/doc_vacation_policy", "file://hr_manual_2025.pdf"]',
