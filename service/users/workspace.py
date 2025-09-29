@@ -42,9 +42,9 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         raise BadRequestError("name is required")
 
     # 1) llm_models의 기본 모델(필수)
-    model = get_default_llm_model(category)
-    if not model:
-        raise InternalServerError("no default llm model for category")
+    # model = get_default_llm_model(category)
+    # if not model:
+    #     raise InternalServerError("no default llm model for category")
     
     if category == "qa":
         system_prompt = get_default_system_prompt_content(category)
@@ -53,8 +53,6 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         system_prompt = None
         chat_history  = 0
 
-    provider                = model["provider"]
-    chat_model              = model["chat_model"]
     # 3) 요청 본문으로 오버라이드 (provider/chat_model은 오버라이드 불가)
     chat_mode               = payload.get("chatMode")
     temperature             = defaults["temperature"]
@@ -77,8 +75,6 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         chat_history            = chat_history,
         system_prompt           = system_prompt,
         similarity_threshold    = similarity_threshold,
-        provider                = provider,
-        chat_model              = chat_model,
         top_n                   = top_n,
         chat_mode               = chat_mode,
         query_refusal_response  = query_refusal_response,
