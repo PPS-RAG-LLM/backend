@@ -914,73 +914,83 @@ def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
         return str(cand2)
     return None
 
-
 def _preload_via_adapters(model_name: str) -> bool:
     """
     Admin 경로용 프리로드:
-      - DB/FS에서 model_path만 해석
-      - gpt-oss 계열은 전용 로더로, 그 외는 HF Auto로 로드
+      - DB/FS에서 model_path 해석
+      - gpt-oss, Qwen 등 utils 전용 로더를 '같은 경로'로 호출해 lru_cache에 올림
+      - 그 외는 HF Auto 로더로 로드
       - 성공 시 _ADAPTER_LOADED에 추적 키 추가
     """
     try:
-        model_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
-        if not (model_path and os.path.isfile(os.path.join(model_path, "config.json"))):
-            logging.getLogger(__name__).warning("[preload] config.json not found: %s", model_path)
+        # 1) 기본 경로 해석 (절대 경로)
+        raw_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
+        if not (raw_path and os.path.isfile(os.path.join(raw_path, "config.json"))):
+            logging.getLogger(__name__).warning("[preload] config.json not found: %s", raw_path)
             return False
 
+        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/model/<basename>')
+        def _adapter_visible_path(p: str) -> str:
+            try:
+                base = os.path.basename(p.rstrip("/"))
+                cand = f"/storage/model/{base}"
+                return cand if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")) else p
+            except Exception:
+                return p
+
+        adapter_path = _adapter_visible_path(raw_path)
+
         lower = (model_name or "").lower()
-        if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-            # gpt-oss 전용 로더
+
+        # 3-a) GPT-OSS는 전용 로더로 (utils의 lru_cache에 적재)
+        if lower.startswith(("gpt-oss", "gpt_oss")):
             try:
                 from utils.llms.huggingface.gpt_oss_20b import load_gpt_oss_20b
-                load_gpt_oss_20b(model_path)  # lru_cache로 1회 로드
+                load_gpt_oss_20b(adapter_path)  # ← utils lru_cache 채움
             except Exception:
                 logging.getLogger(__name__).exception("gpt-oss preload failed")
                 return False
+
+        # 3-b) Qwen 계열도 전용 로더로 (utils의 lru_cache에 적재)
+        elif lower.startswith("qwen"):
+            try:
+                from utils.llms.huggingface.qwen_7b import load_qwen_instruct_7b
+                load_qwen_instruct_7b(adapter_path)  # ← utils lru_cache 채움
+            except Exception:
+                logging.getLogger(__name__).exception("qwen preload failed")
+                return False
+
+        # 3-c) 기타 모델은 HF 로더로 경량 프리로드 (lru_cache는 없지만, 적어도 1회 로컬 캐시/HF weights warmup)
         else:
-            # 일반 HF 경로
             try:
                 from transformers import AutoTokenizer, AutoModelForCausalLM
                 import torch
-                tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+                tok = AutoTokenizer.from_pretrained(raw_path, trust_remote_code=True, local_files_only=True)
                 if tok.pad_token_id is None:
                     if getattr(tok, "eos_token_id", None) is not None:
                         tok.pad_token_id = tok.eos_token_id
                     else:
-                        tok.add_special_tokens({"pad_token": "<|pad|>"})
-                        tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
-                try:
-                    mdl = AutoModelForCausalLM.from_pretrained(
-                        model_path,
-                        trust_remote_code=True,
-                        device_map="auto",
-                        local_files_only=True,
-                        # bnb는 환경에 따라 깨지니 일단 제외. 필요시 옵션화
-                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
-                    )
-                except Exception:
-                    # 마지막 보루: dtype만 바꿔 재시도
-                    mdl = AutoModelForCausalLM.from_pretrained(
-                        model_path,
-                        trust_remote_code=True,
-                        device_map="auto",
-                        local_files_only=True,
-                        torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
-                    )
-                # 굳이 _MODEL_MANAGER에 넣을 필요는 없음(프리로드 목적)
+                        tok.add_special_tokens({"pad_token": "<|pad|>"}); tok.pad_token_id = tok.convert_tokens_to_ids("<|pad|>")
+                AutoModelForCausalLM.from_pretrained(
+                    raw_path,
+                    trust_remote_code=True,
+                    device_map="auto",
+                    local_files_only=True,
+                    torch_dtype=(torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+                )
             except Exception:
                 logging.getLogger(__name__).exception("HF preload failed")
                 return False
 
-        # 추적키 추가
-        _ADAPTER_LOADED.add(model_path)
-        _ADAPTER_LOADED.add(os.path.basename(model_path))
-        logging.getLogger(__name__).info("[preload] ok: %s (%s)", model_name, model_path)
+        # 4) 추적키 추가 (언로드 시 정리 용이)
+        _ADAPTER_LOADED.add(raw_path); _ADAPTER_LOADED.add(os.path.basename(raw_path))
+        _ADAPTER_LOADED.add(adapter_path); _ADAPTER_LOADED.add(os.path.basename(adapter_path))
+        logging.getLogger(__name__).info("[preload] ok: %s (raw=%s, adapter=%s)", model_name, raw_path, adapter_path)
         return True
+
     except Exception:
         logging.getLogger(__name__).exception("[preload] unexpected failure")
         return False
-
 
 def _unload_via_adapters(model_name: str) -> bool:
     """
