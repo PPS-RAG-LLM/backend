@@ -12,6 +12,71 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from pydantic import BaseModel, Field
 
+from pathlib import Path
+
+def _dedup_preserve(seq: list[str]) -> list[str]:
+    """중복 제거(순서 보존)."""
+    seen = set()
+    out: list[str] = []
+    for x in seq:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+def _canon_pdf_list(pdf_list: list[str]) -> list[str]:
+    """
+    pdf_list를 비교/저장용으로 정규화:
+      - 파일명만 추출(Path(...).name)
+      - 앞뒤 공백 제거
+      - 중복 제거(순서 보존)
+      - 소문자 기준 정렬
+    """
+    names = []
+    for f in pdf_list or []:
+        name = Path(str(f)).name.strip()
+        if name:
+            names.append(name)
+    names = _dedup_preserve(names)
+    names = sorted(names, key=lambda s: s.lower())
+    return names
+
+def _to_dict(obj) -> dict:
+    """sqlite3.Row, dict 모두 안전하게 dict로 변환."""
+    if isinstance(obj, dict):
+        return obj
+    try:
+        # sqlite3.Row는 keys() 제공
+        return {k: obj[k] for k in obj.keys()}
+    except Exception:
+        try:
+            return dict(obj)
+        except Exception:
+            return {}
+
+def _extract_template_texts(tmpl_row, variables: dict[str, str]) -> tuple[str, str, str]:
+    """
+    템플릿 레코드( Row / dict 모두 지원 )에서 system_prompt(content), sub_content, name 추출 + 치환.
+    반환: (system_prompt_text, user_prompt_text, template_name)
+    """
+    from service.admin.manage_admin_LLM import _fill_template  # 순환 import 방지용
+    td = _to_dict(tmpl_row)
+    system_raw = (td.get("content") or td.get("system_prompt") or "").strip()
+    user_raw   = (td.get("sub_content") or td.get("user_prompt") or "").strip()
+    name       = (td.get("name") or td.get("template_name") or "untitled").strip()
+
+    system_filled = _fill_template(system_raw, variables or {})
+    user_filled   = _fill_template(user_raw, variables or {})
+
+    return system_filled, user_filled, name
+
+def _acc_from_prompt_and_answer(prompt_text: str, answer_text: str) -> float:
+    p = _token_set(prompt_text)
+    a = _token_set(answer_text)
+    if not p:
+        return 0.0
+    return round(100.0 * len(p & a) / len(p), 2)
 
 def _row_to_dict(row) -> dict:
     """sqlite3.Row, SQLAlchemy Row 등 다양한 row를 dict로 안정 변환."""
@@ -189,14 +254,9 @@ def _same_pdf_list(a: Optional[str], b_list: Optional[List[str]]) -> bool:
     except Exception:
         return False
 
-
 def select_model_for_task(category: str, subcategory: Optional[str] = None) -> Optional[str]:
-    """
-    우선순위:
-      1) llm_task_defaults 매핑
-      2) 해당 과업 활성 모델(is_active=1)
-      3) category='all' 활성 베이스
-    """
+    from service.admin.manage_admin_LLM import _connect, _norm_category
+
     cat = _norm_category(category)
     sub = (subcategory or "").strip().lower() or None
     conn = _connect()
@@ -242,61 +302,64 @@ def select_model_for_task(category: str, subcategory: Optional[str] = None) -> O
     finally:
         conn.close()
 
-
 # ===========================
 # Core APIs (service)
 # ===========================
 def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
-    _ensure_val_dir()
+    from service.admin.manage_admin_LLM import (
+        _connect, _fetch_prompt_full, _simple_generate, _lookup_model_by_name,
+        _norm_category
+    )
 
     category = _norm_category(body.category)
     subcat = (body.subcategory or "").strip().lower() or None
 
     # 1) 템플릿 로드 + 변수 치환
     tmpl, _ = _fetch_prompt_full(body.promptId)
-    system_prompt_text, user_prompt_from_tmpl, _tmpl_name = _extract_template_texts(tmpl, {})
-    user_prompt_text = (body.userPrompt or "").strip() or user_prompt_from_tmpl
-    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
+    system_prompt_text, user_prompt_text_from_tmpl, tmpl_name = _extract_template_texts(tmpl, {})
+    user_prompt_text = (body.userPrompt or "").strip()
+    prompt_text = (system_prompt_text + ("\n" + (user_prompt_text or user_prompt_text_from_tmpl) if (user_prompt_text or user_prompt_text_from_tmpl) else "")).strip()
 
     # 2) 모델 선택
     if body.modelName:
         model_name = body.modelName
     else:
-        model_name = select_model_for_task(category, subcat or tmpl_name)
+        model_name = select_model_for_task(category, (subcat or tmpl_name))
         if not model_name:
-            return {"success": False, "error": "기본/활성 모델을 찾을 수 없습니다. 먼저 모델을 지정/활성화하세요."}
+            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
 
     # 3) 생성
     answer = _simple_generate(prompt_text, model_name, body.max_tokens, body.temperature)
 
-    # 4) acc(간단 토큰기반) — 여기서는 RAG 컨텍스트 없이 프롬프트 대비로 계산
-    acc = _acc_from_tokens(answer, prompt_text)
+    # 4) acc 계산(간이: prompt 대비 토큰 겹침)
+    acc = _acc_from_prompt_and_answer(prompt_text, answer)
 
-    # 5) 저장
+    # 5) 메타/매핑 찾기 + 저장
     conn = _connect()
     cur = conn.cursor()
     try:
         row = _lookup_model_by_name(model_name)
         llm_id = int(row["id"]) if row else None
-        mapping_id = _find_mapping_id(conn, body.promptId, model_name)
-        rag_json = json.dumps(body.ragRefs or [], ensure_ascii=False)
 
-        cur.execute(
-            """
-            INSERT INTO llm_eval_runs(
-                mapping_id, llm_id, prompt_id, category, subcategory, model_name,
-                prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                mapping_id, llm_id, body.promptId, category, (subcat or tmpl_name), model_name,
-                prompt_text, user_prompt_text, rag_json, answer, acc, None, json.dumps([], ensure_ascii=False),
-            ),
-        )
+        # 매핑
+        mapping_id = _find_mapping_id(conn, body.promptId, model_name)
+
+        # ragRefs 중복 제거
+        _deduped_rag = _dedup_preserve([str(x).strip() for x in (body.ragRefs or []) if str(x).strip()])
+        rag_json = json.dumps(_deduped_rag, ensure_ascii=False)
+
+        cur.execute("""
+            INSERT INTO llm_eval_runs(mapping_id, llm_id, prompt_id, category, subcategory, model_name,
+                                      prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            mapping_id, llm_id, body.promptId, category, (subcat or tmpl_name), model_name,
+            prompt_text, user_prompt_text, rag_json, answer, acc, None, json.dumps([], ensure_ascii=False)
+        ))
         conn.commit()
         run_id = int(cur.lastrowid)
     except Exception:
-        logger.exception("failed to save eval run")
+        logging.getLogger(__name__).exception("failed to save eval run")
         return {"success": False, "error": "평가 결과 저장 실패"}
     finally:
         conn.close()
@@ -314,6 +377,8 @@ def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
 
 
 def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
+    from service.admin.manage_admin_LLM import _connect, _norm_category
+
     cat = _norm_category(q.category)
     sub = (q.subcategory or "").strip().lower() or None
 
@@ -328,7 +393,7 @@ def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
         """
         params: List[Any] = [cat]
         if sub is not None:
-            sql += " AND lower(IFNULL(subcategory,'')) = ?"
+            sql += " AND lower(ifnull(subcategory,'')) = ?"
             params.append(sub)
         if q.modelName:
             sql += " AND model_name = ?"
@@ -336,26 +401,26 @@ def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
         if q.userPrompt:
             sql += " AND user_prompt = ?"
             params.append(q.userPrompt)
-        if cat == "doc_gen" and q.promptId is not None:
-            sql += " AND prompt_id = ?"
-            params.append(int(q.promptId))
-
-        sql += " ORDER BY id DESC"
+        sql += " ORDER BY id DESC"  # 전체 조회(제한 제거)
 
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
-
-        # pdf_list 완전 일치(이름 기준, 순서 무시) 필터는 파이썬에서
-        want_pdf = _normalize_pdf_names(q.pdfList or [])
         items = []
         for r in rows:
-            row_pdf = _safe_json_loads(r["pdf_list"], [])
-            if want_pdf and _normalize_pdf_names(row_pdf) != want_pdf:
-                continue
+            # ragRefs 정리
             try:
-                rag_refs = json.loads(r["rag_refs"] or "[]")
+                rag_refs_raw = json.loads(r["rag_refs"] or "[]")
             except Exception:
-                rag_refs = []
+                rag_refs_raw = []
+            rag_refs = _dedup_preserve([str(x).strip() for x in rag_refs_raw if str(x).strip()])
+
+            # pdf_list 정규화
+            try:
+                pdf_raw = json.loads((r["pdf_list"] or "[]"))
+            except Exception:
+                pdf_raw = []
+            pdf_list = _canon_pdf_list(pdf_raw)
+
             items.append({
                 "id": r["id"],
                 "mappingId": r["mapping_id"],
@@ -370,15 +435,14 @@ def list_eval_runs(q: EvalQuery) -> Dict[str, Any]:
                 "promptText": r["prompt_text"],
                 "answerText": r["answer_text"],
                 "ragRefs": rag_refs,
-                "pdfList": row_pdf,
+                "pdfList": pdf_list,
             })
         return {"success": True, "total": len(items), "items": items}
     except Exception:
-        logger.exception("failed to list eval runs")
+        logging.getLogger(__name__).exception("failed to list eval runs")
         return {"success": False, "error": "평가 결과 조회 실패"}
     finally:
         conn.close()
-
 
 def set_default_model(body: DefaultModelBody) -> Dict[str, Any]:
     _migrate_llm_models_if_needed()
@@ -387,10 +451,19 @@ def set_default_model(body: DefaultModelBody) -> Dict[str, Any]:
     conn = _connect()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM llm_models WHERE name=?", (body.modelName,))
+        cur.execute("""
+            SELECT id FROM llm_eval_runs
+            WHERE category=?
+            AND IFNULL(LOWER(subcategory),'') = IFNULL(LOWER(?),'')
+            AND model_name=?
+            AND prompt_id=?
+            AND IFNULL(user_prompt,'') = IFNULL(?, '')
+            AND IFNULL(pdf_list,'[]') = ?
+            ORDER BY id DESC LIMIT 1
+        """, (category, subcategory, model_name, prompt_id, user_prompt, pdf_json))
         row = cur.fetchone()
         if not row:
-            return {"success": False, "message": f"모델이 없습니다: {body.modelName}"}
+            return {"success": True, "skipped": True, "reason": "already exists", "runId": int(row["id"])}
         model_id = int(row[0])
         cur.execute(
             """
@@ -520,146 +593,153 @@ def get_selected_model(q: SelectModelQuery) -> Dict[str, Any]:
 # ===========================
 # Ensure-run with uploads
 # ===========================
+# service/admin/manage_test_LLM.py 안의 기존 ensure_run_if_empty_uploaded를 이 버전으로 교체
+
 async def ensure_run_if_empty_uploaded(
+    *,
+    sid: str,
     category: str,
-    subcategory: Optional[str],
-    model_name: Optional[str],
-    user_prompt: Optional[str],
-    prompt_id: Optional[int],
-    uploaded_files: List[Tuple[str, bytes]],
-    sid: Optional[str] = None,
+    subcategory: Optional[str] = None,
+
+    # ✅ 파라미터 별칭 모두 허용
+    model_name: Optional[str] = None,
+    modelName: Optional[str] = None,
+
+    user_prompt: Optional[str] = None,
+    userPrompt: Optional[str] = None,
+
+    prompt_id: Optional[int] = None,
+    promptId: Optional[int] = None,
+
+    uploaded_pdf_names: Optional[List[str]] = None,
+    pdf_list: Optional[List[str]] = None,
+    uploaded_files: Optional[List[str]] = None,
+
     top_k: int = 5,
+    user_level: int = 1,
+    search_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    1) 동일 (category, subcategory, model_name, user_prompt, (doc_gen이면 prompt_id), pdf_list) 가 이미 있으면 그대로 반환
-    2) 없으면:
-       - (sid가 없으면) 임시 세션 생성 → 업로드 파일 저장 → 인제스트
-       - 세션 컬렉션에서 RAG 검색 → 상위 스니펫 합쳐 컨텍스트 구성
-       - 템플릿 로드(system/user prompt) + 컨텍스트로 모델 호출
-       - answer vs RAG context로 ROUGE(L) 시도, 실패 시 토큰 Jaccard 폴백
-       - llm_eval_runs 저장(pdf_list 포함) 후 결과 반환
+    1) 동일 조건(카테고리/서브카테고리/모델/유저프롬프트/프롬프트ID/pdf_list 정규화)이 이미 저장되어 있으면 스킵
+    2) 없으면: 세션 컬렉션(sid)만 대상으로 RAG 검색 → LLM 생성 → Rouge(L)-F1 * 100 = acc_score → 저장
+    - 라우터/클라이언트가 snake_case 또는 camelCase 어느 쪽을 보내도 동작하도록 별칭 모두 지원
     """
+    from service.admin.manage_admin_LLM import (
+        _connect, _lookup_model_by_name, _simple_generate, _norm_category, _fetch_prompt_full
+    )
+    from service.admin.manage_vator_DB import RAGSearchRequest, search_documents_test
+
+    # ---- 별칭 정리 ----
+    model_name = (model_name or modelName or "").strip() or None
+    user_prompt = (user_prompt or userPrompt or "").strip()
+    prompt_id = int(prompt_id if prompt_id is not None else (promptId if promptId is not None else 0))
+    canon_pdfs = _canon_pdf_list(
+        (uploaded_pdf_names or []) + (pdf_list or []) + (uploaded_files or [])
+    )
+
+    if not prompt_id:
+        return {"success": False, "error": "prompt_id (또는 promptId)가 필요합니다."}
+
+    # --- 입력 정리 ---
     cat = _norm_category(category)
     sub = (subcategory or "").strip().lower() or None
-    pdf_names = _normalize_pdf_names([fn for (fn, _data) in uploaded_files])
+    pdf_json = json.dumps(canon_pdfs, ensure_ascii=False)
 
-    # 0) 존재 여부 확인
-    exists = list_eval_runs(
-        EvalQuery(category=cat, subcategory=sub, modelName=model_name, userPrompt=user_prompt, promptId=prompt_id, pdfList=pdf_names)
-    )
-    if exists.get("success") and exists.get("total", 0) > 0:
-        return {"success": True, "skipped": True, "reason": "already-exists", **exists}
-
-    # 1) 템플릿 로드
-    if cat == "doc_gen" and not prompt_id:
-        return {"success": False, "error": "doc_gen의 경우 promptId가 필요합니다."}
-    use_prompt_id = int(prompt_id or 0)
-
-    tmpl, _ = _fetch_prompt_full(use_prompt_id) if use_prompt_id else ({"system_prompt": "", "user_prompt": "", "name": "ad-hoc"}, {})
-    system_prompt_text, user_prompt_text_from_tmpl, tmpl_name = _extract_template_texts(tmpl, {})
-    user_prompt_text = (user_prompt or "").strip() or user_prompt_text_from_tmpl
-
-    # 2) 모델 선택
-    if model_name:
-        model = model_name
-    else:
-        model = select_model_for_task(cat, sub or tmpl_name)
-        if not model:
-            return {"success": False, "error": "기본/활성 모델을 찾을 수 없습니다. 먼저 모델을 지정/활성화하세요."}
-
-    # 3) 세션 준비 + 파일 저장/인제스트
-    created_tmp_session = False
-    used_sid = sid
-    session_meta = None
+    # --- 이미 동일 조건이 저장되어 있는지 검사 ---
+    conn = _connect()
+    cur = conn.cursor()
     try:
-        if not used_sid:
-            session_meta = create_test_session()
-            used_sid = session_meta.get("sid")
-            created_tmp_session = True
-        else:
-            session_meta = get_test_session(used_sid)
-            if not session_meta:
-                return {"success": False, "error": "invalid sid"}
+        cur.execute("""
+            SELECT id FROM llm_eval_runs
+             WHERE category=?
+               AND IFNULL(LOWER(subcategory),'') = IFNULL(LOWER(?),'')
+               AND model_name=?
+               AND prompt_id=?
+               AND IFNULL(user_prompt,'') = IFNULL(?, '')
+               AND IFNULL(pdf_list,'[]') = ?
+             ORDER BY id DESC LIMIT 1
+        """, (cat, sub, (model_name or ""), int(prompt_id), user_prompt, pdf_json))
+        already = cur.fetchone()
+        if already:
+            return {"success": True, "skipped": True, "reason": "already exists", "runId": int(already["id"])}
 
-        sess_dir = Path(session_meta["dir"])
-        sess_dir.mkdir(parents=True, exist_ok=True)
+        # --- 템플릿 로드 및 프롬프트 구성 ---
+        tmpl, _ = _fetch_prompt_full(prompt_id)
+        system_prompt_text, user_prompt_text_from_tmpl, tmpl_name = _extract_template_texts(tmpl, {})
+        if not model_name:
+            # 기본 선택
+            model_name = select_model_for_task(cat, (sub or tmpl_name))
+            if not model_name:
+                return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
 
-        # 파일 저장
-        saved_paths: List[str] = []
-        for fn, data in uploaded_files:
-            dst = sess_dir / Path(fn).name
-            with dst.open("wb") as out:
-                out.write(data)
-            saved_paths.append(str(dst))
+        merged_user = (user_prompt or user_prompt_text_from_tmpl)
+        base_prompt_text = (system_prompt_text + ("\n" + merged_user if merged_user else "")).strip()
 
-        # 인제스트(해당 카테고리 매핑)
-        task_map = {"qa": "qna", "qna": "qna", "doc_gen": "doc_gen", "summary": "summary"}
-        task_type = task_map.get(cat, "qna")
+        # --- RAG: 세션 컬렉션에서만 검색 ---
+        task_for_rag = cat if cat in ("doc_gen", "summary", "qna") else "qna"
+        req = RAGSearchRequest(query=(user_prompt or tmpl_name or "검색"), top_k=top_k, user_level=user_level, task_type=task_for_rag, model=None)
+        rag_res = await search_documents_test(req, sid=sid, search_type_override=search_type)
+        hits = rag_res.get("hits", []) if isinstance(rag_res, dict) else []
 
-        await ingest_test_pdfs(used_sid, saved_paths, task_types=[task_type])
+        # 문서 단위 milvus:// dedup
+        milvus_refs: list[str] = []
+        seen_docs = set()
+        for h in hits:
+            doc_id = h.get("doc_id")
+            if not doc_id:
+                p = h.get("path") or ""
+                doc_id = Path(p).stem if p else None
+            if not doc_id:
+                continue
+            key = f"milvus://{sid}/{doc_id}"
+            if key not in seen_docs:
+                seen_docs.add(key)
+                milvus_refs.append(key)
+        file_refs = [f"file://{nm}" for nm in canon_pdfs]
+        rag_refs = _dedup_preserve(milvus_refs + file_refs)
+        rag_json = json.dumps(rag_refs, ensure_ascii=False)
 
-        # 4) RAG 검색
-        query_text = user_prompt_text or tmpl_name or "test"
-        req = RAGSearchRequest(query=query_text, top_k=int(top_k), user_level=1, task_type=task_type, model=None)
-        rag_res = await search_documents_test(req, sid=used_sid, search_type_override=None)
-        hits = rag_res.get("hits", []) or []
-        # context
-        context = "\n---\n".join([h.get("snippet", "") for h in hits if h.get("snippet")])
-
-        # 5) LLM 호출(컨텍스트 주입)
-        prompt_text = system_prompt_text
-        if user_prompt_text:
-            prompt_text = (prompt_text + "\n" + user_prompt_text).strip()
+        # 컨텍스트 조립
+        context = "\n---\n".join([h.get("snippet") or "" for h in hits if (h.get("snippet"))]).strip()
+        full_prompt = base_prompt_text
         if context:
-            prompt_text = (prompt_text + "\n\n[Context]\n" + context).strip()
+            full_prompt = f"{base_prompt_text}\n\n[CONTEXT]\n{context}"
 
-        answer = _simple_generate(prompt_text, model, max_tokens=512, temperature=0.7)
+        # --- LLM 생성 ---
+        answer = _simple_generate(full_prompt, model_name, max_tokens=512, temperature=0.7)
 
-        # 6) ROUGE-L 시도 → 실패 시 토큰 폴백
-        acc = 0.0
+        # --- Rouge(L)-F1 * 100 = acc_score ---
         try:
-            from rouge import Rouge  # type: ignore
-            rouge = Rouge()
-            # 단일 문자열 비교
-            scores = rouge.get_scores(answer, context, avg=True)
-            acc = round(100.0 * float(scores["rouge-l"]["f"]), 2)
+            from rouge import Rouge
+            _r = Rouge()
+            sc = _r.get_scores(answer or "", context or "", avg=True)
+            acc = round((sc.get("rouge-l", {}).get("f", 0.0) or 0.0) * 100.0, 2)
         except Exception:
-            acc = _acc_from_tokens(answer, context)
+            acc = _acc_from_prompt_and_answer(context or base_prompt_text, answer or "")
 
-        # 7) 저장
-        conn = _connect()
-        cur = conn.cursor()
-        try:
-            row = _lookup_model_by_name(model)
-            llm_id = int(row["id"]) if row else None
-            mapping_id = _find_mapping_id(conn, use_prompt_id, model) if use_prompt_id else None
+        # --- 저장 ---
+        row = _lookup_model_by_name(model_name)
+        llm_id = int(row["id"]) if row else None
+        mapping_id = _find_mapping_id(conn, prompt_id, model_name)
 
-            rag_refs = []
-            for h in hits:
-                did = h.get("doc_id")
-                if did:
-                    rag_refs.append(f"milvus://{used_sid}/{did}")
-            # 파일도 ref에 포함
-            rag_refs += [f"file://{Path(x).name}" for x in saved_paths]
+        meta_json = json.dumps({
+            "source": "ensure-upload",
+            "sid": sid,
+            "top_k": top_k,
+            "user_level": user_level,
+            "rag_settings_used": (rag_res.get("settings_used") if isinstance(rag_res, dict) else None),
+        }, ensure_ascii=False)
 
-            cur.execute(
-                """
-                INSERT INTO llm_eval_runs(
-                    mapping_id, llm_id, prompt_id, category, subcategory, model_name,
-                    prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    mapping_id, llm_id, (use_prompt_id or None), cat, (sub or tmpl_name), model,
-                    prompt_text, user_prompt_text, json.dumps(rag_refs, ensure_ascii=False),
-                    answer, acc, json.dumps({"sid": used_sid, "top_k": top_k}, ensure_ascii=False),
-                    json.dumps(pdf_names, ensure_ascii=False),
-                ),
-            )
-            conn.commit()
-            run_id = int(cur.lastrowid)
-        finally:
-            conn.close()
+        cur.execute("""
+            INSERT INTO llm_eval_runs(mapping_id, llm_id, prompt_id, category, subcategory, model_name,
+                                      prompt_text, user_prompt, rag_refs, answer_text, acc_score, meta, pdf_list)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            mapping_id, llm_id, int(prompt_id), cat, (sub or tmpl_name), model_name,
+            full_prompt, user_prompt, rag_json, answer, acc, meta_json, pdf_json
+        ))
+        conn.commit()
+        run_id = int(cur.lastrowid)
 
         return {
             "success": True,
@@ -667,17 +747,15 @@ async def ensure_run_if_empty_uploaded(
             "runId": run_id,
             "category": cat,
             "subcategory": (sub or tmpl_name),
-            "modelName": model,
-            "promptId": use_prompt_id or None,
-            "pdfList": pdf_names,
+            "modelName": model_name,
+            "promptId": int(prompt_id),
             "acc": acc,
+            "ragRefs": rag_refs,
+            "pdfList": canon_pdfs,
             "answer": answer,
-            "ragRefsCount": len(rag_refs),
         }
+    except Exception:
+        logging.getLogger(__name__).exception("ensure_run_if_empty_uploaded failed")
+        return {"success": False, "error": "ensure_run_if_empty_uploaded failed"}
     finally:
-        # 임시 세션이면 정리
-        if created_tmp_session and used_sid:
-            try:
-                await drop_test_session(used_sid)
-            except Exception:
-                logger.exception("failed to drop temp test session")
+        conn.close()
