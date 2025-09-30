@@ -9,13 +9,14 @@ logger = logger(__name__)
 
 def get_llm_model_by_provider_and_name(provider: str, name: str) -> Optional[Dict[str, Any]]:
     """활성화된 LLM 모델을 provider와 name으로 조회한다."""
+    logger.info(f"provider : {provider}\nmodelName : {name}")
     with get_session() as session:
         stmt = (
             select(LlmModel.provider, LlmModel.name, LlmModel.model_path)
             .where(
                 LlmModel.name == name,
                 LlmModel.provider == provider,
-                LlmModel.is_default == True,
+                LlmModel.is_active == True,
             )
             .limit(1)
         )
