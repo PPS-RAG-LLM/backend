@@ -36,6 +36,10 @@ from routers.commons.doc_gen_templates import router as doc_gen_templates_router
 from routers.commons.qa_templates import router as qa_templates_router
 logger = logger(__name__)
 
+# === [ADD] 사용자 관리 라우터 임포트 ===
+from routers.admin.manage_user_api import router as admin_user_router
+# =====================================
+
 
 ######################### Session Cleaner #########################
 
@@ -163,6 +167,9 @@ app.include_router(doc_gen_templates_router)
 app.include_router(qa_templates_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
+# === [ADD] 사용자 관리 라우터 등록 ===
+app.include_router(admin_user_router)
+# ===================================
 
 
 @app.get("/")
