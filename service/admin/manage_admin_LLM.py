@@ -41,8 +41,6 @@ def _mark_unloaded(model_name: str):
     except Exception:
         logging.getLogger(__name__).exception("cluster load state set failed (mark_unloaded)")
 
-
-
 def _set_cluster_load_state(model_name: str, loaded: bool):
     payload = {"modelName": model_name, "loaded": loaded, "worker": WORKER_ID, "ts": _now_iso()}
     _set_cache(f"model_loaded:{model_name}", _json(payload), "llm_cluster")
@@ -143,6 +141,23 @@ class ActivePromptBody(BaseModel):
     category: str = Field(..., description="doc_gen | summary | qna")
     subtask: Optional[str] = Field(None, description="doc_gen 전용 서브테스크")
     promptId: int = Field(..., description="선택할 프롬프트 ID")
+
+# 공통 정규화 함수 추가
+def _canon_storage_path(p: str) -> str:
+    """
+    같은 모델 디렉터리를 항상 /storage/model/<basename> 로 통일.
+    해당 경로에 config.json 이 있으면 그 경로를 반환, 없으면 원본 반환.
+    """
+    try:
+        p = (p or "").strip().replace("\\", "/")
+        base = os.path.basename(p.rstrip("/"))
+        cand = f"/storage/model/{base}"
+        if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")):
+            return cand
+    except Exception:
+        pass
+    return p
+
 
 # ===== DB Helpers =====
 def _connect() -> sqlite3.Connection:
@@ -684,34 +699,34 @@ def _resolve_model_fs_path(name_or_path: str) -> str:
         # 규칙 경로 후보 (service/local_<name>)
         rule_abs = STORAGE_ROOT / f"local_{_sanitize_name(_strip_category_suffix(os.path.basename(s)))}"
         if (rule_abs / "config.json").is_file():
-            return str(rule_abs)
+            return _canon_storage_path(str(rule_abs))
 
         # ./service/... 상대처리
         if s.startswith("./service/"):
             cand = (BASE_BACKEND / s.lstrip("./"))
             if (cand / "config.json").is_file():
-                return str(cand)
+                return _canon_storage_path(str(cand))
 
         # ./storage/... 상대처리(레거시)
         if s.startswith("./storage/"):
             cand = (BASE_BACKEND / s.lstrip("./"))
             if (cand / "config.json").is_file():
-                return str(cand)
+                return _canon_storage_path(str(cand))
 
         # 이름만 온 경우: service → legacy
         cand = STORAGE_ROOT / os.path.basename(s)
         if (cand / "config.json").is_file():
-            return str(cand)
+            return _canon_storage_path(s)
         cand = LEGACY_STORAGE_ROOT / os.path.basename(s)
         if (cand / "config.json").is_file():
-            return str(cand)
+            return _canon_storage_path(s)
 
         # 절대경로 그대로 확인
         if os.path.isabs(s) and os.path.isfile(os.path.join(s, "config.json")):
             return s
     except Exception:
         logging.getLogger(__name__).exception("failed to resolve model fs path")
-    return name_or_path
+    return _canon_storage_path(s)
 
 def _is_model_loaded(model_name: str) -> bool:
     try:
@@ -833,20 +848,18 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
     if val.startswith("./"):
         abs_p = (BASE_BACKEND / val.lstrip("./"))
         if (abs_p / "config.json").is_file():
-            return str(abs_p)
-        # Try standardized service location based on name
+            return _canon_storage_path(str(abs_p))
         std_abs = STORAGE_ROOT / f"local_{_sanitize_name(model_name)}"
         if (std_abs / "config.json").is_file():
-            return str(std_abs)
-        # Legacy fallback using basename
+            return _canon_storage_path(str(std_abs))
         leg = LEGACY_STORAGE_ROOT / os.path.basename(val)
         if (leg / "config.json").is_file():
-            return str(leg)
+            return _canon_storage_path(str(leg))
         return None
 
     # Absolute or simple name -> resolve via fs helper
-    return _resolve_model_fs_path(val)
-
+    resolved = _resolve_model_fs_path(val)
+    return _canon_storage_path(resolved)
 
 def _strip_category_suffix(name: str) -> str:
     # 허용: -qa/-doc_gen/-summary 및 _qa/_qna/_doc_gen/_summary
@@ -924,7 +937,9 @@ def _preload_via_adapters(model_name: str) -> bool:
     """
     try:
         # 1) 기본 경로 해석 (절대 경로)
-        raw_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
+        model_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_name)
+        model_path = _canon_storage_path(model_path)  # ← 추가
+        raw_path = _db_get_model_path(model_name) or _resolve_model_fs_path(model_path)
         if not (raw_path and os.path.isfile(os.path.join(raw_path, "config.json"))):
             logging.getLogger(__name__).warning("[preload] config.json not found: %s", raw_path)
             return False
