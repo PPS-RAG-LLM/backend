@@ -180,12 +180,10 @@ def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any]) ->
     return base or "요청된 템플릿에 따라 문서를 작성해 주세요."
 
     
-def _resolve_runner(body: Dict[str, Any]) -> Streamer:
-    provider = body.get("provider")
-    model_key = body.get("model")
-    if not provider or not model_key:
+def _resolve_runner(provider, model) -> Streamer:
+    if not provider or not model:
         raise BadRequestError("provider와 model 정보를 확인할 수 없습니다.")
-    return LLM.from_workspace(provider, model_key)
+    return LLM.from_workspace(provider, model)
 
 
 def _build_system_message(ctx: str, base_prompt: str, category: str, body: Dict[str, Any]) -> Dict[str, str]:
@@ -215,8 +213,9 @@ def stream_chat_for_qa(
     body["message"] = str(body.get("message") or "").strip()
     if not body["message"]:
         raise BadRequestError("message is required")
+    logger.info(f"BODY : {body}")
 
-    runner = _resolve_runner(ws, body)
+    runner = _resolve_runner(body["provider"], body["model"])
 
     messages: List[Dict[str, Any]] = []
     if category == "qa" and ws["chat_history"] > 0 and thread_id is not None:
@@ -261,7 +260,7 @@ def stream_chat_for_summary(
         user_prompt=body.get("userPrompt"),
     )
 
-    runner = _resolve_runner(ws, body)
+    runner = _resolve_runner(body["provider"], body["model"])
 
     messages: List[Dict[str, Any]] = []
     ctx = ""
@@ -294,8 +293,7 @@ def stream_chat_for_doc_gen(
         user_prompt=body.get("userPrompt"),
         template_vars=body.get("templateVariables") or {},
     )
-
-    runner = _resolve_runner(ws, body)
+    runner = _resolve_runner(body["provider"], body["model"])
 
     messages: List[Dict[str, Any]] = []
     ctx = ""
