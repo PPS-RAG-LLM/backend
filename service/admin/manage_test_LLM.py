@@ -329,7 +329,7 @@ def run_eval_once(body: RunEvalBody) -> Dict[str, Any]:
             return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
 
     # 3) 생성
-    answer = _simple_generate(prompt_text, model_name, body.max_tokens, body.temperature)
+    answer = _infer_answer(prompt_text, model_name, body.max_tokens, body.temperature)
 
     # 4) acc 계산(간이: prompt 대비 토큰 겹침)
     acc = _acc_from_prompt_and_answer(prompt_text, answer)
@@ -706,7 +706,7 @@ async def ensure_run_if_empty_uploaded(
             full_prompt = f"{base_prompt_text}\n\n[CONTEXT]\n{context}"
 
         # --- LLM 생성 ---
-        answer = _simple_generate(full_prompt, model_name, max_tokens=512, temperature=0.7)
+        answer = _infer_answer(base_prompt_text, model_name, max_tokens, temperature)
 
         # --- Rouge(L)-F1 * 100 = acc_score ---
         try:
@@ -759,3 +759,86 @@ async def ensure_run_if_empty_uploaded(
         return {"success": False, "error": "ensure_run_if_empty_uploaded failed"}
     finally:
         conn.close()
+
+# ==== Inference (backend-local) =================================================
+from pathlib import Path
+from typing import Optional
+
+# 스트리머 백엔드(둘 중 필요한 것만 import 해도 됨)
+try:
+    from utils.llms.huggingface.qwen_7b import stream_chat as _qwen_stream
+except Exception:
+    _qwen_stream = None
+
+try:
+    from utils.llms.huggingface.gpt_oss_20b import stream_chat as _gptoss_stream
+except Exception:
+    _gptoss_stream = None
+
+# admin의 경로 해석 유틸 재사용
+from service.admin.manage_admin_LLM import _db_get_model_path as _admin_db_get_model_path
+from service.admin.manage_admin_LLM import _resolve_model_fs_path as _admin_resolve_model_fs_path
+from service.admin.manage_admin_LLM import _lookup_model_by_name as _admin_lookup_model
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]  # .../backend
+
+def _resolve_local_model_dir_for_infer(model_name: str) -> Optional[str]:
+    """
+    모델 이름 -> 로컬 디렉터리(절대경로) 추출.
+    - DB(model_path) 우선, 없으면 FS 규칙 탐색
+    - './' 시작이면 backend 루트 기준으로 환원
+    """
+    p = _admin_db_get_model_path(model_name) or _admin_resolve_model_fs_path(model_name)
+    if not p:
+        return None
+    p = p.replace("\\", "/")
+    if p.startswith("./"):
+        return str((_BACKEND_ROOT / p.lstrip("./")).resolve())
+    return p
+
+def _select_stream_backend(model_name: str):
+    """
+    모델명/DB provider로 스트리머 선택.
+    - qwen -> qwen_7b.stream_chat
+    - gpt-oss -> gpt_oss_20b.stream_chat
+    - 없으면 None (fallback: _simple_generate)
+    """
+    row = _admin_lookup_model(model_name)
+    prov = (row["provider"] if row and "provider" in row.keys() else "") or ""
+    name = (model_name or "")
+    key = (prov + " " + name).lower()
+    if "qwen" in key and _qwen_stream:
+        return _qwen_stream
+    if ("gpt-oss" in key or "gpt_oss" in key) and _gptoss_stream:
+        return _gptoss_stream
+    # 필요시 더 추가
+    return None
+
+def _infer_answer(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+    """
+    우선 utils 스트리머(로컬 캐시 lru_cache 활용)로 추론 시도 → 실패 시 기존 _simple_generate 폴백.
+    """
+    try:
+        model_dir = _resolve_local_model_dir_for_infer(model_name)
+        backend = _select_stream_backend(model_name)
+        if backend and model_dir:
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt_text},
+            ]
+            chunks = []
+            # stream_chat는 generator를 반환. 모두 모아서 문자열로 합칩니다.
+            for token in backend(messages, model_path=model_dir, temperature=temperature, max_new_tokens=max_tokens):
+                chunks.append(token)
+            out = "".join(chunks).strip()
+            if out:
+                return out
+    except Exception:
+        logging.getLogger(__name__).exception("stream backend inference failed; will fallback to _simple_generate")
+
+    # 폴백: (기존) 간단 로컬 생성기
+    try:
+        return _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
+    except Exception:
+        logging.getLogger(__name__).exception("_simple_generate failed; returning stub text")
+        return "⚠️ 로컬 모델이 로드되지 않아 샘플 응답을 반환합니다. (테스트 전용)"
