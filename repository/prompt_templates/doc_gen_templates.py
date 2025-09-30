@@ -58,8 +58,8 @@ def repo_list_doc_gen_templates(default_only: bool) -> List[Dict[str, object]]:
             out.append({
                 "id": r.id,
                 "name": r.name,
-                "system_prompt": r.system_prompt,
-                "user_prompt": r.user_prompt,
+                "systemPrompt": r.system_prompt,
+                "userPrompt": r.user_prompt,
                 "variables": by_tid.get(r.id, []),
             })
         return out
@@ -106,8 +106,8 @@ def repo_get_doc_gen_template_by_id_with_vars(template_id: int) -> Optional[Dict
         return {
             "id": tmpl.id,
             "name": tmpl.name,
-            "system_prompt": tmpl.system_prompt,
-            "user_prompt": tmpl.user_prompt,
+            "systemPrompt": tmpl.system_prompt,
+            "userPrompt": tmpl.user_prompt,
             "variables": variables,
         }
 
@@ -144,8 +144,8 @@ def repo_create_doc_gen_template(
             return {
                 "id": template.id,
                 "name": template.name,
-                "system_prompt": template.system_prompt,
-                "user_prompt": template.user_prompt,
+                "systemPrompt": template.system_prompt,
+                "userPrompt": template.user_prompt,
                 "variables": variables or [],
             }
         except IntegrityError as exc:
@@ -229,8 +229,8 @@ def repo_update_doc_gen_template(
         return {
             "id": template.id,
             "name": template.name,
-            "system_prompt": template.system_prompt,
-            "user_prompt": template.user_prompt,
+            "systemPrompt": template.system_prompt,
+            "userPrompt": template.user_prompt,
             "variables": variables or [],
         }
 

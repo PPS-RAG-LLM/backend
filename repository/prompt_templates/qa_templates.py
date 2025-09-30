@@ -22,7 +22,7 @@ def repo_list_qa_templates() -> List[Dict[str, str]]:
             .order_by(SystemPromptTemplate.id.desc())
         )
         rows = session.execute(stmt).all()
-        return [{"id": r.id, "name": r.name, "system_prompt": r.system_prompt, "user_prompt":r.user_prompt} for r in rows]
+        return [{"id": r.id, "name": r.name, "systemPrompt": r.system_prompt, "userPrompt":r.user_prompt} for r in rows]
         
 
 def repo_create_qa_template(

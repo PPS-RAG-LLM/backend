@@ -42,7 +42,7 @@ def get_summary_template_route(template_id: int):
     row = get_summary_template(template_id)
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
-    return {"id": row["id"], "name": row["name"], "systemPrompt": row["systemPrompt"], "userPrompt": row["userPrompt"]}
+    return row
 
 class CreateTemplateRequest(BaseModel):
     systemPrompt: str ="(require)시스템 프롬프트"

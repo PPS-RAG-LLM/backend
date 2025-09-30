@@ -29,7 +29,7 @@ def repo_list_summary_templates(default_only:bool) -> List[Dict[str, str]]:
             if default_only:
                 stmt = stmt.where(SystemPromptTemplate.is_default == True)
             rows = session.execute(stmt).all()
-            return [{"id": r.id, "name": r.name, "system_prompt": r.system_prompt, "user_prompt": r.user_prompt} for r in rows]
+            return [{"id": r.id, "name": r.name, "systemPrompt": r.system_prompt, "userPrompt": r.user_prompt} for r in rows]
     except IntegrityError as exc:
             session.rollback()
             raise DatabaseError(f"Summary Prompt template create failed: {exc}") from exc
@@ -56,7 +56,7 @@ def repo_get_summary_template_by_id(template_id: int) -> Optional[Dict[str, str]
             if not row:
                 return None
             logger.info("템플릿 찾음.")
-            return {"id": row.id, "name": row.name, "system_prompt": row.system_prompt, "user_prompt": row.user_prompt}
+            return {"id": row.id, "name": row.name, "systemPrompt": row.system_prompt, "userPrompt": row.user_prompt}
     except IntegrityError as exc:
             session.rollback()
             raise DatabaseError(f"Summary Prompt template create failed: {exc}") from exc
@@ -82,9 +82,9 @@ def repo_create_summary_template(
             return {
                 "id": int(template.id),
                 "name": template.name,
-                "system_prompt": template.system_prompt,
-                "is_default": bool(template.is_default),
-                "is_active": bool(template.is_active),
+                "systemPrompt": template.system_prompt,
+                "isDefault": bool(template.is_default),
+                "isActive": bool(template.is_active),
             }
         except IntegrityError as exc:
             session.rollback()
@@ -104,8 +104,8 @@ def repo_update_summary_template(
         return {
             "id": template.id,
             "name": template.name,
-            "system_prompt": template.system_prompt,
-            "user_prompt": template.user_prompt 
+            "systemPrompt": template.system_prompt,
+            "userPrompt": template.user_prompt 
         }
 
 def repo_delete_summary_template(template_id: int) -> bool:
