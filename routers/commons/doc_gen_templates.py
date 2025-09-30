@@ -26,8 +26,8 @@ class VariableItem(BaseModel):
 class TemplateListItem(BaseModel):
     id: int
     name: str = "'business_trip' | 'report' | 'meeting'"
-    system_prompt: str = "시스템 프롬프트"
-    user_prompt: Optional[str] = "유저 프롬프트"
+    systemPrompt: str = "시스템 프롬프트"
+    userPrompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 class TemplateListResponse(BaseModel):
@@ -35,8 +35,8 @@ class TemplateListResponse(BaseModel):
 
 class TemplateContentResponse(BaseModel):
     name: str = "'business_trip' | 'report' | 'meeting'"
-    system_prompt: str ="시스템 프롬프트" 
-    user_prompt: Optional[str] = "유저 프롬프트"
+    systemPrompt: str ="시스템 프롬프트" 
+    userPrompt: Optional[str] = "유저 프롬프트"
     variables: List[VariableItem]
 
 @router.get("/templates/is_default", response_model=TemplateListResponse, summary="사용자용 | 관리자 측에서 기본값으로 정해진 문서생성용 템플릿 각 세부 테스크 목록")
@@ -65,14 +65,14 @@ class VariableItemRequest(BaseModel):
 
 class TemplatePayload(BaseModel):
     name: str = "'business_trip' | 'report' | 'meeting'"
-    system_prompt: str = "시스템프롬프트"
-    user_prompt: Optional[str] = "유저 프롬프트트"
+    systemPrompt: str = "시스템프롬프트"
+    userPrompt: Optional[str] = "유저 프롬프트트"
     variables: List[VariableItemRequest]
 
 @router.post("/template",  response_model=TemplateContentResponse, summary="관리자용 | 문서생성용 프롬프트 템플릿 만들기")
 def create_doc_gen_prompt(body:TemplatePayload):
     variables = [var.model_dump() for var in body.variables]
-    item = generate_new_doc_gen_prompt(body.name, body.system_prompt, body.user_prompt, variables)
+    item = generate_new_doc_gen_prompt(body.name, body.systemPrompt, body.userPrompt, variables)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")
     return item
@@ -81,7 +81,7 @@ def create_doc_gen_prompt(body:TemplatePayload):
 def update_doc_gen_prompt(template_id: int = Path(..., description="프롬프트 템플릿 id"),
  body: TemplateContentResponse = Body(..., description="")):
     variables = [var.model_dump() for var in body.variables]
-    item = update_doc_gen_prompt_service(template_id, body.name, body.system_prompt, body.user_prompt, variables)
+    item = update_doc_gen_prompt_service(template_id, body.name, body.systemPrompt, body.userPrompt, variables)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")
     return item

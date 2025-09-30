@@ -9,14 +9,14 @@ router = APIRouter(tags=["QA"], prefix="/v1/qa")
 class TemplateListItem(BaseModel):
     id: int
     name: str = "qa_prompt"
-    system_prompt: str = "시스템 프롬프트"
-    user_prompt: Optional[str] = "유저 프롬프트"
+    systemPrompt: str = "시스템 프롬프트"
+    userPrompt: Optional[str] = "유저 프롬프트"
 
 class TemplateContentResponse(BaseModel):
     id: int
     name: str = "qa_prompt"
-    system_prompt: str = "시스템 프롬프트"
-    user_prompt: Optional[str] = "유저 프롬프트"
+    systemPrompt: str = "시스템 프롬프트"
+    userPrompt: Optional[str] = "유저 프롬프트"
 
 class TemplateListResponse(BaseModel):
     templates: List[TemplateContentResponse]
@@ -28,12 +28,12 @@ def list_qa_templates_all_route():
 
 
 class CreateTemplateRequest(BaseModel):
-    system_prompt: str = "시스템 프롬프트"
-    user_prompt: Optional[str] = "유저 프롬프트"
+    systemPrompt: str = "시스템 프롬프트"
+    userPrompt: Optional[str] = "유저 프롬프트"
 
 @router.post("/template", response_model=TemplateContentResponse, summary="관리자용 | QA 시스템 프롬프트 생성")
-def create_qa_system_prompt(body:CreateTemplateRequest):
-    item = generate_new_qa_prompt(body.system_prompt, body.user_prompt)
+def create_qa_systemPrompt(body:CreateTemplateRequest):
+    item = generate_new_qa_prompt(body.systemPrompt, body.userPrompt)
     return item
 
 
@@ -42,7 +42,7 @@ def update_qa_template_route(
     template_id: int = Path(..., description="프롬프트 템플릿 id"), 
     body: CreateTemplateRequest =Body(...,description="")
     ):
-    item = update_qa_template(template_id, body.system_prompt, body.user_prompt)
+    item = update_qa_template(template_id, body.systemPrompt, body.userPrompt)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")
     return item
