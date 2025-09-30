@@ -24,6 +24,24 @@ try:
     from peft import PeftModel
 except Exception:
     PeftModel = None  # peft 미설치 환경 보호
+import socket  # ← 추가
+
+
+def _set_cluster_load_state(model_name: str, loaded: bool):
+    payload = {"modelName": model_name, "loaded": loaded, "worker": WORKER_ID, "ts": _now_iso()}
+    _set_cache(f"model_loaded:{model_name}", _json(payload), "llm_cluster")
+
+def _get_cluster_load_state(model_name: str) -> bool:
+    raw = _get_cache(f"model_loaded:{model_name}")
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+        # 선택:  N초 이내만 유효로 보는 TTL 로직 추가
+        return bool(data.get("loaded"))
+    except Exception:
+        return False
+
 
 # ===== In-memory temp settings (kept for backward-compat) =====
 _DEFAULT_TOPK: int = 5
@@ -1146,11 +1164,16 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         rouge = r["rougeScore"] if ("rougeScore" in cols) else None
 
         name = r["name"]
-        # 메모리 로드 여부
+        # 로컬 워커 로드 여부
         try:
-            is_loaded = _is_model_loaded(name)
+            is_loaded_local = _is_model_loaded(name)
         except Exception:
-            is_loaded = False
+            is_loaded_local = False
+        # 클러스터(전 워커) 로드 여부
+        try:
+            is_loaded_cluster = _get_cluster_load_state(name)
+        except Exception:
+            is_loaded_cluster = False
 
         # active 규칙
         if cat == "doc_gen" and sub:
@@ -1163,18 +1186,19 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         models.append({
             "id": r["id"],
             "name": name,
-            "provider": r["provider"],            # ← 추가: provider 출력
-            "loaded": bool(is_loaded),
-            "active": bool(active_flag),
+            "provider": r["provider"],
+            "loaded": bool(is_loaded_local),          # 이 워커에서 로드됨?
+            "loadedCluster": bool(is_loaded_cluster), # 클러스터 어딘가에서 로드됨?
+            "active": bool(active_flag),              # 카테고리 대표 선택?
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),      # DB의 활성 플래그(표시용)
+            "isActive": bool(r["isActive"]),          # DB 메타 활성
             "createdAt": r["created_at"],
             "rougeScore": rouge,
         })
 
     return {"category": cat, "models": models}
-    
+
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
     """
     카테고리별 활성 모델을 메모리에 로드하고 active 로 설정한다.
@@ -1219,6 +1243,12 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
                 _db_set_active_by_path(rel_path, True)
         except Exception:
             logging.getLogger(__name__).exception("is_active sync on load failed")
+
+        # ← 새로 추가: 클러스터 전역 로드 상태 기록
+        try:
+            _set_cluster_load_state(model_name, True)
+        except Exception:
+            logging.getLogger(__name__).exception("cluster load state set failed (load)")
 
         message = "모델 로드 완료"
         if row is None:
@@ -1272,20 +1302,18 @@ def unload_model(model_name: str) -> Dict[str, Any]:
             _db_set_active_by_path(rel_path, False)
     except Exception:
         logging.getLogger(__name__).exception("is_active sync on unload failed")
+
+    # ← 새로 추가: 클러스터 전역 로드 상태 기록
+    try:
+        _set_cluster_load_state(model_name, False)
+    except Exception:
+        logging.getLogger(__name__).exception("cluster load state set failed (unload)")
+
     return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
 
 
+
 # ===== 기본 모델 매핑(테스크/서브테스크) =====
-# moved to service/admin/manage_test_LLM.py: DefaultModelBody
-
-
-## moved to service/admin/manage_test_LLM.py: set_default_model
-
-
-## moved to service/admin/manage_test_LLM.py: get_default_model
-
-
-## moved to service/admin/manage_test_LLM.py: select_model_for_task
 
 
 def unload_model_for_category(category: str, model_name: str) -> Dict[str, Any]:
