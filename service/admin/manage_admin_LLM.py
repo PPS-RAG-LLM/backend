@@ -27,6 +27,22 @@ except Exception:
 import socket  # ← 추가
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
+
+# 예외 삼켜서 로깅만 하는 안전 래퍼
+def _mark_loaded(model_name: str):
+    try:
+        _set_cluster_load_state(model_name, True)
+    except Exception:
+        logging.getLogger(__name__).exception("cluster load state set failed (mark_loaded)")
+
+def _mark_unloaded(model_name: str):
+    try:
+        _set_cluster_load_state(model_name, False)
+    except Exception:
+        logging.getLogger(__name__).exception("cluster load state set failed (mark_unloaded)")
+
+
+
 def _set_cluster_load_state(model_name: str, loaded: bool):
     payload = {"modelName": model_name, "loaded": loaded, "worker": WORKER_ID, "ts": _now_iso()}
     _set_cache(f"model_loaded:{model_name}", _json(payload), "llm_cluster")
@@ -1199,11 +1215,36 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
 
     return {"category": cat, "models": models}
 
+def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
+    """
+    최초 사용시 지연 로딩.
+    - FULL은 통짜 로딩, LORA/QLORA는 어댑터 경로 우선 등 기존 규칙 유지
+    - 로드 성공 시 클러스터 플래그를 True 로 기록
+    """
+    try:
+        if _is_model_loaded(model_name):
+            _mark_loaded(model_name)  # 이미 로컬에 올라와 있어도 클러스터 플래그는 보강
+            return {"loaded": True, "message": "already loaded", "modelName": model_name}
+
+        paths = _resolve_paths_for_model(model_name)
+        # 우선순위: full -> adapter -> name
+        candidate = paths.get("full") or paths.get("adapter") or _resolve_model_fs_path(model_name)
+
+        try:
+            _MODEL_MANAGER.load(candidate)
+            _mark_loaded(model_name)  # ← 여기 추가
+            return {"loaded": True, "message": "loaded", "modelName": model_name}
+        except Exception:
+            logging.getLogger(__name__).exception("lazy load failed - fallback adapter preload")
+            if _preload_via_adapters(model_name):
+                _mark_loaded(model_name)  # ← 여기 추가
+                return {"loaded": True, "message": "adapter preloaded (fallback)", "modelName": model_name}
+            return {"loaded": False, "message": "load failed", "modelName": model_name}
+    except Exception:
+        logging.getLogger(__name__).exception("lazy_load_if_needed unexpected error")
+        return {"loaded": False, "message": "unexpected error", "modelName": model_name}
+
 def load_model(category: str, model_name: str) -> Dict[str, Any]:
-    """
-    카테고리별 활성 모델을 메모리에 로드하고 active 로 설정한다.
-    이미 로드된 경우에도 active 만 갱신한다.
-    """
     logger = logging.getLogger(__name__)
     try:
         category = _norm_category(category)
@@ -1231,7 +1272,7 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         # Set active for category
         _set_active_model_for_category(category, model_name)
 
-        # DB is_active 동기화(동일 경로 전체) – 규칙 상대경로 기준
+        # DB is_active 동기화
         try:
             row = _lookup_model_by_name(model_name)
             if row and row["model_path"]:
@@ -1244,11 +1285,8 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         except Exception:
             logging.getLogger(__name__).exception("is_active sync on load failed")
 
-        # ← 새로 추가: 클러스터 전역 로드 상태 기록
-        try:
-            _set_cluster_load_state(model_name, True)
-        except Exception:
-            logging.getLogger(__name__).exception("cluster load state set failed (load)")
+        # ← 반드시 기록 (요청으로 로드될 때만 찍는다: 프리로딩은 여기/지연로딩에서만)
+        _mark_loaded(model_name)
 
         message = "모델 로드 완료"
         if row is None:
@@ -1258,15 +1296,11 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         logger.exception("unexpected error in load_model")
         return {"success": False, "message": "예상치 못한 오류로 작업에 실패했습니다.", "category": category, "modelName": model_name}
 
-
 def unload_model(model_name: str) -> Dict[str, Any]:
-    """Explicitly unload a model from memory (manager + adapters)."""
     logger = logging.getLogger(__name__)
     was_loaded = _is_model_loaded(model_name)
-    # 각 단계는 독립적으로 시도하고, 일부 실패해도 최종 상태로 성공 여부 판단
     try:
         try:
-            # Try unloading by both name and resolved path to avoid key mismatch
             _MODEL_MANAGER.unload(model_name)
             try:
                 candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
@@ -1290,8 +1324,10 @@ def unload_model(model_name: str) -> Dict[str, Any]:
             logging.getLogger(__name__).exception("local cache clear failed")
     finally:
         now_loaded = _is_model_loaded(model_name)
+
     ok = not now_loaded
-    # DB is_active 동기화(동일 경로 전체)
+
+    # DB is_active 동기화(정책에 따라 유지/미유지 선택 가능)
     try:
         row = _lookup_model_by_name(model_name)
         rel_path = (row["model_path"] if row else None)
@@ -1303,11 +1339,8 @@ def unload_model(model_name: str) -> Dict[str, Any]:
     except Exception:
         logging.getLogger(__name__).exception("is_active sync on unload failed")
 
-    # ← 새로 추가: 클러스터 전역 로드 상태 기록
-    try:
-        _set_cluster_load_state(model_name, False)
-    except Exception:
-        logging.getLogger(__name__).exception("cluster load state set failed (unload)")
+    # ← 반드시 기록
+    _mark_unloaded(model_name)
 
     return {"success": bool(ok), "message": ("언로드 완료" if was_loaded and ok else "이미 언로드됨"), "modelName": model_name}
 
