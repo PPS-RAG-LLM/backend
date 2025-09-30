@@ -1180,12 +1180,8 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         rouge = r["rougeScore"] if ("rougeScore" in cols) else None
 
         name = r["name"]
-        # 로컬 워커 로드 여부
-        try:
-            is_loaded_local = _is_model_loaded(name)
-        except Exception:
-            is_loaded_local = False
-        # 클러스터(전 워커) 로드 여부
+
+        # ✅ 로드 상태: 클러스터 기준만 사용
         try:
             is_loaded_cluster = _get_cluster_load_state(name)
         except Exception:
@@ -1203,12 +1199,11 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
             "id": r["id"],
             "name": name,
             "provider": r["provider"],
-            "loaded": bool(is_loaded_local),          # 이 워커에서 로드됨?
-            "loadedCluster": bool(is_loaded_cluster), # 클러스터 어딘가에서 로드됨?
-            "active": bool(active_flag),              # 카테고리 대표 선택?
+            "loaded": bool(is_loaded_cluster),   # ← 클러스터 상태를 loaded로
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "isActive": bool(r["isActive"]),          # DB 메타 활성
+            "active": bool(active_flag),
+            "isActive": bool(r["isActive"]),    # DB 메타 활성
             "createdAt": r["created_at"],
             "rougeScore": rouge,
         })
