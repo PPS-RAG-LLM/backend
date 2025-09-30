@@ -25,7 +25,6 @@ try:
 except Exception:
     PeftModel = None  # peft 미설치 환경 보호
 import socket  # ← 추가
-
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 def _set_cluster_load_state(model_name: str, loaded: bool):
