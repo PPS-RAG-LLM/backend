@@ -14,6 +14,7 @@ from errors import BadRequestError
 import time, json
 
 logger = logger(__name__)
+
 chat_router = APIRouter(tags=["workspace_chat"], prefix="/v1/workspace")
 
 
@@ -33,26 +34,18 @@ class StreamChatRequest(BaseModel):
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
 
-
 @chat_router.post(
     "/{slug}/thread/{thread_slug}/stream-chat", summary="QnA 스트리밍 채팅 실행"
 )
 def stream_chat_qa_endpoint(
-    category: str = Query(..., description="only qa"),
+    category: str = Query("qa"),
     slug: str = Path(..., description="워크스페이스 슬러그"),
     thread_slug: str = Path(..., description="채팅 스레드 슬러그"),
     body: StreamChatRequest = Body(..., description="채팅 요청 본문"),
 ):
     user_id = 3
     logger.info(f"\n\n[stream_chat_qa_endpoint] \n\n{body}\n\n")
-    # 스트리밍 시작 전에 검증
-    # preflight_stream_chat_for_workspace(
-    #     user_id=user_id,
-    #     slug=slug,
-    #     category=category,
-    #     body=body.model_dump(exclude_unset=True),
-    #     thread_slug=thread_slug,
-    # )
+
     gen = stream_chat_for_qa(
         user_id=user_id,
         slug=slug,
@@ -60,10 +53,12 @@ def stream_chat_qa_endpoint(
         category=category,
         body=body.model_dump(exclude_unset=True),
     )
-    return StreamingResponse(to_see(gen), media_type="text/event-stream")
+    return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
+
 
 
 def to_see(gen):
+    logger.info("[stream_chat_qa_endpoint] streaming start")
     buf = []
     last_flush = time.monotonic()
     for chunk in gen:
@@ -102,13 +97,7 @@ def summary_stream_endpoint(
     body: SummaryRequest = Body(..., description="요약 요청 (시스템프롬프트/내용/요청사항)"),
 ):
     user_id = 3
-    # preflight_stream_chat_for_workspace(
-    #     user_id=user_id,
-    #     slug=slug,
-    #     category="summary",
-    #     body={"mode": "chat"},
-    #     thread_slug=None,
-    # )
+
     message = body.userPrompt.strip()
     gen = stream_chat_for_summary(
         user_id=user_id,
@@ -157,13 +146,6 @@ def doc_gen_stream_endpoint(
         raise BadRequestError(f"필수 변수 누락: {sorted(missing)}")
     filtered_vars = {key: value for key, value in variables if key in allowed_keys}
 
-    # preflight_stream_chat_for_workspace(
-    #     user_id=user_id,
-    #     slug=slug,
-    #     category="doc_gen",
-    #     body={"mode": "chat"},
-    #     thread_slug=None,
-    # )
     message = (body.userPrompt or "").strip() or "요청된 템플릿에 따라 문서를 작성해 주세요."
     gen = stream_chat_for_doc_gen(
         user_id=user_id,
