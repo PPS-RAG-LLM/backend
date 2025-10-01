@@ -1,16 +1,51 @@
 from transformers.generation.streamers import TextIteratorStreamer
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from threading import Thread  
+from threading import Thread, RLock
 from config import config
 import torch, os
 from utils import logger, free_torch_memory
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Dict, Generator
-
 from utils.model_load import get_model_manager
 
 logger = logger(__name__)
+_load_guard = RLock()  # 동일 경로 동시 로딩 방지
 
+def _norm_path(p) -> str:
+    """항상 동일한 캐시 키(절대경로 문자열)로 정규화."""
+    try:
+        return str(Path(p).resolve())
+    except Exception:
+        return str(p)
+
+
+@lru_cache(maxsize=2)
+def _load_impl(norm_dir: str):
+    # 여긴 '한 번만' 실제 로드되는 자리
+    if not os.path.isdir(norm_dir):
+        raise FileNotFoundError(f"모델 디렉터리가 없습니다: {norm_dir}")
+    logger.info(f"load gpt-oss-20b from `{norm_dir}`")
+    with _load_guard:
+        tok = AutoTokenizer.from_pretrained(
+            norm_dir, trust_remote_code=True, use_fast=False, local_files_only=True
+        )
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+            tok.pad_token_id = tok.eos_token_id
+        mdl = AutoModelForCausalLM.from_pretrained(
+            norm_dir,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            local_files_only=True,
+        )
+        mdl.eval()
+        return mdl, tok
+
+def load_gpt_oss_20b(model_dir):
+    return _load_impl(_norm_path(model_dir))
 
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
     logger.info(f"stream_chat: {gen_kwargs}\n\n")
@@ -19,9 +54,8 @@ def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, 
     if not model_dir:
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
-    manager = get_model_manager()
+    model, tokenizer = load_gpt_oss_20b(model_dir)  # ← 리턴 순서 주의: (model, tokenizer)
 
-    tokenizer, model = manager.load(str(model_dir))
     # 1. Harmony chat template 자동 적용
     #    - add_generation_prompt=True: assistant 응답 시작에 맞춰 템플릿 완성
     input_ids = tokenizer.apply_chat_template(
@@ -88,35 +122,3 @@ if __name__ == "__main__":
     ]
     for chunk in stream_chat(messages):
         print(chunk, end="", flush=True)
-
-@lru_cache(maxsize=2) # 모델 로드 캐시(2개까지)
-def load_gpt_oss_20b(model_dir): 
-    
-    # 2) 로컬 디렉터리 존재 확인
-    if not os.path.isdir(model_dir):
-        parent = model_dir.parent
-        logger.error(f"모델 디렉터리가 없습니다: {model_dir} (parent={parent})")
-        raise FileNotFoundError(f"모델 디렉터리가 없습니다: {model_dir}")
-    logger.info(f"load gpt-oss-20b from `{model_dir}`")
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        trust_remote_code = True,   # 모델 코드 신뢰
-        use_fast=False,             # 빠른 토크나이저 사용 여부
-        local_files_only=True,
-        )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, 
-        device_map="auto",          # 모델 분산 처리
-        torch_dtype=torch.bfloat16, # gpt-oss-20b는 기본이 MXFP4 양자화된 MoE 경로이다.
-                                    # Triton 커널이 bf16 입력을 전제해(tl.static_assert(x_format == "bf16")) 
-                                    # FP16로 로드하면 컴파일/런타임이 깨짐. 
-        trust_remote_code=True,     # 모델 코드 신뢰
-        low_cpu_mem_usage=True,     # 메모리 효율성
-        local_files_only=True,
-        )
-    model.eval()
-    return model, tokenizer
