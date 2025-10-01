@@ -61,9 +61,9 @@ def _ephemeral_cache_env():
         yield
     finally:
         for k, v in old.items():
-            if v is None: 
+            if v is None:
                 os.environ.pop(k, None)
-            else: 
+            else:
                 os.environ[k] = v
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -92,15 +92,31 @@ DB_URL = f"sqlite:///{os.environ.get('COREIQ_DB', str(BASE_BACKEND / 'storage' /
 _engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
-# ---- Portable path helper ----
+# ---- Portable path helpers ----
 def _to_rel(p: str) -> str:
-    """Return `p` as a path **relative** to the backend root so DB records do
-    not depend on absolute host paths (useful inside Docker). If conversion
-    fails, the original path is returned unchanged."""
+    """`p`를 backend 루트 기준 상대 경로로 변환(실패 시 원본 반환)."""
     try:
         return os.path.relpath(p, BASE_BACKEND)
     except Exception:
         return p
+
+def _to_service_rel(p: str) -> str:
+    """
+    어떤 경로든 최종적으로 './service/<...>' 형태로 표준화.
+    예) /.../backend/storage/model/Qwen3-8B  → ./service/storage/model/Qwen3-8B
+        storage/model/Qwen3-8B               → ./service/storage/model/Qwen3-8B
+        ./service/storage/model/Qwen3-8B     → 그대로 유지
+    """
+    # 절대경로면 backend 기준 상대경로로
+    if os.path.isabs(p):
+        p = os.path.relpath(p, BASE_BACKEND)
+    s = p.replace("\\", "/").lstrip("./")
+    if not s.startswith("service/"):
+        s = f"service/{s}"
+    # 중복 슬래시 정리
+    while "//" in s:
+        s = s.replace("//", "/")
+    return f"./{s}"
 
 # ===== Helpers: path resolve =====
 def _resolve_model_dir(name_or_path: str) -> str:
@@ -110,7 +126,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
     """
     if os.path.isabs(name_or_path):
         return name_or_path
-    
+
     # 1) DB에서 llm_models 테이블 조회
     try:
         with SessionLocal() as s:
@@ -118,7 +134,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
             model = s.execute(
                 select(LlmModel).where(LlmModel.name == name_or_path)
             ).scalar_one_or_none()
-            
+
             if not model:
                 # 카테고리 접미사 제거 후 다시 찾기
                 def _strip_cat(n: str) -> str:
@@ -126,13 +142,13 @@ def _resolve_model_dir(name_or_path: str) -> str:
                         if n.endswith(suf):
                             return n[: -len(suf)]
                     return n
-                
+
                 base_name = _strip_cat(name_or_path)
                 if base_name != name_or_path:
                     model = s.execute(
                         select(LlmModel).where(LlmModel.name == base_name)
                     ).scalar_one_or_none()
-            
+
             if model and model.model_path:
                 p = model.model_path
                 if os.path.isabs(p):
@@ -143,7 +159,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
                     return cand
     except Exception as e:
         logger.warning(f"DB lookup failed for model {name_or_path}: {e}")
-    
+
     # 2) Fallback to storage root
     return os.path.join(STORAGE_MODEL_ROOT, name_or_path)
 
@@ -505,7 +521,8 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         - type 동일(대문자)
         - rouge1_f1: 최종 ROUGE 저장
     """
-    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))  # 출력(어댑터 or FULL 저장 폴더)
+    # ✅ 항상 './service/storage/model/<...>' 로 표준화
+    rel_model_path = _to_service_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
     mdl_type = (tuning_type or "QLORA").upper()
 
     with SessionLocal() as s:
@@ -529,8 +546,8 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         base_model_id = None
         base_model_rel_path = None
         if base_model_name:
-            abs_base = _resolve_model_dir(base_model_name)      # 물리 경로
-            base_model_rel_path = _to_rel(abs_base)             # 상대 경로
+            abs_base = _resolve_model_dir(base_model_name)   # 물리 경로
+            base_model_rel_path = _to_service_rel(abs_base)  # ./service/storage/model/<...>
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(
@@ -575,7 +592,6 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
             m.mather_path = None
 
         m.category = category
-        # m.subcategory = subcategory  # <- llm_models에 서브태스크 제약 제거. 필요시 메타로만 유지.
         m.is_active = True
         m.trained_at = _now_utc()
         s.add(m)
@@ -1142,14 +1158,14 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     # startNow와 startAt 동시 지정 방지
     if body.startNow and body.startAt:
         raise BadRequestError("startNow와 startAt은 동시에 사용할 수 없습니다. (둘 중 하나만)")
-    
+
     # body.category를 최종 신뢰(하위호환을 위해 인수 category는 fallback)
     category = (body.category or category).lower()
     suffix = (body.tuningType or "QLORA").upper()
     # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
     save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"
     _ensure_output_dir(save_name_with_suffix)
-    
+
     # 중복 실행 차단 (락 파일)
     import fcntl
     out_dir = _ensure_output_dir(save_name_with_suffix)
@@ -1215,7 +1231,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-    
+
     # 🔹 즉시 실행이면 예약(startAt)은 **무시**해서 중복 실행을 원천 차단
     if body.startNow:
         def _launch():
@@ -1233,7 +1249,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             # 예약 실행
             def _launch():
                 _run_training_inline(job, save_name_with_suffix)
-            
+
             # 예약 딜레이 재계산
             delay_sec = 0.0
             try:
@@ -1293,7 +1309,7 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
                 metrics = json.loads(row["metrics"]) or {}
             except Exception:
                 metrics = {}
-        
+
         # Liveness: if status is running but heartbeat is stale, flip to failed
         row_status = row["status"]
         try:
