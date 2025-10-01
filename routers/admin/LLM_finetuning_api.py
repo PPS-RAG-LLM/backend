@@ -1,141 +1,311 @@
-from fastapi import APIRouter, Query, UploadFile, File, Form
-from pydantic import BaseModel, Field
-from fastapi.responses import StreamingResponse
-import asyncio
-import json
-import os
-import uuid
-from datetime import datetime
-from pathlib import Path
+# /home/work/CoreIQ/backend/routers/admin/manage_user_api.py
+from __future__ import annotations
 
-from service.admin.LLM_finetuning import (
-    FineTuneRequest,
-    start_fine_tuning,
-    get_fine_tuning_status,
-    TRAIN_DATA_ROOT,
+from datetime import datetime
+from typing import List, Optional, Literal
+
+from fastapi import APIRouter, Body, HTTPException, Query, Path
+from pydantic import BaseModel, Field
+
+from service.admin.manage_user import (
+    UserQuery,
+    list_users,
+    get_user,
+    create_user,
+    update_user,
+    soft_delete_user,
+    restore_user,
+    bulk_update_users,
+    bulk_soft_delete,
 )
 
-router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
+router = APIRouter(
+    prefix="/v1/admin/users",
+    tags=["Admin Users"],
+    responses={200: {"description": "Success"}},
+)
+
+# ---------- Schemas ----------
+class UserOut(BaseModel):
+    id: int
+    role: str
+    username: str
+    name: str
+    department: str
+    position: str
+    security_level: int
+    daily_message_limit: Optional[int] = None
+    suspended: int
+    created_at: datetime
+    updated_at: datetime
+    expires_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
-# ---- Response Schemas (for enriched docs) ----
-class FineTuneLaunchResponse(BaseModel):
-    jobId: str = Field(..., description="생성된 작업 ID (ft-job-xxxx)")
-    started: bool = Field(..., description="즉시 실행 여부(True면 즉시 스레드 시작)")
+class UserCreateIn(BaseModel):
+    role: Literal["user", "admin"] = "user"
+    username: str = Field(..., min_length=3)
+    name: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=4, description="평문 또는 이미 해시된 값")
+    department: str
+    position: str
+    daily_message_limit: Optional[int] = None
+    security_level: int = 3
+    # ⛔️ API 입력에서 제거: suspended/pfp_filename/bio
 
 
-class FineTuneStatusResponse(BaseModel):
-    jobId: str = Field(..., description="작업 ID")
-    status: str = Field(..., description="queued | scheduled | running | succeeded | failed")
-    learningProgress: int = Field(0, ge=0, le=100, description="학습 진행률 0~100")
-    saveProgress: int | None = Field(0, ge=0, le=100, description="저장 단계 진행률 0~100")
-    saveStage: str | None = Field(None, description="저장 단계 라벨(adapter/tokenizer/model/done 등)")
-    roughScore: int | None = Field(None, description="간이 점수(ROUGE 0~100 환산)")
-    rouge1F1: float | None = Field(None, description="최종 ROUGE-1 F1 (0.0~1.0)")
-    error: str | None = Field(None, description="에러 메시지(있을 때만)")
+class UserUpdateIn(BaseModel):
+    # ✅ 변경하고 싶은 항목만 전달 (부분 업데이트)
+    name: Optional[str] = None
+    department: Optional[str] = None
+    position: Optional[str] = None
+
+    # ✅ 비밀번호 변경 허용 (평문이면 서비스에서 SHA-256 해시 저장)
+    password: Optional[str] = Field(None, description="변경 시에만 전달(평문 가능)")
+
+    role: Optional[Literal["user", "admin"]] = None
+    daily_message_limit: Optional[int] = None
+    security_level: Optional[int] = None
+
+    # ⛔️ API 입력에서 제거: suspended/pfp_filename/bio
+    expires_at: Optional[datetime] = Field(
+        default=None, description="퇴사일 설정. NULL로 보내면 복구 효과"
+    )
 
 
-# ---- 업로드 유틸 ----
-def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
-    """
-    업로드된 CSV를 storage/train_data/<subdir or YYYYMMDD>/<uuid>.csv 로 저장.
-    반환값은 절대경로.
-    """
-    assert file.filename, "filename is required"
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in (".csv", ".tsv"):
-        # 엄격히 CSV만 받고 싶다면 여기서 에러로 바꿔도 됨
-        pass
-    day = datetime.now().strftime("%Y%m%d")
-    dir_name = subdir or day
-    target_dir = os.path.join(TRAIN_DATA_ROOT, dir_name)
-    os.makedirs(target_dir, exist_ok=True)
-    unique = f"{uuid.uuid4().hex}{ext or '.csv'}"
-    target_path = os.path.join(target_dir, unique)
-
-    # 스트리밍 복사
-    with open(target_path, "wb") as f:
-        while chunk := file.file.read(1024 * 1024):
-            f.write(chunk)
-    file.file.close()
-    return target_path
+class BulkUpdateIn(BaseModel):
+    ids: List[int] = Field(..., min_items=1)
+    department: Optional[str] = None
+    position: Optional[str] = None
+    role: Optional[Literal["user", "admin"]] = None
+    security_level: Optional[int] = None
+    # ⛔️ API 입력에서 제거: suspended
 
 
-@router.post(
-    "/fine-tuning",
-    summary="파인튜닝 실행(텍스트 파라미터 + 학습 파일 업로드)",
-    response_model=FineTuneLaunchResponse,
+class BulkDeleteIn(BaseModel):
+    ids: List[int] = Field(..., min_items=1)
+    retired_at: Optional[datetime] = None
+
+
+class ListResponse(BaseModel):
+    items: List[UserOut]
+    total: int
+    page: int
+    page_size: int
+
+
+# ---------- Endpoints ----------
+@router.get(
+    "/list",
+    response_model=ListResponse,
+    summary="사용자 목록 조회",
+    description=(
+        "관리자 화면의 사용자 테이블 데이터를 조회합니다.\n\n"
+        "### 기능\n"
+        "- 부서/직급/검색어(q) 필터\n"
+        "- 재직자만 보기(`active_only=True` → `expires_at IS NULL`)\n"
+        "- 페이지네이션(page, page_size) 및 정렬(sort)\n\n"
+        "### 정렬 키\n"
+        "`created_at`, `name`, `username`, `department`, `position`, `security_level`, `expires_at`, `id`\n"
+        "- 내림차순: `-created_at` (기본)\n"
+        "- 오름차순: `name`\n\n"
+        "### 비고\n"
+        "- `q`는 `username`/`name`에 부분 일치로 검색합니다.\n"
+        "- `expires_at`가 NULL이면 재직, 값이 있으면 퇴사일로 표시하세요."
+    ),
     responses={
-        200: {"description": "작업이 생성되었고 즉시 실행 여부가 반환됩니다."},
-        400: {"description": "요청 파라미터 오류 또는 중복 실행 락"},
-        500: {"description": "서버 내부 오류"},
+        200: {"description": "목록/총건수/페이징 정보 반환"},
     },
 )
-async def launch_fine_tuning(
-    # 텍스트(옵션) 파라미터들 — 값이 오면 사용, 없으면 기본값
-    category: str | None = Form(None, description="qa | doc_gen | summary"),
-    baseModelName: str | None = Form(None, description="베이스 모델 이름(예: gpt-oss)"),
-    saveModelName: str | None = Form(None, description="저장될 모델 표시 이름(미지정 시 자동 생성)"),
-    systemPrompt: str | None = Form(None, description="시스템 프롬프트"),
-    batchSize: int | None = Form(None),
-    epochs: int | None = Form(None),
-    learningRate: float | None = Form(None),
-    overfittingPrevention: bool | None = Form(None),
-    gradientAccumulationSteps: int | None = Form(None),
-    tuningType: str | None = Form(None, description="LORA | QLORA | FULL"),
-    quantizationBits: int | None = Form(None, description="QLORA 전용: 4 또는 8"),
-    startAt: str | None = Form(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"),
-    startNow: bool | None = Form(None, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)"),
-    # 업로드 파일(필수)
-    trainSet: UploadFile = File(..., description="학습 CSV 파일"),
+def api_list_users(
+    department: Optional[str] = Query(None, description="부서명 정확일치 필터"),
+    position: Optional[str] = Query(None, description="직급 정확일치 필터"),
+    q: Optional[str] = Query(None, description="아이디(username) 또는 이름(name) 부분 검색"),
+    active_only: bool = Query(False, description="재직자만 보기(True면 퇴사자 제외)"),
+    page: int = Query(1, ge=1, description="페이지(1부터)"),
+    page_size: int = Query(20, ge=1, le=200, description="페이지 크기(1~200)"),
+    sort: str = Query("-created_at", description="예: -created_at, name, security_level"),
 ):
-    # 기본값 채우기
-    _category = (category or "qa").strip()
-    _base = (baseModelName or "gpt-oss").strip()
-    _save = saveModelName or f"fine-tuned-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    _sys = systemPrompt or "당신은 도움이 되는 AI 어시스턴트입니다."
-    _bs = int(batchSize) if batchSize is not None else 4
-    _epochs = int(epochs) if epochs is not None else 3
-    _lr = float(learningRate) if learningRate is not None else 2e-4
-    _ofp = True if overfittingPrevention is None else bool(overfittingPrevention)
-    _gas = int(gradientAccumulationSteps) if gradientAccumulationSteps is not None else 16
-    _tuning = (tuningType or "QLORA").upper()
-    _qbits = quantizationBits if quantizationBits is not None else (4 if _tuning == "QLORA" else None)
-    _startNow = startNow if startNow is not None else False
-
-    # 1) 파일 저장
-    saved_abs = _save_upload_csv(trainSet, subdir=_save)
-    # 2) 서비스 요청 생성
-    req = FineTuneRequest(
-        category=_category,
-        subcategory=None,
-        baseModelName=_base,
-        saveModelName=_save,
-        systemPrompt=_sys,
-        batchSize=_bs,
-        epochs=_epochs,
-        learningRate=_lr,
-        overfittingPrevention=_ofp,
-        trainSetFile=saved_abs,
-        gradientAccumulationSteps=_gas,
-        quantizationBits=_qbits,
-        tuningType=_tuning,
-        startAt=startAt,
-        startNow=_startNow,
+    qry = UserQuery(
+        department=department,
+        position=position,
+        q=q,
+        active_only=active_only,
+        page=page,
+        page_size=page_size,
+        sort=sort,
     )
-    return start_fine_tuning(_category, req)
+    rows, total = list_users(qry)
+    return ListResponse(
+        items=[UserOut.model_validate(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get(
-    "/fine-tuning",
-    summary="파인튜닝 진행 상태 조회",
-    response_model=FineTuneStatusResponse,
+    "/{user_id}",
+    response_model=UserOut,
+    summary="사용자 단건 조회",
+    description=(
+        "특정 사용자의 상세 정보를 조회합니다.\n\n"
+        "### 비고\n"
+        "- `expires_at`가 NULL이면 재직, 값이 있으면 퇴사 처리된 사용자입니다."
+    ),
     responses={
-        200: {"description": "현재 진행 상태 및 진행률을 반환합니다."},
-        404: {"description": "해당 작업이 존재하지 않습니다."},
+        200: {"description": "단건 사용자 정보"},
+        404: {"description": "사용자를 찾을 수 없음"},
     },
 )
-async def read_fine_tuning_status(jobId: str = Query(..., description="조회할 작업 ID")):
-    return get_fine_tuning_status(job_id=jobId)
+def api_get_user(user_id: int = Path(..., description="대상 사용자 ID")):
+    u = get_user(user_id)
+    if not u:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    return UserOut.model_validate(u)
 
 
+@router.post(
+    "",
+    response_model=UserOut,
+    status_code=201,
+    summary="사용자 생성",
+    description=(
+        "신규 사용자를 생성합니다.\n\n"
+        "### 비고\n"
+        "- `username`은 유니크입니다.\n"
+        "- `password`가 짧은 평문(길이<50)으로 전달되면 서비스 레이어에서 **SHA-256**으로 해시 저장합니다.\n"
+        "- 생성 시 `expires_at`는 기본적으로 NULL(재직)입니다."
+    ),
+    responses={
+        201: {"description": "생성된 사용자 정보"},
+        400: {"description": "유효성 오류 또는 username 중복"},
+    },
+)
+def api_create_user(payload: UserCreateIn):
+    try:
+        u = create_user(**payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return UserOut.model_validate(u)
+
+
+@router.patch(
+    "/{user_id}",
+    response_model=UserOut,
+    summary="사용자 정보 수정(부분 업데이트) + 비밀번호 변경",
+    description=(
+        "특정 사용자의 정보를 부분 업데이트합니다.\n\n"
+        "### 수정 가능 항목\n"
+        "- 기본 프로필: `name`, `department`, `position`\n"
+        "- 권한/제한: `role`, `security_level`, `daily_message_limit`\n"
+        "- 비밀번호: `password` (평문 전달 시 SHA-256 해시 저장)\n"
+        "- 상태: `expires_at` (NULL로 보내면 **복구** 효과)\n\n"
+        "### 비고\n"
+        "- 변경된 값만 전달하세요(패치 방식)."
+    ),
+    responses={
+        200: {"description": "수정된 사용자 정보"},
+        404: {"description": "사용자를 찾을 수 없음"},
+    },
+)
+def api_update_user(
+    user_id: int = Path(..., description="대상 사용자 ID"),
+    payload: UserUpdateIn = Body(..., description="부분 업데이트 페이로드(JSON)"),
+):
+    try:
+        u = update_user(user_id, **payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return UserOut.model_validate(u)
+
+
+@router.delete(
+    "/{user_id}",
+    response_model=UserOut,
+    summary="사용자 퇴사 처리(소프트 삭제)",
+    description=(
+        "실제 삭제 대신 **퇴사일(`expires_at`)을 기록**합니다. 서비스 레이어에서 자동으로 `suspended=1` 처리됩니다.\n\n"
+        "### 동작\n"
+        "- `retired_at`가 쿼리로 주어지면 해당 시각으로, 없으면 서버 현재 시각을 기록\n"
+        "- 이후 목록에서 `active_only=True`로 조회 시 제외됨\n\n"
+        "### 복구\n"
+        "- `POST /v1/admin/users/{user_id}/restore`로 복구할 수 있습니다."
+    ),
+    responses={
+        200: {"description": "퇴사 처리된 사용자 정보 반환"},
+        404: {"description": "사용자를 찾을 수 없음"},
+    },
+)
+def api_soft_delete_user(
+    user_id: int = Path(..., description="퇴사 처리할 사용자 ID"),
+    retired_at: Optional[datetime] = Query(None, description="퇴사일(미지정 시 서버 현재시각)"),
+):
+    try:
+        u = soft_delete_user(user_id, retired_at=retired_at)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return UserOut.model_validate(u)
+
+
+@router.post(
+    "/{user_id}/restore",
+    response_model=UserOut,
+    summary="사용자 복구",
+    description=(
+        "퇴사 처리된 사용자를 **재직 상태로 복구**합니다.\n\n"
+        "### 동작\n"
+        "- `expires_at`를 NULL로 되돌리고, `suspended=0`으로 변경(서비스 레이어 처리)"
+    ),
+    responses={
+        200: {"description": "복구된 사용자 정보"},
+        404: {"description": "사용자를 찾을 수 없음"},
+    },
+)
+def api_restore_user(user_id: int = Path(..., description="복구할 사용자 ID")):
+    try:
+        u = restore_user(user_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return UserOut.model_validate(u)
+
+
+@router.post(
+    "/bulk/update",
+    summary="사용자 일괄 변경",
+    description=(
+        "체크된 여러 사용자의 속성을 **일괄 업데이트**합니다.\n\n"
+        "### 변경 가능 항목\n"
+        "`department`, `position`, `role`, `security_level`\n\n"
+        "### 비고\n"
+        "- `ids` 배열에 대상 사용자 ID를 전달하세요."
+    ),
+    responses={
+        200: {"description": "업데이트된 개수 반환(예: {\"updated\": 5})"},
+    },
+)
+def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경 페이로드(JSON)")):
+    n = bulk_update_users(**payload.model_dump())
+    return {"updated": n}
+
+
+@router.post(
+    "/bulk/delete",
+    summary="사용자 일괄 퇴사 처리(소프트 삭제)",
+    description=(
+        "체크된 여러 사용자를 **한 번에 퇴사 처리**합니다.\n\n"
+        "### 동작\n"
+        "- 각 사용자에 대해 `expires_at` 기록 및 `suspended=1` 자동 설정(서비스 레이어)\n"
+        "- `retired_at`를 지정하지 않으면 서버 현재 시각으로 처리\n\n"
+        "### 복구\n"
+        "- 개별 복구는 `POST /v1/admin/users/{user_id}/restore`를 이용하세요."
+    ),
+    responses={
+        200: {"description": "삭제(퇴사 처리)된 개수 반환(예: {\"deleted\": 3})"},
+    },
+)
+def api_bulk_delete(payload: BulkDeleteIn = Body(..., description="일괄 퇴사 처리 페이로드(JSON)")):
+    n = bulk_soft_delete(payload.ids, retired_at=payload.retired_at)
+    return {"deleted": n}

@@ -1,7 +1,7 @@
 # routers/admin/manage_user_api.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Query, Path
@@ -25,7 +25,6 @@ router = APIRouter(
     responses={200: {"description": "Success"}},
 )
 
-
 # ---------- Schemas ----------
 class UserOut(BaseModel):
     id: int
@@ -35,7 +34,6 @@ class UserOut(BaseModel):
     department: str
     position: str
     security_level: int
-    daily_message_limit: Optional[int] = None
     suspended: int
     created_at: datetime
     updated_at: datetime
@@ -52,26 +50,20 @@ class UserCreateIn(BaseModel):
     password: str = Field(..., min_length=4, description="평문 또는 이미 해시된 값")
     department: str
     position: str
-    daily_message_limit: Optional[int] = None
     security_level: int = 3
-    suspended: int = 0
-    pfp_filename: Optional[str] = None
-    bio: str = ""
+    # ⛔️ 제거: daily_message_limit / suspended / pfp_filename / bio
 
 
 class UserUpdateIn(BaseModel):
     name: Optional[str] = None
     department: Optional[str] = None
     position: Optional[str] = None
-    password: Optional[str] = Field(None, description="변경 시에만 전달")
+    password: Optional[str] = Field(None, description="변경 시에만 전달(평문 가능)")
     role: Optional[Literal["user", "admin"]] = None
-    daily_message_limit: Optional[int] = None
-    suspended: Optional[int] = None
     security_level: Optional[int] = None
-    pfp_filename: Optional[str] = None
-    bio: Optional[str] = None
+    # ⛔️ 제거: daily_message_limit / suspended / pfp_filename / bio
     expires_at: Optional[datetime] = Field(
-        default=None, description="NULL로 보내면 복구 효과"
+        default=None, description="퇴사일 설정. NULL로 보내면 복구"
     )
 
 
@@ -81,7 +73,7 @@ class BulkUpdateIn(BaseModel):
     position: Optional[str] = None
     role: Optional[Literal["user", "admin"]] = None
     security_level: Optional[int] = None
-    suspended: Optional[int] = None
+    # ⛔️ 제거: daily_message_limit / suspended
 
 
 class BulkDeleteIn(BaseModel):
@@ -115,9 +107,6 @@ class ListResponse(BaseModel):
         "- `q`는 `username`/`name`에 부분 일치로 검색합니다.\n"
         "- `expires_at`가 NULL이면 재직, 값이 있으면 퇴사일로 표시하세요."
     ),
-    responses={
-        200: {"description": "목록/총건수/페이징 정보 반환"},
-    },
 )
 def api_list_users(
     department: Optional[str] = Query(None, description="부서명 정확일치 필터"),
@@ -150,15 +139,8 @@ def api_list_users(
     "/{user_id}",
     response_model=UserOut,
     summary="사용자 단건 조회",
-    description=(
-        "특정 사용자의 상세 정보를 조회합니다.\n\n"
-        "### 비고\n"
-        "- `expires_at`가 NULL이면 재직, 값이 있으면 퇴사 처리된 사용자입니다."
-    ),
-    responses={
-        200: {"description": "단건 사용자 정보"},
-        404: {"description": "사용자를 찾을 수 없음"},
-    },
+    description="- `expires_at`가 NULL이면 재직, 값이 있으면 퇴사 처리된 사용자입니다.",
+    responses={404: {"description": "사용자를 찾을 수 없음"}},
 )
 def api_get_user(user_id: int = Path(..., description="대상 사용자 ID")):
     u = get_user(user_id)
@@ -173,16 +155,12 @@ def api_get_user(user_id: int = Path(..., description="대상 사용자 ID")):
     status_code=201,
     summary="사용자 생성",
     description=(
-        "신규 사용자를 생성합니다.\n\n"
-        "### 비고\n"
-        "- `username`은 유니크입니다.\n"
-        "- `password`가 짧은 평문(길이<50)으로 전달되면 서비스 레이어에서 **SHA-256**으로 해시 저장합니다.\n"
-        "- 생성 시 `expires_at`는 기본적으로 NULL(재직)입니다."
+        "신규 사용자를 생성합니다.\n"
+        "- `username`은 유니크\n"
+        "- `password`가 짧은 평문(길이<50)이면 서비스에서 **SHA-256 해시** 저장\n"
+        "- 기본 상태: 재직(`expires_at` = NULL, `suspended` = 0)"
     ),
-    responses={
-        201: {"description": "생성된 사용자 정보"},
-        400: {"description": "유효성 오류 또는 username 중복"},
-    },
+    responses={400: {"description": "유효성 오류 또는 username 중복"}},
 )
 def api_create_user(payload: UserCreateIn):
     try:
@@ -192,34 +170,23 @@ def api_create_user(payload: UserCreateIn):
     return UserOut.model_validate(u)
 
 
-@router.patch(
-    "/{user_id}",
-    response_model=UserOut,
-    summary="사용자 정보 수정(부분 업데이트)",
-    description=(
-        "특정 사용자의 정보를 부분 업데이트합니다.\n\n"
-        "### 수정 가능 항목\n"
-        "- 기본 프로필: `name`, `department`, `position`, `pfp_filename`, `bio`\n"
-        "- 권한/제한: `role`, `security_level`, `daily_message_limit`, `suspended`\n"
-        "- 비밀번호: `password` (평문 전달 시 SHA-256 해시 저장)\n"
-        "- 상태: `expires_at` (NULL로 보내면 **복구** 효과)\n\n"
-        "### 비고\n"
-        "- 변경된 값만 전달하세요(패치 방식)."
-    ),
-    responses={
-        200: {"description": "수정된 사용자 정보"},
-        404: {"description": "사용자를 찾을 수 없음"},
-    },
-)
+
+@router.patch("/{user_id}", response_model=UserOut)
 def api_update_user(
     user_id: int = Path(..., description="대상 사용자 ID"),
-    payload: UserUpdateIn = Body(..., description="부분 업데이트 페이로드"),
+    payload: UserUpdateIn = Body(..., description="부분 업데이트 페이로드(JSON)"),
 ):
     try:
-        u = update_user(user_id, **payload.model_dump())
+        data = payload.model_dump(exclude_none=True)  # ✅ None 값 제거
+        u = update_user(user_id, **data)
     except ValueError as e:
         raise HTTPException(404, str(e))
     return UserOut.model_validate(u)
+
+@router.post("/bulk/update")
+def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경 페이로드(JSON)")):
+    n = bulk_update_users(**payload.model_dump(exclude_none=True))  # ✅ None 값 제거
+    return {"updated": n}
 
 
 @router.delete(
@@ -227,17 +194,10 @@ def api_update_user(
     response_model=UserOut,
     summary="사용자 퇴사 처리(소프트 삭제)",
     description=(
-        "실제 삭제 대신 **퇴사일(`expires_at`)을 기록**하고 `suspended=1`로 설정합니다.\n\n"
-        "### 동작\n"
-        "- `retired_at`가 쿼리로 주어지면 해당 시각으로, 없으면 서버 현재 시각을 기록\n"
-        "- 이후 목록에서 `active_only=True`로 조회 시 제외됨\n\n"
-        "### 복구\n"
-        "- `POST /v1/admin/users/{user_id}/restore`로 복구할 수 있습니다."
+        "실제 삭제 대신 퇴사일(`expires_at`)을 기록합니다. 서비스 레이어에서 `suspended=1` 자동 처리.\n"
+        "- `retired_at` 미지정 시 서버 현재시각(KST)"
     ),
-    responses={
-        200: {"description": "퇴사 처리된 사용자 정보 반환"},
-        404: {"description": "사용자를 찾을 수 없음"},
-    },
+    responses={404: {"description": "사용자를 찾을 수 없음"}},
 )
 def api_soft_delete_user(
     user_id: int = Path(..., description="퇴사 처리할 사용자 ID"),
@@ -254,15 +214,8 @@ def api_soft_delete_user(
     "/{user_id}/restore",
     response_model=UserOut,
     summary="사용자 복구",
-    description=(
-        "퇴사 처리된 사용자를 **재직 상태로 복구**합니다.\n\n"
-        "### 동작\n"
-        "- `expires_at`를 NULL로 되돌리고, `suspended=0`으로 변경"
-    ),
-    responses={
-        200: {"description": "복구된 사용자 정보"},
-        404: {"description": "사용자를 찾을 수 없음"},
-    },
+    description="`expires_at`를 NULL로, `suspended=0`으로 되돌립니다.",
+    responses={404: {"description": "사용자를 찾을 수 없음"}},
 )
 def api_restore_user(user_id: int = Path(..., description="복구할 사용자 ID")):
     try:
@@ -275,18 +228,9 @@ def api_restore_user(user_id: int = Path(..., description="복구할 사용자 I
 @router.post(
     "/bulk/update",
     summary="사용자 일괄 변경",
-    description=(
-        "체크된 여러 사용자의 속성을 **일괄 업데이트**합니다.\n\n"
-        "### 변경 가능 항목\n"
-        "`department`, `position`, `role`, `security_level`, `suspended`\n\n"
-        "### 비고\n"
-        "- `ids` 배열에 대상 사용자 ID를 전달하세요."
-    ),
-    responses={
-        200: {"description": "업데이트된 개수 반환(예: {\"updated\": 5})"},
-    },
+    description="여러 사용자에 대해 `department`, `position`, `role`, `security_level`을 일괄 업데이트.",
 )
-def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경 페이로드")):
+def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경 페이로드(JSON)")):
     n = bulk_update_users(**payload.model_dump())
     return {"updated": n}
 
@@ -294,18 +238,8 @@ def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경
 @router.post(
     "/bulk/delete",
     summary="사용자 일괄 퇴사 처리(소프트 삭제)",
-    description=(
-        "체크된 여러 사용자를 **한 번에 퇴사 처리**합니다.\n\n"
-        "### 동작\n"
-        "- 각 사용자에 대해 `expires_at` 기록 및 `suspended=1`로 설정\n"
-        "- `retired_at`를 지정하지 않으면 서버 현재 시각으로 처리\n\n"
-        "### 복구\n"
-        "- 개별 복구는 `POST /v1/admin/users/{user_id}/restore`를 이용하세요."
-    ),
-    responses={
-        200: {"description": "삭제(퇴사 처리)된 개수 반환(예: {\"deleted\": 3})"},
-    },
+    description="여러 사용자를 한 번에 퇴사 처리합니다. `retired_at` 미지정 시 서버 현재시각(KST).",
 )
-def api_bulk_delete(payload: BulkDeleteIn = Body(..., description="일괄 퇴사 처리 페이로드")):
+def api_bulk_delete(payload: BulkDeleteIn = Body(..., description="일괄 퇴사 처리 페이로드(JSON)")):
     n = bulk_soft_delete(payload.ids, retired_at=payload.retired_at)
     return {"deleted": n}
