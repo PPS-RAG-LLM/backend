@@ -1326,16 +1326,3 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-# ===== Admin util: wipe fine-tune related tables =====
-def reset_fine_tune_tables():
-    """Dangerous: delete all fine-tune jobs and model records (use for dev reset)"""
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM fine_tuned_models")
-        cur.execute("DELETE FROM fine_tune_jobs")
-        cur.execute("DELETE FROM fine_tune_datasets")
-        cur.execute("DELETE FROM llm_models")
-        conn.commit()
-    finally:
-        conn.close()
