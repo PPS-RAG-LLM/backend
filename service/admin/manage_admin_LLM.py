@@ -1270,25 +1270,6 @@ def load_model(category: str, model_name: str) -> Dict[str, Any]:
         category = _norm_category(category)
         row = _lookup_model_by_name(model_name)
 
-        # If not loaded, load it
-        if not _is_model_loaded(model_name):
-            lower = (model_name or "").lower()
-            try:
-                if lower.startswith("gpt-oss") or lower.startswith("gpt_oss"):
-                    if not _preload_via_adapters(model_name):
-                        raise RuntimeError("adapter preload failed")
-                else:
-                    candidate = _resolve_model_path_for_name(model_name) or _resolve_model_fs_path(model_name)
-                    try:
-                        _MODEL_MANAGER.load(candidate)
-                    except Exception:
-                        logging.getLogger(__name__).exception("manager load failed, trying adapter-style preload")
-                        if not _preload_via_adapters(model_name):
-                            raise
-            except Exception:
-                logger.exception("failed to load model: %s", model_name)
-                return {"success": False, "message": f"모델 로드 실패: {model_name}", "category": category, "modelName": model_name}
-
         # Set active for category
         _set_active_model_for_category(category, model_name)
 

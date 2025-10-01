@@ -551,7 +551,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(
-                    provider="hf",
+                    provider="huggingface",
                     name=base_model_name,
                     revision=0,
                     model_path=None,       # BASE는 어댑터 없음
@@ -571,7 +571,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
         if m is None:
             m = LlmModel(
-                provider="hf",
+                provider="huggingface",
                 name=model_name,
                 revision=0,
                 category=category,
