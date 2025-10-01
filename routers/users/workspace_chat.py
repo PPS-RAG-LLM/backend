@@ -11,7 +11,7 @@ from service.users.chat import (
 from service.commons.doc_gen_templates import get_doc_gen_template
 from utils import logger
 from errors import BadRequestError
-import time
+import time, json
 
 logger = logger(__name__)
 chat_router = APIRouter(tags=["workspace_chat"], prefix="/v1/workspace")
@@ -69,24 +69,23 @@ def to_see(gen):
     for chunk in gen:
         if not chunk:
             continue
-        logger.debug(f"[raw_chunk] {repr(chunk)}")
         if not buf:
             chunk = chunk.lstrip()
         buf.append(chunk)
         text = "".join(buf)
         if (
             len(text) >= 32
-            or text.endswith((" ", "\n", ".", "?", "!", "…", "。", "！", "？"))
+            or text.endswith((" ","\n", ".", "?", "!", "…", "。", "！", "？"))
             or time.monotonic() - last_flush > 0.2
         ):
-            # logger.info(f"[flush] {repr(text)}")
-            yield f"data: {text}\n\n"
+            logger.debug(f"[flush] {repr(text)}")
+            yield f'data: {json.dumps({"content": chunk})}\n\n'
             buf.clear()
             last_flush = time.monotonic()
     if buf:
         text = "".join(buf)
-        logger.info(f"[flush-end] {repr(text)}")
-        yield f"data: {text}\n\n"
+        yield f'data: {json.dumps({"content": chunk})}\n\n'
+    logger.info("[stream_chat_qa_endpoint] streaming end")
 
 # ====== Unified POST APIs ======
 class SummaryRequest(BaseModel):
