@@ -1,10 +1,10 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.generation.streamers import TextIteratorStreamer
-from transformers.generation.configuration_utils import GenerationConfig
+# from transformers.generation.configuration_utils import GenerationConfig
 from threading import Thread
 from functools import lru_cache          # ✅ 누락된 임포트 추가
 from config import config
-import time
+# import time
 from utils import logger, free_torch_memory
 import torch
 

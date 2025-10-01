@@ -1710,32 +1710,6 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
     return rec.get("adapter") or rec.get("full") or rec.get("base")
 
 
-# ==== (선택) 로딩 로직에서 LORA/QLORA 조합 고려 (간단 폴백) ====
-def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
-    """
-    최초 사용시 지연 로딩.
-    여기서는 경량 호환: FULL은 통짜 로딩, LORA/QLORA는 어댑터 경로만 우선 로딩 시도.
-    (실제 어댑터-베이스 merge/inject는 추론 경로에서 구성하거나 외부 추론기 사용을 권장)
-    """
-    try:
-        if _is_model_loaded(model_name):
-            return {"loaded": True, "message": "already loaded", "modelName": model_name}
-
-        paths = _resolve_paths_for_model(model_name)
-        # 우선순위: full -> adapter -> name
-        candidate = paths.get("full") or paths.get("adapter") or _resolve_model_fs_path(model_name)
-
-        try:
-            _MODEL_MANAGER.load(candidate)
-            return {"loaded": True, "message": "loaded", "modelName": model_name}
-        except Exception:
-            logging.getLogger(__name__).exception("lazy load failed - fallback adapter preload")
-            if _preload_via_adapters(model_name):
-                return {"loaded": True, "message": "adapter preloaded (fallback)", "modelName": model_name}
-            return {"loaded": False, "message": "load failed", "modelName": model_name}
-    except Exception:
-        logging.getLogger(__name__).exception("lazy_load_if_needed unexpected error")
-        return {"loaded": False, "message": "unexpected error", "modelName": model_name}
 
 
 # ===== (추가) 테스크별 디폴트 모델 확인 =====

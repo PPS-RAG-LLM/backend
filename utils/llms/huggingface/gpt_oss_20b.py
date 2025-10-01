@@ -7,7 +7,7 @@ from utils import logger, free_torch_memory
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Dict, Generator
-from utils.model_load import get_model_manager
+# from utils.model_load import get_model_manager
 
 logger = logger(__name__)
 _load_guard = RLock()  # 동일 경로 동시 로딩 방지
