@@ -19,7 +19,7 @@ from routers.users.workspace_chat import chat_router as chat_router
 from routers.admin.manage_vator_DB_api import router as vector_db_router
 from routers.users.workspace_thread import thread_router
 from routers.users.documents import router as document_router
-from routers.docgen_simple import router as docgen_simple_router
+from routers.users.chat_feedback import feedback_router
 from routers.admin.LLM_finetuning_api import router as llm_finetuning_router
 from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 from routers.admin.manage_test_LLM_api import router as test_llm_router
@@ -98,7 +98,7 @@ async def lifspan(app):
     except Exception as e:
         logger.error(f"LLM 활성 목록 로깅 실패: {e}")
     
-    from repository.users.session import cleanup_expired_sessions
+    from repository.session import cleanup_expired_sessions
     async def _periodic_db_session_cleanup():
         while True:
             try:
@@ -157,6 +157,7 @@ app.include_router(workspace_singular)
 app.include_router(chat_router)
 app.include_router(thread_router)
 app.include_router(vector_db_router)
+app.include_router(feedback_router)
 app.include_router(llm_finetuning_router)
 app.include_router(admin_llm_router)
 app.include_router(test_llm_router)
