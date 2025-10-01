@@ -734,7 +734,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         conversations = [{
             "conversations": [
-                {"from": "user", "value": build_prompt(r.get("Chunk_Context",""), r.get("Question",""))},
+                {"from": "user", "value": build_prompt(r.get("ChunkContext",""), r.get("Question",""))},
                 {"from": "assistant", "value": r.get("Answer","")},
             ]
         } for _, r in df.iterrows()]
