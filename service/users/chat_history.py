@@ -1,9 +1,9 @@
 
 from __future__ import annotations
-from repository.users.workspace import get_workspace_id_by_slug_for_user, get_workspace_by_workspace_id
+from repository.workspace import get_workspace_id_by_slug_for_user, get_workspace_by_workspace_id
 from errors import NotFoundError
-from repository.users.workspace_chat import get_chat_history_by_thread_id
-from repository.users.workspace_thread import get_thread_id_by_slug_for_user
+from repository.workspace_chat import get_chat_history_by_thread_id
+from repository.workspace_thread import get_thread_id_by_slug_for_user
 from typing import List, Dict, Any
 import json
 from utils import logger

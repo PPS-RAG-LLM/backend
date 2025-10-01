@@ -5,7 +5,7 @@ from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
 import uuid
 from fastapi import UploadFile
-from repository.users.workspace import (
+from repository.workspace import (
     get_default_llm_model,
     insert_workspace,
     get_workspace_by_id,
@@ -17,7 +17,7 @@ from repository.users.workspace import (
     get_workspace_by_workspace_id,
     get_workspace_id_by_slug_for_user
 )
-from repository.users.workspace_thread import (
+from repository.workspace_thread import (
     create_default_thread, 
     get_threads_by_workspace_id,
 )

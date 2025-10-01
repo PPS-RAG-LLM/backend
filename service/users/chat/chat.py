@@ -1,10 +1,10 @@
 from typing import Dict, Any, Generator, List
 from errors import NotFoundError, BadRequestError
 from utils.llms.registry import LLM, Streamer
-from repository.users.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
-from repository.users.workspace_thread import get_thread_id_by_slug_for_user
+from repository.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
+from repository.workspace_thread import get_thread_id_by_slug_for_user
 from repository.documents import list_doc_ids_by_workspace, delete_document_vectors_by_doc_ids
-from repository.users.workspace_chat import (
+from repository.workspace_chat import (
     get_chat_history_by_thread_id,
     insert_chat_history,
 )

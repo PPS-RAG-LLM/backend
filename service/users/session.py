@@ -1,5 +1,5 @@
-from repository.users.session import create_new_session, get_session_from_db, delete_sessions_by_user_id
-from repository.users.user import get_user_by_username
+from repository.session import create_new_session, get_session_from_db, delete_sessions_by_user_id
+from repository.user import get_user_by_username
 from errors import SessionNotFound, NotFoundError, UnauthorizedError
 import hashlib
 from utils import logger

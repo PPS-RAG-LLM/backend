@@ -500,12 +500,9 @@ class ChatFeedback(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     category = Column(Text, nullable=False)    # 'qa', 'doc_gen', 'summary'
-    subcategory = Column(Text, nullable=True)  # doc_gen 의 경우에만 저장 (meeting, business_trip, report)
+    subcategory = Column(Text, nullable=True)  # 'doc_gen' 의 경우에만 저장 (meeting, business_trip, report)
     filename = Column(Text, nullable=False)    # 파일명
     file_path= Column(Text, nullable=False)    # 파일 경로
-    model_id = Column(
-        Integer, ForeignKey("llm_models.id", ondelete="SET NULL", onupdate="CASCADE")
-    )
     prompt_id = Column(
         Integer, ForeignKey("system_prompt_template.id", ondelete="SET NULL", onupdate="CASCADE")
     )
@@ -515,6 +512,7 @@ class ChatFeedback(Base):
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+    prompt_template = relationship("SystemPromptTemplate")
 
 
 class FineTuneDataset(Base):

@@ -2,7 +2,7 @@
 # utils/llms/adapters/qwen.py
 from config import config
 from utils.llms.registry import register, Streamer
-from repository.users.llm_models import get_llm_model_by_provider_and_name
+from repository.llm_models import get_llm_model_by_provider_and_name
 from utils import logger
 from errors import NotFoundError
 import os

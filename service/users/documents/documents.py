@@ -10,7 +10,7 @@ from repository.documents import (
     insert_workspace_document,
     insert_document_vectors,
 )
-from repository.users.workspace import get_workspace_id_by_slug_for_user
+from repository.workspace import get_workspace_id_by_slug_for_user
 from config import config
 from utils.time import now_kst
 

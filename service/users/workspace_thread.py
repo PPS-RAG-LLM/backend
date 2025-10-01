@@ -1,8 +1,8 @@
 from typing import Dict, Any
 from utils import logger
 from errors import BadRequestError, NotFoundError
-from repository.users.workspace import get_workspace_id_by_slug_for_user
-from repository.users.workspace_thread import (
+from repository.workspace import get_workspace_id_by_slug_for_user
+from repository.workspace_thread import (
     get_thread_by_slug_for_user,
     update_thread_name_by_slug_for_user,
 )
