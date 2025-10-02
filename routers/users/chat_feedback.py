@@ -17,11 +17,11 @@ feedback_router = APIRouter(tags=["chat_feedback"], prefix="/v1/workspace")
 
 class ChatFeedbackRequest(BaseModel):
     """채팅 피드백 요청"""
-    chat_id: int = Field(..., description="채팅 메시지 ID")
+    chatId: int = Field(..., description="채팅 메시지 ID")
     feedback: str = Field(..., pattern="^(like|dislike)$", description="like 또는 dislike")
     category: str = Field(..., pattern="^(qa|doc_gen|summary)$", description="카테고리")
-    model_name: str = Field(..., description="사용된 모델명 (예: gpt-4o)")
-    prompt_id: Optional[int] = Field(None, description="프롬프트 템플릿 ID")
+    modelId: int = Field(..., description="사용된 모델id")
+    promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID")
     subcategory: Optional[str] = Field(None, description="서브카테고리 (doc_gen: meeting, business_trip, report)")
     context: Optional[str] = Field(None, description="RAG context (선택사항)")
 
@@ -31,25 +31,30 @@ class ChatFeedbackRequest(BaseModel):
     summary="채팅 피드백 저장 (좋아요/싫어요)"
 )
 def save_feedback_endpoint(
-    slug: str = Path(..., description="워크스페이스 슬러그"),
     body: ChatFeedbackRequest = Body(..., description="피드백 요청 본문"),
 ):
     """
     사용자가 채팅 응답에 좋아요/싫어요를 누를 때 호출됩니다.
     피드백 데이터는 CSV 파일에 저장되며, 파인튜닝 학습 데이터로 사용됩니다.
     """
-    user_id = 3  # TODO: 실제 세션에서 가져오기
+    userId = 3  # TODO: 실제 세션에서 가져오기
     
-    logger.info(f"[save_feedback] user_id={user_id}, chat_id={body.chat_id}, feedback={body.feedback}")
+    logger.info(f"[save_feedback] user_id={userId}, chat_id={body.chatId}, feedback={body.feedback}")
+    if body.category == "doc_gen":
+        subcategory = body.subcategory
+    else:
+        subcategory = None
+
+
     
     result = save_chat_feedback(
-        user_id=user_id,
-        chat_id=body.chat_id,
+        user_id=userId,
+        chat_id=body.chatId,
         feedback=body.feedback,
         category=body.category,
-        model_name=body.model_name,
-        prompt_id=body.prompt_id,
-        subcategory=body.subcategory,
+        model_id=body.modelId,
+        prompt_id=body.promptId,
+        subcategory=subcategory,
         context=body.context,
     )
     
