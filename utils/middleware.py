@@ -22,8 +22,7 @@ class ProcessTimeMiddleware:
         # Request 정보 추출
         path = scope.get("path", "")
         method = scope.get("method", "")
-        
-        logger.info("\n")
+        logger.info("================================")
         logger.info(f"REQUEST PATH: {method} {path} ")
         
         start_time = time.time()
@@ -42,11 +41,11 @@ class ProcessTimeMiddleware:
                 # 로깅
                 if ms >= SLOW_MS:
                     logger.info(f"SLOW REQUEST: {method} {path} {ms:.1f}ms")
-                else:
-                    logger.debug(f"PROCESS TIME: {ms:.1f}ms")
+                # else:
+                #     logger.debug(f"PROCESS TIME: {ms:.1f}ms")
                 
                 logger.info(f"PROCESS TIME: {ms:.1f}ms")
-                logger.info("\n")
+                logger.info("================================")
             
             await send(message)
         
