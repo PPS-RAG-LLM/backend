@@ -24,7 +24,7 @@ class WorkspaceDocument(Base):
     docpath = Column(Text, nullable=False)
     workspace_id = Column(
         Integer,
-        ForeignKey("workspaces.id", ondelete="RESTRICT", onupdate="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
     )
     metadata_json = Column("metadata", Text)
