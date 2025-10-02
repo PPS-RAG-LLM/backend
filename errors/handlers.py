@@ -51,10 +51,17 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
 
 async def general_exception_handler(request: Request, exc: Exception):
     """일반 예외 핸들러"""
-    logger.error(f"Unexpected error: {str(exc)}")
-    logger.error(f"Request: {request.method} {request.url}")
-    # logger.error(f"Traceback: {traceback.format_exc()}")
-
+    import traceback
+    
+    # 에러 위치만 간결하게 출력
+    tb = traceback.extract_tb(exc.__traceback__)
+    last_frame = tb[-1] if tb else None
+    
+    logger.error(f"❌ {exc.__class__.__name__}: {str(exc)}")
+    if last_frame:
+        logger.error(f"📍 {last_frame.filename}:{last_frame.lineno} in {last_frame.name}")
+    logger.error(f"🔗 {request.method} {request.url}")
+    
     return JSONResponse(
         status_code=500,
         content={"success": False, "error": "예상하지 못한 서버 오류가 발생했습니다"},

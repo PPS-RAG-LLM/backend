@@ -34,6 +34,7 @@ import asyncio
 from routers.commons.summary_templates import router as summary_router
 from routers.commons.doc_gen_templates import router as doc_gen_templates_router
 from routers.commons.qa_templates import router as qa_templates_router
+from routers.test_error.test_error import test_error_router as test_error_router
 logger = logger(__name__)
 
 # === [ADD] 사용자 관리 라우터 임포트 ===
@@ -141,6 +142,9 @@ if force_https:
 app.add_middleware(ProcessTimeMiddleware)
 
 ######################### Exception Handler ######################### 
+# import sys
+# if sys.version_info >= (3, 11):
+#     app.add_exception_handler(BaseExceptionGroup, general_exception_handler)
 
 app.add_exception_handler(BaseAPIException, base_api_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -170,12 +174,15 @@ app.include_router(qa_templates_router)
 # app.include_router(document_router)
 # === [ADD] 사용자 관리 라우터 등록 ===
 app.include_router(admin_user_router)
+app.include_router(test_error_router)
 # ===================================
 
 
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
+
+
 
 
 if __name__ == "__main__":
@@ -190,5 +197,5 @@ if __name__ == "__main__":
             "**/storage/model/**",
             "**/storage/train_data/**",
         ],
-        reload_dirs=["routers", "service", "utils"],
+        reload_dirs=["routers", "repository", "service", "utils"],
     )

@@ -2,35 +2,52 @@ from fastapi import Request
 from utils import logger
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
-
+from starlette.types import ASGIApp, Receive, Scope, Send, Message
 logger = logger(__name__)
 
 SLOW_MS = 1000  # 1초 이상만 INFO
 
-class ProcessTimeMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+
+class ProcessTimeMiddleware:
+    """순수 ASGI middleware - Python 3.13 호환"""
+    
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Request 정보 추출
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        
         logger.info("\n")
-        logger.info("----- request path: {} -----".format(request.url.path))
+        logger.info(f"REQUEST PATH: {method} {path} ")
         
         start_time = time.time()
-        response = await call_next(request)
-
-        # 배포시 사용하는 로그
-        ms = (time.time() - start_time) * 1000  # ms 단위로 변환
-        response.headers["X-process-Time"] = f"{ms:.1f}"
-
-        if ms >= SLOW_MS:
-            logger.info(f"slow request: {request.method} {request.url.path} {ms:.1f}ms")
-        else:
-            logger.debug(f"process time: {ms:.1f}ms")
         
-        # 개발중에만 사용하는 로그
-                # 개발중에만 사용하는 로그
-        process_time = time.time() - start_time
-        process_time_ms = process_time * 1000
-        response.headers["X-process-Time"] = f"{process_time_ms:.1f}ms"
-        logger.info("----- process time: {:.1f}ms -----".format(process_time_ms))
-        logger.info("\n")
-
-        return response
-
+        # Response 가로채기
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                # Process time 계산
+                ms = (time.time() - start_time) * 1000
+                
+                # 헤더 추가
+                headers = list(message.get("headers", []))
+                headers.append((b"x-process-time", f"{ms:.1f}ms".encode()))
+                message["headers"] = headers
+                
+                # 로깅
+                if ms >= SLOW_MS:
+                    logger.info(f"SLOW REQUEST: {method} {path} {ms:.1f}ms")
+                else:
+                    logger.debug(f"PROCESS TIME: {ms:.1f}ms")
+                
+                logger.info(f"PROCESS TIME: {ms:.1f}ms")
+                logger.info("\n")
+            
+            await send(message)
+        
+        await self.app(scope, receive, send_wrapper)
