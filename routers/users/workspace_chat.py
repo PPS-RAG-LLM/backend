@@ -4,7 +4,6 @@ from fastapi import APIRouter, Path, Query, Body
 from starlette.responses import StreamingResponse
 from service.users.chat import (
     stream_chat_for_qa,
-    preflight_stream_chat_for_workspace,
     stream_chat_for_doc_gen,
     stream_chat_for_summary,
 )
@@ -16,7 +15,6 @@ import time, json
 logger = logger(__name__)
 
 chat_router = APIRouter(tags=["workspace_chat"], prefix="/v1/workspace")
-
 
 # 채팅
 class Attachment(BaseModel):
@@ -73,7 +71,7 @@ def to_see(gen):
             or text.endswith((" ","\n", ".", "?", "!", "…", "。", "！", "？"))
             or time.monotonic() - last_flush > 0.2
         ):
-            logger.debug(f"[flush] {repr(text)}")
+            # logger.debug(f"[flush] {repr(text)}")
             yield f'data: {json.dumps({"content": chunk})}\n\n'
             buf.clear()
             last_flush = time.monotonic()
