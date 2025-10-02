@@ -3,7 +3,7 @@ import csv
 import json
 from pathlib import Path
 from utils import logger
-from errors import NotFoundError, BadRequestError
+from errors import NotFoundError
 from repository.chat_feedback import (
     get_chat_by_id,
     save_feedback_metadata,
@@ -46,7 +46,7 @@ def append_to_csv(
     chunk_context: str,
     question: str,
     answer: str,
-    user_answer: bool,
+    user_feedback: bool,
     model_name: str
 ) -> None:
     """CSV 파일에 피드백 데이터 append"""
@@ -67,7 +67,7 @@ def append_to_csv(
                 chunk_context,
                 question,
                 answer,
-                str(user_answer).lower(),  # true/false
+                str(user_feedback).lower(),  # true/false
                 model_name
             ])
             logger.info(f"Appended feedback to CSV: {file_path}")
@@ -101,7 +101,7 @@ def extract_context_from_response(response_json: str) -> str:
 def save_chat_feedback(
     user_id: int,
     chat_id: int,
-    feedback: str,  # "like" or "dislike"
+    like: bool,  # "true" or "false"
     category: str,
     model_name: str,
     prompt_id: Optional[int] = None,
@@ -117,24 +117,24 @@ def save_chat_feedback(
         raise NotFoundError(f"Chat message not found: chat_id={chat_id}")
     
     # 2. response에서 실제 답변 추출
-    answer = extract_answer_from_response(chat["response"])
+    answer = extract_answer_from_response(chat["response"]) # response는 json으로 저장되어 있음.
+    question = chat["prompt"]
     
     # 3. context가 없으면 response에서 추출 시도
     if not context:
-        context = extract_context_from_response(chat["response"])
+        context = extract_context_from_response(chat["context"])
     
     # 4. 파일명 생성
     filename = generate_feedback_filename(category, subcategory, prompt_id)
     file_path = TRAIN_DATA_DIR / filename
     
     # 5. CSV에 append
-    user_answer = (feedback == "like")
     append_to_csv(
         file_path=file_path,
         chunk_context=context or "",
-        question=chat["prompt"],
+        question=question,
         answer=answer,
-        user_answer=user_answer,
+        user_answer=like,
         model_name=model_name
     )
     
@@ -151,17 +151,19 @@ def save_chat_feedback(
             category=category,
             subcategory=subcategory,
             filename=filename,
-            file_path=str(file_path.relative_to(Path.cwd())),
+            file_path=str(file_path.resolve().relative_to(Path.cwd().resolve())),
             prompt_id=prompt_id
         )
     
-    # 7. CSV 라인 수 계산
-    row_count = sum(1 for _ in open(file_path, encoding='utf-8')) - 1  # 헤더 제외
+    # 7. CSV 행 수 계산 (데이터 내부의 줄바꿈 고려)
+    with open(file_path, mode='r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        row_count = sum(1 for _ in reader) - 1  # 헤더 제외
     
     return {
         "feedback_id": feedback_id,
         "filename": filename,
-        "file_path": str(file_path.relative_to(Path.cwd())),
+        "file_path": str(file_path.resolve().relative_to(Path.cwd().resolve())),
         "row_count": row_count,
         "message": "Feedback saved successfully"
     }
@@ -174,12 +176,14 @@ def list_feedbacks(
     """저장된 피드백 파일 목록 조회"""
     feedbacks = repo_list_feedbacks(category, prompt_id)
     
-    # 각 파일의 라인 수 추가
+    # 각 파일의 행 수 추가 (데이터 내부의 줄바꿈 고려)
     for fb in feedbacks:
         file_path = Path(fb["file_path"])
         if file_path.exists():
             try:
-                row_count = sum(1 for _ in open(file_path, encoding='utf-8')) - 1  # 헤더 제외
+                with open(file_path, mode='r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    row_count = sum(1 for _ in reader) - 1  # 헤더 제외
                 fb["row_count"] = row_count
             except Exception:
                 fb["row_count"] = 0

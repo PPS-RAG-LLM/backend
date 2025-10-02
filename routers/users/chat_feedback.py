@@ -18,9 +18,9 @@ feedback_router = APIRouter(tags=["chat_feedback"], prefix="/v1/workspace")
 class ChatFeedbackRequest(BaseModel):
     """채팅 피드백 요청"""
     chatId: int = Field(..., description="채팅 메시지 ID")
-    feedback: str = Field(..., pattern="^(like|dislike)$", description="like 또는 dislike")
+    like: bool = Field(..., description="좋아요 여부")
     category: str = Field(..., pattern="^(qa|doc_gen|summary)$", description="카테고리")
-    modelId: int = Field(..., description="사용된 모델id")
+    modelName: str = Field(..., description="사용된 모델 이름")
     promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID")
     subcategory: Optional[str] = Field(None, description="서브카테고리 (doc_gen: meeting, business_trip, report)")
     context: Optional[str] = Field(None, description="RAG context (선택사항)")
@@ -39,7 +39,7 @@ def save_feedback_endpoint(
     """
     userId = 3  # TODO: 실제 세션에서 가져오기
     
-    logger.info(f"[save_feedback] user_id={userId}, chat_id={body.chatId}, feedback={body.feedback}")
+    logger.info(f"[save_feedback] user_id={userId}, chat_id={body.chatId}, like={body.like}")
     if body.category == "doc_gen":
         subcategory = body.subcategory
     else:
@@ -50,9 +50,9 @@ def save_feedback_endpoint(
     result = save_chat_feedback(
         user_id=userId,
         chat_id=body.chatId,
-        feedback=body.feedback,
+        like=body.like,
         category=body.category,
-        model_id=body.modelId,
+        model_name=body.modelName,
         prompt_id=body.promptId,
         subcategory=subcategory,
         context=body.context,
