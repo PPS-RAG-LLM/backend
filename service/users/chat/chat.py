@@ -14,7 +14,6 @@ from utils import logger
 import json, time
 from .retrieval import (
     retrieve_contexts_local,
-    build_context_message,
     extract_doc_ids_from_attachments,
 )
 
@@ -124,7 +123,28 @@ def preflight_stream_chat_for_workspace(
     return {"ws": ws, "workspace_id": workspace_id, "thread_id": thread_id, "mode": mode}
 
 
-def insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any], messages: List[Dict[str, Any]]) -> Generator[str, None, None]:
+def _build_context_string(snippets: List[Dict[str, Any]]) -> str:
+    """snippets를 user message용 context 문자열로 변환"""
+    if not snippets:
+        return ""
+    
+    parts = []
+    for i, snippet in enumerate(snippets, 1):
+        title = snippet.get("title", "Unknown")
+        page = snippet.get("page")
+        text = snippet.get("text", "")
+        
+        source_info = f"[{i}] (출처: {title}"
+        if page:
+            source_info += f", 페이지 {page}"
+        source_info += ")"
+        
+        parts.append(f"{source_info}\n{text}")
+    
+    return "\n\n---\n\n".join(parts)
+
+
+def insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any]) -> Generator[str, None, None]:
     """
     RAG 컨텍스트 주입
     """
@@ -139,31 +159,34 @@ def insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any], messages: List[
         except Exception:
             pass
         temp_doc_ids = extract_doc_ids_from_attachments(body.get("attachments"))
-        logger.info(f"\n## 첨부 문서 목록: \n{temp_doc_ids}\n")
+        logger.info(f"\n## 스레드 임시 첨부 문서 목록: \n{temp_doc_ids}\n")
         # 첨부에서 온 임시 문서 Retrieval 추가
         candidate_doc_ids.extend(temp_doc_ids)
         # 중복 제거
         candidate_doc_ids = list(dict.fromkeys(candidate_doc_ids))
         logger.info(f"\n## 후보 문서 목록: \n{candidate_doc_ids}\n")
 
+        snippets =[]
         if candidate_doc_ids:
             top_k = int(ws.get("top_n") or 4)
             thr = float(ws.get("similarity_threshold") or 0.0)
             snippets = retrieve_contexts_local(body["message"], candidate_doc_ids, top_k=top_k, threshold=thr)
-            ctx = build_context_message(snippets) or ""
-            logger.info(f"\n## CONTEXT 주입 결과: \n{ctx}\n")
-            if ctx:
-                messages.insert(0, {"role": "system", "content": ctx})
-            return ctx, temp_doc_ids
+        else:
+            logger.info(f"## 참조문서 없음.") # 비정상 종료 방지
+        return snippets, temp_doc_ids
     except Exception as e:
         logger.error(f"RAG context build failed: {e}")
+        return [], []
 
-
+# TODO: 추후 수정 UserPrompt -> Document 
 def _compose_summary_message(user_prompt: str, original_text: str) -> str:
-    original = str(original_text or "").strip()
+    if original_text:
+        original = str(original_text or "").strip()
+    else:
+        original = ""
     detail = str(user_prompt or "").strip()
     if not original and not detail:
-        raise BadRequestError("originalText 또는 userPrompt 중 하나는 필수입니다.")
+        raise BadRequestError("originalText 또는 Documents 중 하나는 필수입니다.")
     if detail:
         suffix = "[User Prompt]\n" + detail
         return f"{original}\n\n{suffix}" if original else suffix
@@ -186,16 +209,26 @@ def _resolve_runner(provider, model) -> Streamer:
     return LLM.from_workspace(provider, model)
 
 
-def _build_system_message(ctx: str, base_prompt: str, category: str, body: Dict[str, Any]) -> Dict[str, str]:
+def _build_system_message(base_prompt: str, category: str, body: Dict[str, Any]) -> Dict[str, str]:
     system_text = (base_prompt + "\n\n반드시 한국어로 대답하세요.").strip()
     segments = [system_text or "반드시 한국어로 대답하세요."]
-    if ctx:
-        segments.append(ctx)
+
     if category == "doc_gen":
         tpl = _render_template("doc_gen", body)
         if tpl:
             segments.append("### TEMPLATE\n" + tpl)
     return {"role": "system", "content": "\n\n".join(segments)}
+
+def _build_user_message_with_context(message: str, snippets: str, query_refusal_response: str="") -> str :
+    """User message에 RAG context 포함 """
+    if not snippets: return message
+    parts = [f"[{i}] {h['text']}" for i, h in enumerate(snippets, 1)]
+    contexts = f"아래 CONTEXTS 를 근거로 USER QUESTION에 대해 한국어로 답변하세요.\n\n### CONTEXTS\n" + "\n---\n".join(parts)
+    return (
+        f"{contexts}\n\n"
+        f"### USER QUESTION\n- {message}\n\n"
+        f"### QUERY REFUSAL RESPONSE\n- {query_refusal_response}\n\n" if query_refusal_response else ""
+    )
 
 
 def stream_chat_for_qa(
@@ -229,20 +262,17 @@ def stream_chat_for_qa(
                 pass
             messages.append({"role": "assistant", "content": assistant_text})
 
-    ctx = ""
     temp_doc_ids: List[str] = []
-    ctx_result = insert_rag_context(ws, body, messages)
-    if ctx_result:
-        ctx, temp_doc_ids = ctx_result
+    # RAG context 검색
+    snippets, temp_doc_ids = insert_rag_context(ws, body)
+    logger.info(f"\n## 검색된 SNIPPETS 목록: \n{snippets}\n")
 
-    system_prompt = str(body.get("systemPrompt") or ws.get("system_prompt") or "").strip()
-    messages.insert(0, _build_system_message(ctx, system_prompt, category, body))
+    # User message에 context 포함
+    user_message = _build_user_message_with_context(body["message"], snippets, ws["query_refusal_response"])
+    messages.append({"role": "user", "content": user_message})
+    logger.info(f"\nMESSAGES:\n{messages}")
 
-    ws_no_sys = dict(ws)
-    ws_no_sys["system_prompt"] = None
-    messages.extend(_build_messages(ws_no_sys, body))
-
-    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, temp_doc_ids, thread_id)
+    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, snippets, temp_doc_ids, thread_id)
 
 
 def stream_chat_for_summary(
@@ -309,7 +339,7 @@ def stream_chat_for_doc_gen(
     ws_no_sys["system_prompt"] = None
     messages.extend(_build_messages(ws_no_sys, body))
 
-    yield from _stream_and_persist(user_id, category, ws, body, runner, messages, temp_doc_ids)
+    yield from _stream_and_persist(user_id, category, ws, body, runner, messages,  temp_doc_ids)
 
 def _stream_and_persist(
     user_id: int,
@@ -318,6 +348,7 @@ def _stream_and_persist(
     body: Dict[str, Any],
     runner: Streamer,
     messages: List[Dict[str, Any]],
+    snippets: List[Dict[str, Any]],
     temp_doc_ids: List[str],
     thread_id: int | None = None,
 ) -> Generator[str, None, None]:
@@ -330,10 +361,21 @@ def _stream_and_persist(
             yield chunk
     duration = max(time.perf_counter() - t0, 0.0)
 
+    # snippets를 sources 형식으로 변환
+    sources = []
+    for snippet in snippets:
+        sources.append({
+            "doc_id": snippet.get("doc_id"),
+            "title": snippet.get("title"),
+            "text": snippet.get("text"),
+            "score": round(snippet.get("score", 0.0), 5),
+            "page": snippet.get("page"),
+            "chunk_index": snippet.get("chunk_index"),
+        })
     response_json = {
         "text": "".join(acc_text),
-        "sources": [],
-        "type": "chat",
+        "sources": sources,
+        "type": "chat", # 일단 chat으로 고정 query 모드는 사용하지 않음
         "attachments": body.get("attachments") or [],
         "metrics": {
             "completion_tokens": 0,
