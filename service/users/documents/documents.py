@@ -51,7 +51,21 @@ def _extract_text_and_meta(
     }
     if content_type == "application/pdf" or name_lower.endswith(".pdf"):
         with fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf") as doc:
-            text_all = "\n\n".join(page.get_text("text").strip() for page in doc)
+            # 각 페이지 텍스트 추출
+            page_texts = []
+            for page in doc:
+                text = page.get_text("text").strip()
+                page_texts.append(text)
+            
+            text_all = "\n\n".join(page_texts)
+            
+            # 텍스트가 거의 없으면 경고 로그
+            if len(text_all.strip()) < 10:
+                logger.warning(
+                    f"PDF '{filename}': 추출된 텍스트가 거의 없습니다 ({len(text_all)} chars). "
+                    "이미지 기반 PDF일 가능성이 있습니다. OCR이 필요할 수 있습니다."
+                )
+            
             pdf_meta = doc.metadata or {}
             meta["docAuthor"] = pdf_meta.get("author") or "Unknown"
             meta["description"] = pdf_meta.get("subject") or "PDF document"

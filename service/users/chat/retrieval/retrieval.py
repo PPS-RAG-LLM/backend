@@ -25,25 +25,31 @@ def extract_doc_ids_from_attachments(attachments: List[Dict[str, Any]]) -> List[
     for att in attachments or []:
         # dict / pydantic model 모두 지원
         if isinstance(att, dict):
-            name = (att.get("name") or att.get("contentString") or "").strip()
+            logger.info(f"Attatchments is instance of dict")
+            location = att.get("contentString", "").strip()
+            # logger.info(f"att.get('name'): {att.get('name')}")
+            logger.info(f"att.get('contentString'): {att.get('contentString')}")
         else:
-            name = (getattr(att, "name", None) or getattr(att, "contentString", "") or "").strip()
-
+            # pydantic model인 경우
+            location = getattr(att, "contentString", "").strip()
+       
+        logger.info(f"location: {location}")
         # URL/경로 섞인 경우 basename만 취함 + 쿼리 제거
-        name = name.split("/")[-1].split("?")[0]
+        basename = location.split("/")[-1].split("?")[0]
+        logger.info(f"basename만 취함 + 쿼리 제거: {basename}")
 
-        if not name.endswith(".json"):
+        if not basename.endswith(".json"):
             continue
 
         # 1) 파일명에서 UUID 폴백
-        base = name[:-5]  # .json 제거
+        base = basename[:-5]  # .json 제거
         maybe_uuid = base.rsplit("-", 1)[-1].strip()
         if maybe_uuid and maybe_uuid.count("-") == 4:
             doc_ids.append(maybe_uuid)
             continue
 
         # 2) 문서 info JSON에서 id 읽기(파일이 있을 경우)
-        p = doc_info_dir / name
+        p = doc_info_dir / basename
         if p.exists():
             try:
                 j = json.loads(p.read_text(encoding="utf-8"))
