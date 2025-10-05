@@ -2,14 +2,14 @@
 from typing import Dict, Any, Generator, List
 from errors import BadRequestError
 from utils import logger
-from ..common import (
+from .common import (
     preflight_stream_chat_for_workspace,
     build_system_message,
     build_user_message_with_context,
     resolve_runner,
     stream_and_persist,
 )
-from .document_loader import get_full_documents_for_summary
+from .summary_doc.document_loader import get_full_documents_for_summary
 
 logger = logger(__name__)
 

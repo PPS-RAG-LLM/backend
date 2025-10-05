@@ -1,15 +1,15 @@
 """Doc Gen 카테고리 스트리밍 로직"""
 from typing import Dict, Any, Generator, List
 from utils import logger
-from ..common import (
+from .common import (
     preflight_stream_chat_for_workspace,
     build_system_message,
     resolve_runner,
     stream_and_persist,
 )
-from ..retrieval import extract_doc_ids_from_attachments
+from .retrieval import extract_doc_ids_from_attachments
 from repository.documents import list_doc_ids_by_workspace
-from ..retrieval import retrieve_contexts_local
+from .retrieval import retrieve_contexts_local
 
 logger = logger(__name__)
 

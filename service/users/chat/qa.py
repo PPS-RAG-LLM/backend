@@ -3,13 +3,13 @@ from typing import Dict, Any, Generator, List
 from errors import BadRequestError
 from utils import logger
 from repository.workspace_chat import get_chat_history_by_thread_id
-from ..common import (
+from .common import (
     preflight_stream_chat_for_workspace,
     build_user_message_with_context,
     resolve_runner,
     stream_and_persist,
 )
-from ..retrieval import (
+from .retrieval import (
     retrieve_contexts_local,
     extract_doc_ids_from_attachments,
 )
