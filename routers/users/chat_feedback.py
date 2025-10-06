@@ -1,13 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import Optional
-from fastapi import APIRouter, Path, Query, Body
+from fastapi import APIRouter, Path, Query, Body, Depends
 from fastapi.responses import FileResponse
 from service.users.chat_feedback import (
     save_chat_feedback,
     list_feedbacks,
     get_feedback_file_path,
 )
-from utils import logger
+from utils import logger, validate_category_subcategory, validate_category
 from errors import BadRequestError, NotFoundError
 
 logger = logger(__name__)
@@ -17,13 +17,10 @@ feedback_router = APIRouter(tags=["chat_feedback"], prefix="/v1/workspace")
 
 class ChatFeedbackRequest(BaseModel):
     """채팅 피드백 요청"""
-    chatId: int = Field(..., description="채팅 메시지 ID")
-    like: bool = Field(..., description="좋아요 여부")
-    category: str = Field(..., pattern="^(qa|doc_gen|summary)$", description="카테고리")
-    modelName: str = Field(..., description="사용된 모델 이름")
-    promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID")
-    subcategory: Optional[str] = Field(None, description="서브카테고리 (doc_gen: meeting, business_trip, report)")
-    context: Optional[str] = Field(None, description="RAG context (선택사항)")
+    chatId: int = "int"
+    like: bool = "true/false"
+    modelName: str = "사용된 모델 이름"
+    promptId: Optional[int] = "프롬프트 템플릿 ID"
 
 
 @feedback_router.post(
@@ -31,6 +28,7 @@ class ChatFeedbackRequest(BaseModel):
     summary="채팅 피드백 저장 (좋아요/싫어요)"
 )
 def save_feedback_endpoint(
+    validated_category: tuple[str, Optional[str]] = Depends(validate_category_subcategory),
     body: ChatFeedbackRequest = Body(..., description="피드백 요청 본문"),
 ):
     """
@@ -38,24 +36,16 @@ def save_feedback_endpoint(
     피드백 데이터는 CSV 파일에 저장되며, 파인튜닝 학습 데이터로 사용됩니다.
     """
     userId = 3  # TODO: 실제 세션에서 가져오기
-    
-    logger.info(f"[save_feedback] user_id={userId}, chat_id={body.chatId}, like={body.like}")
-    if body.category == "doc_gen":
-        subcategory = body.subcategory
-    else:
-        subcategory = None
-
-
-    
+    category, subcategory = validated_category # 카테고리 검증
+    logger.info(f"[save_feedback] user_id={userId}, category={category}, subcategory={subcategory}")
     result = save_chat_feedback(
         user_id=userId,
         chat_id=body.chatId,
         like=body.like,
-        category=body.category,
+        category=category,
         model_name=body.modelName,
         prompt_id=body.promptId,
         subcategory=subcategory,
-        context=body.context,
     )
     
     return {
@@ -69,13 +59,15 @@ def save_feedback_endpoint(
     summary="저장된 피드백 파일 목록 조회"
 )
 def list_feedbacks_endpoint(
-    category: Optional[str] = Query(None, pattern="^(qa|doc_gen|summary)$", description="카테고리 필터"),
+    validated_category: str = Depends(validate_category),
     prompt_id: Optional[int] = Query(None, description="프롬프트 ID 필터"),
 ):
     """
     저장된 피드백 CSV 파일 목록을 조회합니다.
     각 파일의 메타데이터와 누적된 피드백 개수를 확인할 수 있습니다.
     """
+    category = validated_category
+    logger.info(f"[list_feedbacks] category={category}, prompt_id={prompt_id}, feedbacks={feedbacks}")
     feedbacks = list_feedbacks(category=category, prompt_id=prompt_id)
     
     return {

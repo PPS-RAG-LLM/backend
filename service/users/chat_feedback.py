@@ -89,10 +89,9 @@ def extract_context_from_response(response_json: str) -> str:
     """response JSON에서 RAG context 추출 (있는 경우)"""
     try:
         data = json.loads(response_json)
-        # sources나 attachments에서 context를 추출할 수 있음
-        sources = data.get("sources", [])
+        sources = data.get("sources", []) # sources에서 context를 추출할 수 있음
         if sources:
-            return "\n".join([s.get("content", "") for s in sources if s.get("content")])
+            return "\n\n" + "="*80 + "\n\n".join([s.get("text", "") for s in sources if s.get("text")])
         return ""
     except Exception:
         return ""
@@ -106,7 +105,6 @@ def save_chat_feedback(
     model_name: str,
     prompt_id: Optional[int] = None,
     subcategory: Optional[str] = None,
-    context: Optional[str] = None,
 ) -> dict:
     """
     사용자 피드백을 CSV에 저장하고 DB에 메타데이터 기록
@@ -120,9 +118,9 @@ def save_chat_feedback(
     answer = extract_answer_from_response(chat["response"]) # response는 json으로 저장되어 있음.
     question = chat["prompt"]
     
-    # 3. context가 없으면 response에서 추출 시도
-    if not context:
-        context = extract_context_from_response(chat["context"])
+    # logger.debug(f"[PRINT RESPONSE]\n{chat["response"]}")
+    # 3. response에서 context추출 시도
+    context = extract_context_from_response(chat["response"])
     
     # 4. 파일명 생성
     filename = generate_feedback_filename(category, subcategory, prompt_id)
@@ -134,7 +132,7 @@ def save_chat_feedback(
         chunk_context=context or "",
         question=question,
         answer=answer,
-        user_answer=like,
+        user_feedback=like,
         model_name=model_name
     )
     
