@@ -13,8 +13,8 @@ from service.users.workspace import (
 from service.users.documents.list_documents import list_local_documents_for_workspace
 from typing import Dict, List, Any
 from errors import BadRequestError
-from utils import logger
-from utils.auth import get_user_id_from_cookie
+from utils import logger, validate_category
+# from utils.auth import get_user_id_from_cookie
 
 logger = logger(__name__)
 
@@ -120,10 +120,11 @@ def list_all_workspaces():
 )
 def create_new_workspace(
     # user_id: int = Depends(get_user_id_from_cookie),
-    category: str = Query(..., description="qa | doc_gen | summary"),
+    validated_category: str = Depends(validate_category),
     body: NewWorkspaceBody = ...,
 ):
     user_id = 3
+    category = validated_category
     logger.debug({"category": category, "body": body.model_dump(exclude_unset=True)})
     try:
         result = create_workspace_for_user(
