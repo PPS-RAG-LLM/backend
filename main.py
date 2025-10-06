@@ -25,8 +25,8 @@ from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 from routers.admin.manage_test_LLM_api import router as test_llm_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
-from routers.sso import sso_router as sso_router
-from routers.mock_company import mock_company_router as mock_company_router
+from routers.login.sso import sso_router as sso_router
+from routers.login.mock_company import mock_company_router as mock_company_router
 from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
