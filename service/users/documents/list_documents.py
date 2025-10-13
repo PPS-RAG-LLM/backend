@@ -1,7 +1,7 @@
 from repository.documents import list_workspace_documents as _list_docs
 from errors import NotFoundError
 from mimetypes import guess_type
-from repository.users.workspace import get_workspace_id_by_slug_for_user
+from repository.workspace import get_workspace_id_by_slug_for_user
 from typing import Dict, Any, List
 from pathlib import Path
 import json

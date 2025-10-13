@@ -4,7 +4,6 @@ from fastapi import APIRouter, Path, Query, Body
 from starlette.responses import StreamingResponse
 from service.users.chat import (
     stream_chat_for_qa,
-    preflight_stream_chat_for_workspace,
     stream_chat_for_doc_gen,
     stream_chat_for_summary,
 )
@@ -16,7 +15,6 @@ import time, json
 logger = logger(__name__)
 
 chat_router = APIRouter(tags=["workspace_chat"], prefix="/v1/workspace")
-
 
 # 채팅
 class Attachment(BaseModel):
@@ -73,7 +71,7 @@ def to_see(gen):
             or text.endswith((" ","\n", ".", "?", "!", "…", "。", "！", "？"))
             or time.monotonic() - last_flush > 0.2
         ):
-            logger.debug(f"[flush] {repr(text)}")
+            # logger.debug(f"[flush] {repr(text)}")
             yield f'data: {json.dumps({"content": chunk})}\n\n'
             buf.clear()
             last_flush = time.monotonic()
@@ -97,8 +95,9 @@ def summary_stream_endpoint(
     body: SummaryRequest = Body(..., description="요약 요청 (시스템프롬프트/내용/요청사항)"),
 ):
     user_id = 3
+    if not body.originalText and not body.attachments:
+        raise BadRequestError("originalText 또는 Documents(첨부파일) 중 하나는 필수입니다.")
 
-    message = body.userPrompt.strip()
     gen = stream_chat_for_summary(
         user_id=user_id,
         slug=slug,
@@ -106,14 +105,14 @@ def summary_stream_endpoint(
         body={
             "provider": body.provider,
             "model": body.model,
-            "message": message,
             "mode": "chat",
             "attachments": [a.model_dump() for a in body.attachments],
             "systemPrompt": body.systemPrompt,
             "originalText": body.originalText,
+            "userPrompt": body.userPrompt,
         },
     )
-    return StreamingResponse(to_see(gen), media_type="text/event-stream")
+    return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
 class VariableItem(BaseModel):
     key: str
@@ -162,7 +161,7 @@ def doc_gen_stream_endpoint(
             "templateVariables": filtered_vars,
         },
     )
-    return StreamingResponse(to_see(gen), media_type="text/event-stream")
+    return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
 
 

@@ -51,7 +51,7 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
 @sso_router.get("/session-info")
 def get_session_info(coreiq_session: str = Cookie(None)):
     """현재 세션 정보 확인"""
-    from repository.users.session import get_session_from_db
+    from repository.session import get_session_from_db
     if not coreiq_session :
         raise SessionNotFound("session not found")
     session_data = get_session_from_db(coreiq_session)          # 세션 데이터 가져오기
@@ -68,7 +68,7 @@ def get_session_info(coreiq_session: str = Cookie(None)):
 @sso_router.post("/logout")
 def logout(response: Response, coreiq_session: str = Cookie(None)):
     """로그아웃"""
-    from repository.users.session import delete_session_from_db
+    from repository.session import delete_session_from_db
     if coreiq_session:
         deleted = delete_session_from_db(coreiq_session)
         logger.info(f"logout deleted: session_id={coreiq_session}, deleted={deleted}")
@@ -80,7 +80,7 @@ def logout(response: Response, coreiq_session: str = Cookie(None)):
 @sso_router.get("/active-sessions")
 def list_active_sessions():
     """활성 세션 목록 (관리용)"""
-    from repository.users.session import list_all_sessions_from_db, delete_session_from_db
+    from repository.session import list_all_sessions_from_db, delete_session_from_db
     sessions = list_all_sessions_from_db()
     current_kst = now_kst()
     active = []

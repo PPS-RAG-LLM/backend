@@ -12,6 +12,7 @@ thread_router = APIRouter(tags=["Workspace Thread"],prefix="/v1/workspace")
 
 ########
 class ChatHistoryItem(BaseModel):
+    chatId : int
     role : str
     content : str
     sentAt : Optional[str] 

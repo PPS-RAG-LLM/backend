@@ -5,7 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from storage.db_models import WorkspaceThread
 from errors import DatabaseError
-from repository.users.workspace import get_workspace_id_by_name
+from repository.workspace import get_workspace_id_by_name
 
 logger = logger(__name__)
 

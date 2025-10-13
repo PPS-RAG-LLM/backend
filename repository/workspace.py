@@ -247,6 +247,7 @@ def get_workspace_by_workspace_id(
                 Workspace.top_n,
                 Workspace.chat_mode,
                 Workspace.query_refusal_response,
+                Workspace.vector_search_mode,
             )
             .join(WorkspaceUser)
             .where(Workspace.id == workspace_id, WorkspaceUser.user_id == user_id)

@@ -19,14 +19,14 @@ from routers.users.workspace_chat import chat_router as chat_router
 from routers.admin.manage_vator_DB_api import router as vector_db_router
 from routers.users.workspace_thread import thread_router
 from routers.users.documents import router as document_router
-from routers.docgen_simple import router as docgen_simple_router
+from routers.users.chat_feedback import feedback_router
 from routers.admin.LLM_finetuning_api import router as llm_finetuning_router
 from routers.admin.manage_admin_LLM_api import router as admin_llm_router
 from routers.admin.manage_test_LLM_api import router as test_llm_router
 # from src.routes.admin import router as admin_router
 # from src.routes.document import router as document_router
-from routers.sso import sso_router as sso_router
-from routers.mock_company import mock_company_router as mock_company_router
+from routers.login.sso import sso_router as sso_router
+from routers.login.mock_company import mock_company_router as mock_company_router
 from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
@@ -34,6 +34,7 @@ import asyncio
 from routers.commons.summary_templates import router as summary_router
 from routers.commons.doc_gen_templates import router as doc_gen_templates_router
 from routers.commons.qa_templates import router as qa_templates_router
+from routers.test_error.test_error import test_error_router as test_error_router
 logger = logger(__name__)
 
 # === [ADD] 사용자 관리 라우터 임포트 ===
@@ -98,7 +99,7 @@ async def lifspan(app):
     except Exception as e:
         logger.error(f"LLM 활성 목록 로깅 실패: {e}")
     
-    from repository.users.session import cleanup_expired_sessions
+    from repository.session import cleanup_expired_sessions
     async def _periodic_db_session_cleanup():
         while True:
             try:
@@ -141,6 +142,9 @@ if force_https:
 app.add_middleware(ProcessTimeMiddleware)
 
 ######################### Exception Handler ######################### 
+# import sys
+# if sys.version_info >= (3, 11):
+#     app.add_exception_handler(BaseExceptionGroup, general_exception_handler)
 
 app.add_exception_handler(BaseAPIException, base_api_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -157,6 +161,7 @@ app.include_router(workspace_singular)
 app.include_router(chat_router)
 app.include_router(thread_router)
 app.include_router(vector_db_router)
+app.include_router(feedback_router)
 app.include_router(llm_finetuning_router)
 app.include_router(admin_llm_router)
 app.include_router(test_llm_router)
@@ -169,12 +174,15 @@ app.include_router(qa_templates_router)
 # app.include_router(document_router)
 # === [ADD] 사용자 관리 라우터 등록 ===
 app.include_router(admin_user_router)
+app.include_router(test_error_router)
 # ===================================
 
 
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
+
+
 
 
 if __name__ == "__main__":
@@ -189,5 +197,5 @@ if __name__ == "__main__":
             "**/storage/model/**",
             "**/storage/train_data/**",
         ],
-        reload_dirs=["routers", "service", "utils"],
+        reload_dirs=["routers", "repository", "service", "utils"],
     )

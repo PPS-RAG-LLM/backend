@@ -1,7 +1,7 @@
 """세션 인증 미들웨어 """
 
 from fastapi import Cookie, HTTPException
-from repository.users.session import get_session_from_db
+from repository.session import get_session_from_db
 from errors import SessionNotFoundError
 from utils import logger
 

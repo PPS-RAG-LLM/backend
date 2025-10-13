@@ -2,7 +2,7 @@
 # utils/llms/adapters/qwen.py
 from config import config
 from utils.llms.registry import register, Streamer
-from repository.users.llm_models import get_llm_model_by_provider_and_name
+from repository.llm_models import get_llm_model_by_provider_and_name
 from utils import logger
 from errors import NotFoundError
 import os
@@ -54,7 +54,7 @@ def hf_factory(model_key: str) -> Streamer:
     logger.info(f"hf_factory: {model_key}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성
-    if model_key.startswith("Qwen"):
+    if model_key.startswith("Qwen3") or model_key.startswith("Qwen2"):
         logger.info(f"Alibaba | Qwen Model")
         # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))

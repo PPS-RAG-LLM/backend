@@ -24,7 +24,7 @@ class WorkspaceDocument(Base):
     docpath = Column(Text, nullable=False)
     workspace_id = Column(
         Integer,
-        ForeignKey("workspaces.id", ondelete="RESTRICT", onupdate="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
     )
     metadata_json = Column("metadata", Text)
@@ -499,21 +499,20 @@ class ChatFeedback(Base):
     __tablename__ = "chat_feedback"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
-    chat_id = Column(
-        Integer,
-        ForeignKey("workspace_chats.id", ondelete="SET NULL", onupdate="CASCADE"),
+    category = Column(Text, nullable=False)    # 'qa', 'doc_gen', 'summary'
+    subcategory = Column(Text, nullable=True)  # 'doc_gen' 의 경우에만 저장 (meeting, business_trip, report)
+    filename = Column(Text, nullable=False)    # 파일명
+    file_path= Column(Text, nullable=False)    # 파일 경로
+    prompt_id = Column(
+        Integer, ForeignKey("system_prompt_template.id", ondelete="SET NULL", onupdate="CASCADE")
     )
-    model_id = Column(
-        Integer, ForeignKey("llm_models.id", ondelete="SET NULL", onupdate="CASCADE")
-    )
-    user_id = Column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL", onupdate="CASCADE")
-    )
-    value = Column(Integer, nullable=False)  # 1 또는 -1
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+    updated_at = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    prompt_template = relationship("SystemPromptTemplate")
 
 
 class FineTuneDataset(Base):
