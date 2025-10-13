@@ -342,7 +342,7 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         if not s:
             s = RagSettings(id=1)
             session.add(s)
-        s.embedding_key = key
+        s.embedding_key = new_key
         # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
         if search_type is not None:
             s.search_type = (
