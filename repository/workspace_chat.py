@@ -57,6 +57,7 @@ def get_chat_history_by_thread_id(
     with get_session() as session:
         stmt = (
             select(
+                WorkspaceChat.id,
                 WorkspaceChat.prompt,
                 WorkspaceChat.response,
                 WorkspaceChat.created_at,
@@ -77,6 +78,7 @@ def get_chat_history_by_thread_id(
             created = m["created_at"]
             items.append(
                 {
+                    "id": m["id"],
                     "prompt": m["prompt"],
                     "response": m["response"],
                     "created_at": to_kst_string(created),

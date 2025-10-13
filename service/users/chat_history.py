@@ -30,7 +30,9 @@ def list_thread_chats_for_workspace(
     messages : List[Dict[str, Any]] = []
     if limit > 0 or limit is not None:
         for chat in chat_history[::-1]:  # 오래된 것부터 추가
+            chat_id = chat["id"]
             messages.append({
+                "chatId": chat_id,
                 "role": "user", 
                 "content": chat["prompt"],
                 "sentAt": chat['created_at'],
@@ -43,6 +45,7 @@ def list_thread_chats_for_workspace(
             except Exception:
                 pass
             messages.append({
+                "chatId": chat_id,
                 "role": "assistant", 
                 "content": assistant_text, 
                 "sentAt": chat['created_at'],
