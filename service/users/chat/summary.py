@@ -33,7 +33,7 @@ def _compose_summary_message(
     if original_text:
         original = str(original_text).strip()
         if original:
-            contexts.append(f"[원본 텍스트]\n{original}")
+            contexts.append(f"<context>\n{original}\n</context>")
     
     # 2. 첨부 문서가 있으면 추가
     if parsed_documents:
@@ -42,12 +42,12 @@ def _compose_summary_message(
             page = parsed_document.get("page")
             text = parsed_document.get("text", "")
             
-            source_info = f"[문서 {i}: {title}"
+            source_info = f"<document>\n[문서 {i}: {title}"
             if page:
                 source_info += f", 페이지 {page}"
             source_info += "]"
             
-            contexts.append(f"{source_info}\n{text}")
+            contexts.append(f"{source_info}\n{text}</document>")
     
     # 3. 둘 다 없으면 에러
     if not contexts:
@@ -60,7 +60,7 @@ def _compose_summary_message(
     if user_prompt:
         detail = str(user_prompt).strip()
         if detail:
-            return f"{combined_contexts}\n\n[추가 요청사항]\n{detail}"
+            return f"{combined_contexts}\n\n<user_prompt>\n{detail}\n</user_prompt>"
     
     return combined_contexts
 
@@ -93,7 +93,7 @@ def stream_chat_for_summary(
     parsed_documents = get_full_documents_for_summary(body)
     temp_doc_ids = [doc["doc_id"] for doc in parsed_documents]
     
-    # 5. 메시지 구성 (originalText 또는 document_snippets)
+    # 5. 메시지 구성 (originalText + documents + userPrompt 결합)
     body["message"] = _compose_summary_message(
         user_prompt=body.get("userPrompt"),
         original_text=body.get("originalText") if body.get("originalText") else None,
