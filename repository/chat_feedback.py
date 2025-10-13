@@ -19,6 +19,7 @@ def get_chat_by_id(chat_id: int, user_id: int) -> dict | None:
             WorkspaceChat.response,
             WorkspaceChat.workspace_id,
             WorkspaceChat.thread_id,
+            WorkspaceChat.feedback,
         ).where(
             WorkspaceChat.id == chat_id,
             WorkspaceChat.user_id == user_id,
@@ -35,6 +36,7 @@ def get_chat_by_id(chat_id: int, user_id: int) -> dict | None:
             "response": m["response"],
             "workspace_id": m["workspace_id"],
             "thread_id": m["thread_id"],
+            "feedback": m["feedback"],
         }
 
 
@@ -140,3 +142,12 @@ def list_all_feedbacks(
             })
         
         return result
+
+def update_feedback_to_chat_worksapce(chat_id: int, feedback_id: int) -> None:
+    """feedback이후 workspace_chat에 피드백 정보 업데이트"""
+    with get_session() as session:
+        stmt = select(WorkspaceChat).where(WorkspaceChat.id == chat_id)
+        chat = session.execute(stmt).scalar_one_or_none()
+        if chat:
+            chat.feedback = feedback_id
+            session.commit()
