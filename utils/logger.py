@@ -76,8 +76,8 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
     """
     logger = logging.getLogger(name)
     if level is None:
-        level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-        level = getattr(logging, level_name, logging.INFO)
+        level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+        level = getattr(logging, level_name, logging.DEBUG)
     logger.setLevel(level)
     logger.propagate = False
     # 여러 번 호출될 때 중복 핸들러를 방지
