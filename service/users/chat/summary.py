@@ -1,6 +1,8 @@
 """Summary 카테고리 스트리밍 로직"""
 from typing import Dict, Any, Generator, List
 from errors import BadRequestError
+from repository.documents import list_doc_ids_by_workspace
+from repository.workspace import get_workspace_id_by_slug_for_user
 from utils import logger
 from .common import (
     preflight_stream_chat_for_workspace,
@@ -67,7 +69,7 @@ def _compose_summary_message(
 
 def stream_chat_for_summary(
     user_id: int,
-    slug: str,
+    ws: int,
     category: str,
     body: Dict[str, Any],
 ) -> Generator[str, None, None]:
@@ -79,26 +81,24 @@ def stream_chat_for_summary(
     - originalText 또는 Document 요약
     - 추가 요청사항 처리
     """
-    # 1. Preflight 검증
-    pre = preflight_stream_chat_for_workspace(user_id, slug, category, body)
-    ws = pre["ws"]
-
+   
     # 2. Body 준비
     body = dict(body)
 
     # 3. LLM runner 준비
     runner = resolve_runner(body["provider"], body["model"])
 
-    # 4. 문서 전체 로드
-    parsed_documents = get_full_documents_for_summary(body)
-    temp_doc_ids = [doc["doc_id"] for doc in parsed_documents]
-    
+    # 4. 워크스페이스 ID 조회
+    parsed_documents = get_full_documents_for_summary(ws["id"])
+    doc_ids = [doc["doc_id"] for doc in parsed_documents]
+
     # 5. 메시지 구성 (originalText + documents + userPrompt 결합)
     body["message"] = _compose_summary_message(
         user_prompt=body.get("userPrompt"),
         original_text=body.get("originalText") if body.get("originalText") else None,
         parsed_documents=parsed_documents if parsed_documents else None,
     )
+
     
     # 6. 메시지 목록 구성
     messages: List[Dict[str, Any]] = []
@@ -111,6 +111,8 @@ def stream_chat_for_summary(
     user_message = build_user_message_with_context(body["message"], [])
     messages.append({"role": "user", "content": user_message})
 
+    logger.debug(f"## 메시지: \n{messages}")
+
     # 7. 스트리밍 및 저장
     yield from stream_and_persist(
         user_id, 
@@ -120,6 +122,6 @@ def stream_chat_for_summary(
         runner, 
         messages, 
         parsed_documents,  # sources에 문서 정보 포함
-        temp_doc_ids
+        doc_ids
     )
 

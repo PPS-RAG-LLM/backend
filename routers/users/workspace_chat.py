@@ -2,12 +2,14 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from fastapi import APIRouter, Path, Query, Body
 from starlette.responses import StreamingResponse
+from repository.workspace import get_workspace_by_workspace_id
 from service.users.chat import (
     stream_chat_for_qa,
     stream_chat_for_doc_gen,
     stream_chat_for_summary,
 )
 from service.commons.doc_gen_templates import get_doc_gen_template
+from service.users.chat.common.validators import preflight_stream_chat_for_workspace
 from utils import logger
 from errors import BadRequestError
 import time, json
@@ -87,7 +89,6 @@ class SummaryRequest(BaseModel):
     systemPrompt: Optional[str] = None
     originalText: Optional[str] = "텍스트원문"
     userPrompt: Optional[str] = "요청사항"
-    attachments: List[Attachment] = Field(default_factory=list)
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")
 def summary_stream_endpoint(
@@ -95,24 +96,33 @@ def summary_stream_endpoint(
     body: SummaryRequest = Body(..., description="요약 요청 (시스템프롬프트/내용/요청사항)"),
 ):
     user_id = 3
-    if not body.originalText and not body.attachments:
-        raise BadRequestError("originalText 또는 Documents(첨부파일) 중 하나는 필수입니다.")
+    from repository.workspace import get_workspace_id_by_slug_for_user
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
 
+    # Preflight 검증
+    ws = get_workspace_by_workspace_id(user_id, workspace_id)
+    
+    # originalText도 없고 워크스페이스에 문서도 없으면 에러
+    if not body.originalText:
+        from repository.documents import list_workspace_documents
+        workspace_docs = list_workspace_documents(workspace_id)
+        if not workspace_docs:
+            raise BadRequestError("워크스페이스에 등록된 문서가 없고 originalText도 제공되지 않았습니다.")
+    
     gen = stream_chat_for_summary(
         user_id=user_id,
-        slug=slug,
+        ws=ws,
         category="summary",
         body={
             "provider": body.provider,
             "model": body.model,
-            "mode": "chat",
-            "attachments": [a.model_dump() for a in body.attachments],
             "systemPrompt": body.systemPrompt,
             "originalText": body.originalText,
             "userPrompt": body.userPrompt,
         },
     )
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
+
 
 class VariableItem(BaseModel):
     key: str
@@ -125,7 +135,6 @@ class DocGenRequest(BaseModel):
     systemPrompt: Optional[str] = None
     userPrompt: Optional[str] = None
     variables: List[VariableItem] = Field(default_factory=list)
-    attachments: List[Attachment] = Field(default_factory=list)
 
 
 @chat_router.post("/{slug}/doc-gen/stream", summary="문서 생성 실행 (스트리밍)")

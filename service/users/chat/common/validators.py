@@ -9,7 +9,7 @@ def preflight_stream_chat_for_workspace(
     user_id: int,
     slug: str,
     category: str,
-    body: Dict[str, Any],
+    body: Dict[str, Any] | None = None,
     thread_slug: str | None = None,
 ) -> Dict[str, Any]:
     """
