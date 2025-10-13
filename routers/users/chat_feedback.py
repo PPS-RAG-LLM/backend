@@ -17,10 +17,10 @@ feedback_router = APIRouter(tags=["chat_feedback"], prefix="/v1/workspace")
 
 class ChatFeedbackRequest(BaseModel):
     """채팅 피드백 요청"""
-    chatId: int = "int"
-    like: bool = "true/false"
-    modelName: str = "사용된 모델 이름"
-    promptId: Optional[int] = "프롬프트 템플릿 ID"
+    chatId: int = Field(..., description="채팅 ID")
+    like: bool = Field(..., description="좋아요(true)/싫어요(false)")
+    modelName: str = Field(..., description="사용된 모델 이름")
+    promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID (선택사항)")
 
 
 @feedback_router.post(
@@ -47,7 +47,6 @@ def save_feedback_endpoint(
         prompt_id=body.promptId,
         subcategory=subcategory,
     )
-    
     return {
         "success": True,
         "data": result
