@@ -120,12 +120,13 @@ def _token_set(s: str) -> set[str]:
     toks = re.findall(r"[0-9A-Za-z가-힣]+", s.lower())
     return set(toks)
 
-def _acc_from_prompt_and_answer(prompt_text: str, answer_text: str) -> float:
-    p = _token_set(prompt_text)
-    a = _token_set(answer_text)
-    if not p:
+def _acc_overlap(a: str, b: str) -> float:
+    A, B = _token_set(a), _token_set(b)
+    if not A or not B:
         return 0.0
-    return round(100.0 * len(p & a) / len(p), 2)
+    inter = len(A & B)
+    union = len(A | B)
+    return round(100.0 * inter / max(1, union), 2)
 
 # ===== 공유 세션 보장 =====
 def _load_shared_sid_from_disk() -> Optional[str]:
@@ -158,7 +159,6 @@ def _ensure_shared_session() -> str:
             return sid
         # 세션 메타가 사라졌으면 재생성
     meta = create_test_session()
-    # create_test_session이 dict 또는 {sid, dir} 형태일 가능성 고려
     if isinstance(meta, dict):
         sid = meta.get("sid") or meta.get("id") or meta.get("session_id")
     elif isinstance(meta, (list, tuple)) and len(meta) >= 1:
@@ -166,13 +166,12 @@ def _ensure_shared_session() -> str:
     else:
         sid = None
     if not sid:
-        # 마지막 보루: 임의 문자열
         import uuid
         sid = f"shared-{uuid.uuid4().hex[:8]}"
     _save_shared_sid_to_disk(sid)
     return sid
 
-# ===== 파일 관리 API 구현 =====
+# ===== 파일 관리 =====
 def list_shared_files() -> Dict[str, Any]:
     files = []
     for p in sorted(VAL_DIR.glob("*")):
@@ -303,7 +302,7 @@ async def ensure_eval_on_shared_session(
 ) -> Dict[str, Any]:
     """
     - 공유 세션(유일) 전체에서 RAG 검색 → LLM 생성 → llm_eval_runs 저장
-    - 동일키(카테고리/서브카테고리/모델/프롬프트ID/유저프롬프트/파일목록=현재 공유 세션의 파일들) 존재 시 스킵
+    - 동일키(카테고리/서브카테고리/프롬프트ID/모델명/**user_prompt/pdf_list**) 완전 일치 시 DB 결과를 재사용(모델 미실행)
     - rag_refs에는 RAG 히트의 '실제 출처'를 저장 (예: milvus://<sid>/<doc_id>)
     """
     cat = _norm_category(category)
@@ -316,35 +315,53 @@ async def ensure_eval_on_shared_session(
     pdf_list = _canon_pdf_list(current_files)
     pdf_json = json.dumps(pdf_list, ensure_ascii=False)
 
-    # 동일키 있는지 검사
     conn = _connect()
     cur = conn.cursor()
     try:
+        # ===== 재사용 조건에 user_prompt, pdf_list까지 포함 =====
         cur.execute(
             """
-            SELECT id FROM llm_eval_runs
+            SELECT id, answer_text, acc_score, rag_refs, pdf_list, created_at, user_prompt, prompt_text
+              FROM llm_eval_runs
              WHERE category=?
                AND IFNULL(LOWER(subcategory),'') = IFNULL(LOWER(?),'')
-               AND model_name=?
                AND prompt_id=?
+               AND model_name=?
                AND IFNULL(user_prompt,'') = IFNULL(?, '')
                AND IFNULL(pdf_list,'[]') = ?
-             ORDER BY id DESC LIMIT 1
+             ORDER BY id DESC
+             LIMIT 1
             """,
-            (cat, sub, (model_name or ""), int(prompt_id), user_prompt, pdf_json),
+            (cat, sub, int(prompt_id), (model_name or ""), user_prompt, pdf_json),
         )
-        row = cur.fetchone()
-        if row:
+        old = cur.fetchone()
+        if old:
+            try:
+                prev_rag_refs = json.loads(old["rag_refs"] or "[]")
+            except Exception:
+                prev_rag_refs = []
+            try:
+                prev_pdf_list = json.loads(old["pdf_list"] or "[]")
+            except Exception:
+                prev_pdf_list = []
             return {
                 "success": True,
                 "skipped": True,
-                "reason": "already exists",
-                "runId": int(row["id"]),
+                "reason": "reuse previous answer (all keys incl. userPrompt & pdf_list matched)",
+                "runId": int(old["id"]),
+                "category": cat,
+                "subcategory": sub,
+                "modelName": (model_name or ""),
+                "promptId": int(prompt_id),
+                "answer": old["answer_text"],
+                "acc": old["acc_score"],
+                "ragRefs": prev_rag_refs,
+                "pdfList": prev_pdf_list,
                 "sid": sid,
-                "pdfList": pdf_list,
+                "createdAt": old["created_at"],
             }
 
-        # 템플릿 구성
+        # ===== 템플릿 구성 =====
         tmpl, _ = _fetch_prompt_full(prompt_id)
         td = {k: tmpl[k] for k in tmpl.keys()} if not isinstance(tmpl, dict) else tmpl
         system_raw = (td.get("content") or td.get("system_prompt") or "").strip()
@@ -362,7 +379,7 @@ async def ensure_eval_on_shared_session(
         merged_user = (user_prompt or user_prompt_text_from_tmpl)
         base_prompt_text = (system_prompt_text + ("\n" + merged_user if merged_user else "")).strip()
 
-        # RAG 검색 (공유 세션 전체)
+        # ===== RAG 검색 (공유 세션 전체) =====
         task_for_rag = cat if cat in ("doc_gen", "summary", "qna") else "qna"
         req = RAGSearchRequest(
             query=(user_prompt or tmpl_name or "검색"),
@@ -397,20 +414,21 @@ async def ensure_eval_on_shared_session(
         if context:
             full_prompt = f"{base_prompt_text}\n\n[CONTEXT]\n{context}"
 
-        # LLM 생성
-        # (max_tokens/temperature는 템플릿 default가 있으면 적용하도록 확장 가능)
+        # ===== LLM 생성 =====
         answer = _infer_answer(full_prompt, model_name, max_tokens=512, temperature=0.7)
 
-        # 점수(rouge-l f1 → 100) 또는 폴백
+        # ===== 점수: RAG 컨텍스트 기반 + 프롬프트 겹침 혼합 =====
         try:
             from rouge import Rouge
             _r = Rouge()
             sc = _r.get_scores(answer or "", context or "", avg=True)
-            acc = round((sc.get("rouge-l", {}).get("f", 0.0) or 0.0) * 100.0, 2)
+            rouge_ctx = (sc.get("rouge-l", {}).get("f", 0.0) or 0.0) * 100.0
         except Exception:
-            acc = _acc_from_prompt_and_answer(context or base_prompt_text, answer or "")
+            rouge_ctx = _acc_overlap(context, answer)
+        overlap_prompt = _acc_overlap(base_prompt_text, answer)
+        acc = round(0.7 * rouge_ctx + 0.3 * overlap_prompt, 2)
 
-        # 저장
+        # ===== 저장 =====
         mrow = _lookup_model_by_name(model_name)
         llm_id = int(mrow["id"]) if mrow else None
 
@@ -430,7 +448,7 @@ async def ensure_eval_on_shared_session(
                 model_name,
                 full_prompt,
                 user_prompt,
-                rag_json,               # <- RAG 실제 출처 저장
+                rag_json,
                 answer,
                 acc,
                 json.dumps({"source": "ensure-on-shared", "sid": sid, "top_k": top_k, "user_level": user_level}, ensure_ascii=False),
@@ -457,5 +475,57 @@ async def ensure_eval_on_shared_session(
     except Exception:
         logger.exception("ensure_eval_on_shared_session failed")
         return {"success": False, "error": "ensure_eval_on_shared_session failed"}
+    finally:
+        conn.close()
+
+# ===== 과거 답 삭제 =====
+def delete_past_runs(
+    *,
+    run_id: Optional[int] = None,
+    category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+    prompt_id: Optional[int] = None,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    - run_id가 오면 해당 1건 삭제
+    - 아니면 (category, subcategory, prompt_id, model_name) 조합으로 삭제
+    - 최소 1가지 조건은 필요
+    """
+    if not run_id and not any([category, subcategory, prompt_id, model_name]):
+        return {"success": False, "error": "no criteria"}
+
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        if run_id:
+            cur.execute("DELETE FROM llm_eval_runs WHERE id=?", (int(run_id),))
+            conn.commit()
+            return {"success": True, "deleted": cur.rowcount, "by": {"runId": run_id}}
+
+        cat = _norm_category(category) if category else None
+        sub = (subcategory or "").strip().lower() if subcategory is not None else None
+
+        sql = "DELETE FROM llm_eval_runs WHERE 1=1"
+        params: List[Any] = []
+        if cat is not None:
+            sql += " AND category=?"
+            params.append(cat)
+        if sub is not None:
+            sql += " AND IFNULL(LOWER(subcategory),'') = IFNULL(LOWER(?),'')"
+            params.append(sub)
+        if prompt_id is not None:
+            sql += " AND prompt_id=?"
+            params.append(int(prompt_id))
+        if model_name is not None:
+            sql += " AND model_name=?"
+            params.append(model_name)
+
+        cur.execute(sql, tuple(params))
+        conn.commit()
+        return {"success": True, "deleted": cur.rowcount, "by": {"category": cat, "subcategory": sub, "promptId": prompt_id, "modelName": model_name}}
+    except Exception:
+        logger.exception("delete_past_runs failed")
+        return {"success": False, "error": "delete_past_runs failed"}
     finally:
         conn.close()
