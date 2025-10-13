@@ -10,6 +10,7 @@ from repository.chat_feedback import (
     update_feedback_metadata,
     get_feedback_by_file_info,
     list_all_feedbacks as repo_list_feedbacks,
+    update_feedback_to_chat_worksapce,
 )
 
 logger = logger(__name__)
@@ -24,7 +25,7 @@ CSV_HEADERS = ["ChunkContext", "Question", "Answer", "UserAnswer", "ModelName"]
 def generate_feedback_filename(
     category: str,
     subcategory: Optional[str],
-    prompt_id: Optional[int]
+    prompt_id: Optional[int]=None
 ) -> str:
     """
     피드백 CSV 파일명 생성
@@ -113,6 +114,12 @@ def save_chat_feedback(
     chat = get_chat_by_id(chat_id, user_id)
     if not chat:
         raise NotFoundError(f"Chat message not found: chat_id={chat_id}")
+
+    # 2. 이미 피드백이 제출된 겨우 중복 방지 + 추가
+    if chat.get("feedback") is not None:
+        logger.warning(f"이미 피드백이 제출된 채팅입니다. 중복 방지: chat_id={chat_id}")
+        from errors import BadRequestError
+        raise BadRequestError(f"이미 피드백이 제출된 채팅입니다. 중복 방지: chat_id={chat_id}")
     
     # 2. response에서 실제 답변 추출
     answer = extract_answer_from_response(chat["response"]) # response는 json으로 저장되어 있음.
@@ -135,15 +142,18 @@ def save_chat_feedback(
         user_feedback=like,
         model_name=model_name
     )
+
     
     # 6. DB에 메타데이터 저장 또는 업데이트
     existing = get_feedback_by_file_info(category, subcategory, prompt_id)
     
     if existing:
+        logger.debug(f"존재하는 피드백입니다. 업데이트 합니다.: {existing}")
         # 기존 레코드 업데이트 (updated_at 갱신)
         update_feedback_metadata(existing["id"])
         feedback_id = existing["id"]
     else:
+        logger.debug(f"새로운 피드백입니다. 저장합니다.: {existing}")
         # 새 레코드 생성
         feedback_id = save_feedback_metadata(
             category=category,
@@ -152,6 +162,9 @@ def save_chat_feedback(
             file_path=str(file_path.resolve().relative_to(Path.cwd().resolve())),
             prompt_id=prompt_id
         )
+        logger.debug(f"feedback_id: {feedback_id}")
+        update_feedback_to_chat_worksapce(chat_id, feedback_id)
+
     
     # 7. CSV 행 수 계산 (데이터 내부의 줄바꿈 고려)
     with open(file_path, mode='r', encoding='utf-8') as f:
