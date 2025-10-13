@@ -18,7 +18,7 @@ logger = logger(__name__)
 TRAIN_DATA_DIR = Path("storage/train_data")
 TRAIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_HEADERS = ["ChunkContext", "Question", "Answer", "UserFeedback", "ModelName"]
+CSV_HEADERS = ["ChunkContext", "Question", "Answer", "UserAnswer", "ModelName"]
 
 
 def generate_feedback_filename(
