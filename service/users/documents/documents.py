@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import torch, tiktoken, fitz, io, json, uuid
+import tiktoken, fitz, io, json, uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import UploadFile
@@ -321,26 +321,25 @@ def delete_documents_by_ids(
     doc_id 기준으로 documents-info, vector-cache, document_vectors, workspace_documents를 한 번에 삭제.
     """
     from repository.documents import (
-        delete_document_vectors_by_doc_ids,
         list_doc_ids_by_workspace,
         delete_workspace_documents_by_doc_ids,
     )
 
-    deleted_files = {"doc_info" : 0, "vector_cache":0}
+    deleted_files = {"doc_info": 0, "vector_cache": 0}
 
     # 1) 소유 워크스페이스 확인 (slug → workspace_id)
     if workspace_slug:
         workspace_id = get_workspace_id_by_slug_for_user(user_id, workspace_slug)
         if not workspace_id:
             logger.warning(f"workspace slug not found: {workspace_slug}")
-            return {"deleted_doc_ids":[], "deleted_vectors": 0, "deleted_files": deleted_files}
+            return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
         # 2) 해당 워크스페이스에 속한 doc_id 목록 조회
         try:
             rows = list_doc_ids_by_workspace(int(workspace_id))
             owned_doc_ids = {r.get("doc_id") for r in rows if r and r.get("doc_id")}
         except Exception as e:
             logger.error(f"list_doc_ids_by_workspace failed: {e}")
-            return {"deleted_doc_ids":[], "deleted_vectors": 0, "deleted_files": deleted_files}
+            return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
         # 3) 요청된 doc_ids가 있으면 교집합, 없으면 전부 삭제
         req_doc_ids = [d.strip() for d in (doc_ids or []) if d and isinstance(d, str)]
         req_doc_ids = list(dict.fromkeys(req_doc_ids))
@@ -352,44 +351,53 @@ def delete_documents_by_ids(
         doc_ids = list(dict.fromkeys(doc_ids))
 
     if not doc_ids:
-        return {"deleted_doc_ids":[], "deleted_vectors": 0, "deleted_files": deleted_files}
+        return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
 
-    actually_deleted_docs: List[str] = []
-    for did in doc_ids:
-        # documents-info/*-{doc_id}.json
-        for p in DOC_INFO_DIR.glob(f"*-{did}.json"):
-            try: p.unlink()
-            except Exception: pass
-            deleted_files["doc_info"] += 1
-
-        # vector-cache/{doc_id}.json
-        vc =  VEC_CACHE_DIR / f"{did}.json"
-        if vc.exists():
-            try: vc.unlink()
-            except Exception: pass
-            deleted_files["vector_cache"] += 1
-
-        actually_deleted_docs.append(did)
-
+    # 파일 삭제 (공통 함수 사용)
+    deleted_files = delete_document_files(doc_ids)
+    
+    # DB 삭제
     deleted_vectors = 0
-    if actually_deleted_docs:
-        try:
-            # 필요 시 명시 삭제(스키마 CASCADE 설정이 있다면 생략 가능)
-            deleted_vectors = delete_document_vectors_by_doc_ids(actually_deleted_docs) or 0
-        except Exception as e:
-            logger.error(f"delete_document_vectors_by_doc_ids failed: {e}")
+    if doc_ids:
         try:
             # workspace_id 검증 포함 삭제
             if workspace_slug:
-                delete_workspace_documents_by_doc_ids(actually_deleted_docs, int(workspace_id))
+                delete_workspace_documents_by_doc_ids(doc_ids, int(workspace_id))
             else:
                 # slug 미지정 시 전역 doc_id 삭제(전역 유니크라면 안전)
-                delete_workspace_documents_by_doc_ids(actually_deleted_docs, int(-1))  # 필요 시 별도 분기 구현
+                delete_workspace_documents_by_doc_ids(doc_ids, int(-1))  # 필요 시 별도 분기 구현
         except Exception as e:
             logger.error(f"delete_workspace_documents_by_doc_ids failed: {e}")
 
     return {
-            "deleted_doc_ids": actually_deleted_docs,
-            "deleted_vectors": int(deleted_vectors),
-            "deleted_files": deleted_files,
-        }
+        "deleted_doc_ids": doc_ids,
+        "deleted_vectors": int(deleted_vectors),
+        "deleted_files": deleted_files,
+    }
+
+def delete_document_files(doc_ids: List[str]) -> Dict[str, int]:
+    """
+    doc_id 리스트에 해당하는 파일들(doc_info, vector_cache)을 삭제.
+    Returns: {"doc_info": count, "vector_cache": count}
+    """
+    deleted_files = {"doc_info": 0, "vector_cache": 0}
+    
+    for did in doc_ids:
+        # documents-info/*-{doc_id}.json
+        for p in DOC_INFO_DIR.glob(f"*-{did}.json"):
+            try:
+                p.unlink()
+                deleted_files["doc_info"] += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete doc_info file {p}: {e}")
+
+        # vector-cache/{doc_id}.json
+        vc = VEC_CACHE_DIR / f"{did}.json"
+        if vc.exists():
+            try:
+                vc.unlink()
+                deleted_files["vector_cache"] += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete vector_cache file {vc}: {e}")
+    
+    return deleted_files

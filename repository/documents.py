@@ -103,3 +103,5 @@ def delete_workspace_documents_by_doc_ids(doc_ids: List[str], workspace_id: int)
         result = session.execute(stmt)
         session.commit()
         return int(result.rowcount or 0)
+
+

@@ -1,5 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
+from repository.documents import delete_workspace_documents_by_doc_ids, list_doc_ids_by_workspace
 from utils import logger
 from utils.database import get_session
 from utils.time import to_kst_string, now_kst_string, now_kst
@@ -265,20 +266,17 @@ def get_workspace_by_workspace_id(
         return m
 
 
-def delete_workspace_by_slug_for_user(user_id: int, slug: str) -> bool:
+def delete_workspace_by_workspace_id(workspace_id: int) -> bool:
     """유저 권한 확인 후 워크스페이스 삭제"""
     with get_session() as session:
         # 유저에게 권한이 있는 워크스페이스 찾기
         workspace_id_subquery = (
             select(WorkspaceUser.workspace_id)
-            .where(WorkspaceUser.user_id == user_id)
             .join(Workspace)
-            .where(Workspace.slug == slug)
+            .where(Workspace.id == workspace_id)
         )
-
         # 워크스페이스 삭제
         stmt = delete(Workspace).where(Workspace.id.in_(workspace_id_subquery))
-
         result = session.execute(stmt)
         session.commit()
         return result.rowcount > 0

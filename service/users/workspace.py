@@ -1,18 +1,17 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from config import config
+from repository.documents import delete_workspace_documents_by_doc_ids, list_doc_ids_by_workspace
 from utils import generate_unique_slug, generate_thread_slug, logger
 from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
-import uuid
 from fastapi import UploadFile
 from repository.workspace import (
-    get_default_llm_model,
+    delete_workspace_by_workspace_id,
     insert_workspace,
     get_workspace_by_id,
     link_workspace_to_user,
     get_default_system_prompt_content,
     get_workspaces_by_user,
-    delete_workspace_by_slug_for_user,
     update_workspace_by_slug_for_user,
     get_workspace_by_workspace_id,
     get_workspace_id_by_slug_for_user
@@ -176,12 +175,36 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
             } for thread in threads
         ],
     }
+DOC_INFO_DIR = Path(config["user_documents"]["doc_info_dir"])
+VEC_CACHE_DIR = Path(config["user_documents"]["vector_cache_dir"])
 
 def delete_workspace(user_id: int, slug: str) -> None:
-    deleted = delete_workspace_by_slug_for_user(user_id, slug)
+    from service.users.documents.documents import delete_document_files
+    
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
+    doc_ids_rows = list_doc_ids_by_workspace(workspace_id)
+    doc_ids = [r["doc_id"] for r in doc_ids_rows]
+    
+    logger.debug(f"doc_ids: {doc_ids}")
+    
+    if doc_ids:
+        # 공통 함수 사용해서 파일 삭제
+        deleted_files = delete_document_files(doc_ids)
+        logger.info(f"File deletion summary: {deleted_files}")
+        
+        # DB 삭제
+        delete_workspace_documents_by_doc_ids(doc_ids, workspace_id)
+        logger.debug(f"deleted document records from workspace: {workspace_id}")
+
+    deleted = delete_workspace_by_workspace_id(workspace_id)
+
+    logger.debug(f"deleted: {deleted}")
+    logger.debug(f"workspace_id_subquery: {workspace_id}")
+
     if not deleted:
         logger.error(f"delete workspace failed: user_id={user_id}, slug={slug}")
         raise NotFoundError("삭제 실패")
+
     return None
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
