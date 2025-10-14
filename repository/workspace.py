@@ -12,7 +12,6 @@ from storage.db_models import (
     User,
 )
 from sqlalchemy import select, update, delete
-from sqlalchemy.orm import joinedload
 from errors import DatabaseError
 
 logger = logger(__name__)

@@ -175,12 +175,10 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
             } for thread in threads
         ],
     }
-DOC_INFO_DIR = Path(config["user_documents"]["doc_info_dir"])
-VEC_CACHE_DIR = Path(config["user_documents"]["vector_cache_dir"])
+
 
 def delete_workspace(user_id: int, slug: str) -> None:
     from service.users.documents.documents import delete_document_files
-    
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     doc_ids_rows = list_doc_ids_by_workspace(workspace_id)
     doc_ids = [r["doc_id"] for r in doc_ids_rows]
@@ -197,15 +195,11 @@ def delete_workspace(user_id: int, slug: str) -> None:
         logger.debug(f"deleted document records from workspace: {workspace_id}")
 
     deleted = delete_workspace_by_workspace_id(workspace_id)
-
-    logger.debug(f"deleted: {deleted}")
-    logger.debug(f"workspace_id_subquery: {workspace_id}")
-
     if not deleted:
         logger.error(f"delete workspace failed: user_id={user_id}, slug={slug}")
         raise NotFoundError("삭제 실패")
-
     return None
+
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     # 허용 필드만 전달

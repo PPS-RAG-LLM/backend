@@ -61,8 +61,13 @@ def to_see(gen):
     logger.info("[stream_chat_qa_endpoint] streaming start")
     buf = []
     last_flush = time.monotonic()
+    chat_id = None
+
     for chunk in gen:
         if not chunk:
+            continue
+        if chunk.startswith("__CHAT_ID__:"): 
+            chat_id = chunk.split(":",1)[1] # 채팅 ID 추출
             continue
         if not buf:
             chunk = chunk.lstrip()
@@ -80,7 +85,10 @@ def to_see(gen):
     if buf:
         text = "".join(buf)
         yield f'data: {json.dumps({"content": chunk})}\n\n'
+    if chat_id:
+        yield f'data: {json.dumps({"chat_id": chat_id, "done":True})}\n\n'
     logger.info("[stream_chat_qa_endpoint] streaming end")
+
 
 # ====== Unified POST APIs ======
 class SummaryRequest(BaseModel):

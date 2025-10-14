@@ -110,7 +110,8 @@ def insert_chat_history(
             session.add(obj)
             session.commit()
             session.refresh(obj)
-            return logger.info(f"insert_chat_history success: id={obj.id}")
+            logger.info(f"insert_chat_history success: id={obj.id}")
+            return obj.id # id 반환
         except IntegrityError as exc:
             logger.error(f"insert_chat_history failed: {exc}")
             raise DatabaseError(str(exc))

@@ -75,7 +75,7 @@ def stream_and_persist(
     }
     
     # DB 저장
-    insert_chat_history(
+    chat_id = insert_chat_history(
         user_id=user_id,
         category=category,
         workspace_id=ws["id"],
@@ -90,4 +90,5 @@ def stream_and_persist(
             delete_document_vectors_by_doc_ids(temp_doc_ids)
     except Exception as exc:
         logger.error(f"vector cleanup failed: {exc}")
+    yield f"__CHAT_ID__: {chat_id}"
 
