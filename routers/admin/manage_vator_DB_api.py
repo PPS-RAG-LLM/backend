@@ -171,7 +171,7 @@ class SecurityLevelSingleBody(BaseModel):
 
 @router.post(
     "/admin/vector/security-levels/{taskType}",
-    summary="작업유형별 보안레벨 규칙 '개별' 저장(doc_gen/summary/qna 중 하나)",
+    summary="1. 작업유형별 보안레벨 규칙 '개별' 저장(doc_gen/summary/qna 중 하나)",
     status_code=status.HTTP_200_OK,
 )
 async def set_security_levels_one(taskType: TaskLiteral, body: SecurityLevelSingleBody):
@@ -210,7 +210,7 @@ async def upload_raw_file(files: List[UploadFile] = File(...)):
     return {"savedPaths": saved_paths, "count": len(saved_paths)}
 
 
-@router.post("/admin/vector/extract",summary="3. row_data의 PDF를 텍스트로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
+@router.post("/admin/vector/extract",summary="3. row_data의 다양한 문서를 텍스트/표로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
 async def rag_extract_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
     return await extract_pdfs()

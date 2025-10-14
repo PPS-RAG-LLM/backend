@@ -9,6 +9,8 @@ import json
 import os
 import time
 import logging
+import re
+import unicodedata
 
 # sqlite3 제거
 import shutil
@@ -21,6 +23,7 @@ from collections import defaultdict, Counter
 import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
+
 try:
     # Milvus 2.4+ Function/BM25 하이브리드
     from pymilvus import Function, FunctionType
@@ -38,6 +41,35 @@ from storage.db_models import (
     SecurityLevelConfigTask,
     SecurityLevelKeywordsTask,
 )
+# 밀버스 DB 글자 수 제한 
+MILVUS_TEXT_VARCHAR_MAX = 32768
+MILVUS_TEXT_SAFE_LIMIT = 32000  # 여유 버퍼를 둔 안전 상한
+def _split_text_for_milvus(s: str, limit: int = MILVUS_TEXT_SAFE_LIMIT) -> list[str]:
+    """Milvus VARCHAR 안전 길이로 텍스트를 분할한다."""
+    s = s or ""
+    if len(s) <= limit:
+        return [s]
+    # 1차: 줄 단위로 누적 분할
+    parts, buf, blen = [], [], 0
+    for line in s.splitlines(True):  # 개행 보존
+        if blen + len(line) > limit and buf:
+            parts.append("".join(buf).strip())
+            buf, blen = [line], len(line)
+        else:
+            buf.append(line); blen += len(line)
+    if buf:
+        parts.append("".join(buf).strip())
+
+    # 2차: 여전히 넘치는 덩어리는 하드 슬라이스
+    out = []
+    for p in parts:
+        if len(p) <= limit:
+            if p: out.append(p)
+        else:
+            for i in range(0, len(p), limit):
+                chunk = p[i:i+limit].strip()
+                if chunk: out.append(chunk)
+    return out
 
 # KST 시간 포맷 유틸
 from utils.time import now_kst, now_kst_string
@@ -54,7 +86,7 @@ USER_DATA_ROOT = STORAGE_DIR / "user_data"
 RAW_DATA_DIR = USER_DATA_ROOT / "row_data"
 LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"  # 유지(폴더 구조 호환)
 RESOURCE_DIR = (BASE_DIR / "resources").resolve()
-EXTRACTED_TEXT_DIR = RESOURCE_DIR / "extracted_texts"
+EXTRACTED_TEXT_DIR = (PROJECT_ROOT / "storage" / "extracted_texts").resolve()
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
 MODEL_ROOT_DIR = (PROJECT_ROOT / "storage" / "embedding-models").resolve()
 
@@ -71,10 +103,348 @@ COLLECTION_NAME = "pdf_chunks_pro"
 # 작업유형
 TASK_TYPES = ("doc_gen", "summary", "qna")
 
+# 지원 확장자
+SUPPORTED_EXTS = {".pdf", ".txt", ".text", ".md", ".docx", ".pptx", ".csv", ".xlsx", ".xls", ".doc", ".ppt", ".hwp"}
+
+# 텍스트 정리용 정규식
+ZERO_WIDTH_RE = re.compile(r'[\u200B-\u200D\u2060\uFEFF]')
+CONTROL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')  # \t,\n은 유지
+MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
+NEWLINES_RE = re.compile(r'\n{3,}')
+
 _CURRENT_EMBED_MODEL_KEY = "qwen3_0_6b"
 _CURRENT_SEARCH_TYPE = "hybrid"
 _CURRENT_CHUNK_SIZE = 512
 _CURRENT_OVERLAP = 64
+
+
+# -------------------------------------------------
+# 텍스트 정리 및 다중 확장자 지원
+# -------------------------------------------------
+
+def _clean_text(s: str | None) -> str:
+    """PDF 특수문자 제거 및 텍스트 정규화"""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s)
+    # 흔한 공백/불릿/문장부호 정리
+    s = s.replace("\xa0", " ").replace("\u2022", "•").replace("\u2212", "-")
+    s = ZERO_WIDTH_RE.sub("", s)
+    s = CONTROL_RE.sub("", s)
+    s = MULTISPACE_LINE_END_RE.sub("\n", s)
+    s = NEWLINES_RE.sub("\n\n", s)
+    return s.strip()
+
+
+def _ext(p: Path) -> str:
+    """파일 확장자 반환 (소문자)"""
+    return p.suffix.lower()
+
+
+def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
+    """PDF에서 표와 본문을 분리 추출 (특수문자 정리 포함)"""
+    import fitz  # PyMuPDF
+    doc = fitz.open(pdf_path)
+    page_texts: list[str] = []
+    table_blocks_all: list[dict] = []
+    
+    for page_idx, page in enumerate(doc, start=1):
+        # 표 찾기
+        try:
+            tf = page.find_tables()
+            tables = getattr(tf, "tables", []) if tf else []
+        except Exception:
+            tables = []
+        
+        table_rects = []
+        for t in tables:
+            rect = fitz.Rect(*t.bbox)
+            table_rects.append(rect)
+            try:
+                md = t.to_markdown()
+            except Exception:
+                try:
+                    rows = t.extract()
+                    md = "\n".join("| " + " | ".join(_clean_text(c or "")) + " |" for c in rows)
+                except Exception:
+                    md = ""
+            md = _clean_text(md)
+            if md:
+                table_blocks_all.append({
+                    "page": int(page_idx),
+                    "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
+                    "text": md,
+                })
+        
+        # 본문에서 표 영역 제외
+        parts = []
+        for x0, y0, x1, y1, btxt, *_ in page.get_text("blocks"):
+            rect = fitz.Rect(x0, y0, x1, y1)
+            if any(rect.intersects(r) for r in table_rects):
+                continue
+            if btxt and btxt.strip():
+                parts.append(_clean_text(btxt))
+        page_texts.append("\n".join(p for p in parts if p))
+    
+    pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
+    return pdf_text, table_blocks_all
+
+
+def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
+    """TXT/MD 파일 추출"""
+    try:
+        text = fp.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        text = fp.read_text(errors="ignore")
+    return _clean_text(text), []
+
+
+def _extract_docx(fp: Path) -> tuple[str, list[dict]]:
+    """DOCX 파일 추출"""
+    try:
+        from docx import Document
+    except Exception:
+        logger.warning(f"python-docx not available, treating {fp} as plain text")
+        return _extract_plain_text(fp)
+    
+    try:
+        d = Document(str(fp))
+        paras = [_clean_text(p.text) for p in d.paragraphs if _clean_text(p.text)]
+        tables = []
+        for tb in d.tables:
+            rows = []
+            for r in tb.rows:
+                rows.append([_clean_text(c.text) for c in r.cells])
+            if rows:
+                md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
+                tables.append({"page": 0, "bbox": [], "text": md})
+        return _clean_text("\n\n".join(paras)), tables
+    except Exception as e:
+        logger.exception(f"Failed to extract DOCX {fp}: {e}")
+        return _extract_plain_text(fp)
+
+
+def _extract_pptx(fp: Path) -> tuple[str, list[dict]]:
+    """PPTX 파일 추출"""
+    try:
+        from pptx import Presentation
+    except Exception:
+        logger.warning(f"python-pptx not available, skipping {fp}")
+        return "", []
+    
+    try:
+        prs = Presentation(str(fp))
+        texts = []
+        tables = []
+        for i, slide in enumerate(prs.slides, start=1):
+            for sh in slide.shapes:
+                if hasattr(sh, "has_text_frame") and sh.has_text_frame:
+                    txt = "\n".join(p.text for p in sh.text_frame.paragraphs if p.text)
+                    txt = _clean_text(txt)
+                    if txt:
+                        texts.append(txt)
+                if hasattr(sh, "has_table") and sh.has_table:
+                    rows = []
+                    for r in sh.table.rows:
+                        rows.append([_clean_text(c.text) for c in r.cells])
+                    if rows:
+                        md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
+                        tables.append({"page": i, "bbox": [], "text": md})
+        return _clean_text("\n\n".join(texts)), tables
+    except Exception as e:
+        logger.exception(f"Failed to extract PPTX {fp}: {e}")
+        return "", []
+
+
+def _df_to_markdown(df, max_rows=500) -> str:
+    """DataFrame을 마크다운 테이블로 변환"""
+    if len(df) > max_rows:
+        df = df.head(max_rows)
+    cols = [str(c) for c in df.columns]
+    lines = ["| " + " | ".join(cols) + " |"]
+    for _, row in df.iterrows():
+        lines.append("| " + " | ".join(_clean_text(str(v)) for v in row.tolist()) + " |")
+    return "\n".join(lines)
+
+
+def _extract_csv(fp: Path) -> tuple[str, list[dict]]:
+    """CSV 파일 추출"""
+    try:
+        import pandas as pd
+        df = pd.read_csv(fp)
+        md = _df_to_markdown(df)
+        return "", [{"page": 0, "bbox": [], "text": md}]
+    except Exception as e:
+        logger.warning(f"Failed to extract CSV {fp}: {e}, trying as plain text")
+        return _extract_plain_text(fp)
+
+
+def _extract_excel(fp: Path) -> tuple[str, list[dict]]:
+    """Excel 파일 추출"""
+    try:
+        import pandas as pd
+        xls = pd.ExcelFile(fp)
+        tables = []
+        for name in xls.sheet_names:
+            df = xls.parse(name)
+            md = f"### {name}\n" + _df_to_markdown(df)
+            tables.append({"page": 0, "bbox": [], "text": md})
+        return "", tables
+    except Exception as e:
+        logger.warning(f"Failed to extract Excel {fp}: {e}")
+        return "", []
+
+
+def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
+    """LibreOffice를 통한 문서 변환"""
+    try:
+        import subprocess
+        outdir = src.parent
+        subprocess.run([
+            "libreoffice", "--headless", "--convert-to", target_ext, 
+            "--outdir", str(outdir), str(src)
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cand = src.with_suffix("." + target_ext)
+        return cand if cand.exists() else None
+    except Exception:
+        return None
+
+
+def _extract_doc(fp: Path) -> tuple[str, list[dict]]:
+    """DOC 파일 추출 (LibreOffice 변환 시도)"""
+    conv = _convert_via_libreoffice(fp, "docx")
+    if conv and conv.exists():
+        result = _extract_docx(conv)
+        try:
+            conv.unlink()  # 임시 변환 파일 삭제
+        except Exception:
+            pass
+        return result
+    return _extract_plain_text(fp)
+
+
+def _extract_ppt(fp: Path) -> tuple[str, list[dict]]:
+    """PPT 파일 추출 (LibreOffice 변환 시도)"""
+    conv = _convert_via_libreoffice(fp, "pptx")
+    if conv and conv.exists():
+        result = _extract_pptx(conv)
+        try:
+            conv.unlink()  # 임시 변환 파일 삭제
+        except Exception:
+            pass
+        return result
+    return "", []
+
+
+def _extract_hwp(fp: Path) -> tuple[str, list[dict]]:
+    """HWP 파일 추출"""
+    # 방법 1: python-hwp 라이브러리 시도
+    try:
+        import pyhwp
+        from pyhwp.hwp5.xmlmodel import Hwp5File
+        
+        with Hwp5File(str(fp)) as hwp:
+            texts = []
+            tables = []
+            
+            # HWP 파일에서 텍스트 추출
+            for section in hwp.bodytext.sections:
+                for paragraph in section.paragraphs:
+                    text = paragraph.get_text()
+                    if text and text.strip():
+                        texts.append(_clean_text(text))
+                
+                # 표 추출 시도
+                for table in section.tables:
+                    try:
+                        rows = []
+                        for row in table.rows:
+                            cells = []
+                            for cell in row.cells:
+                                cell_text = cell.get_text() if hasattr(cell, 'get_text') else str(cell)
+                                cells.append(_clean_text(cell_text))
+                            if cells:
+                                rows.append(cells)
+                        
+                        if rows:
+                            md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
+                            tables.append({"page": 0, "bbox": [], "text": md})
+                    except Exception:
+                        continue
+            
+            return _clean_text("\n\n".join(texts)), tables
+    
+    except Exception as e:
+        logger.debug(f"python-hwp extraction failed for {fp}: {e}")
+    
+    # 방법 2: LibreOffice 변환 시도
+    conv = _convert_via_libreoffice(fp, "docx")
+    if conv and conv.exists():
+        result = _extract_docx(conv)
+        try:
+            conv.unlink()  # 임시 변환 파일 삭제
+        except Exception:
+            pass
+        return result
+    
+    # 방법 3: olefile을 사용한 기본 텍스트 추출 시도
+    try:
+        import olefile
+        
+        if olefile.isOleFile(str(fp)):
+            with olefile.OleFileIO(str(fp)) as ole:
+                # HWP 파일의 기본 텍스트 스트림 시도
+                try:
+                    # HWP 파일 구조에서 텍스트 추출 (간단한 방법)
+                    streams = ole.listdir()
+                    text_content = ""
+                    
+                    for stream in streams:
+                        try:
+                            if 'BodyText' in str(stream) or 'PrvText' in str(stream):
+                                data = ole._olestream_size.get(stream, b'')
+                                if data:
+                                    # 간단한 텍스트 추출 (완전하지 않을 수 있음)
+                                    text_content += data.decode('utf-8', errors='ignore')
+                        except Exception:
+                            continue
+                    
+                    if text_content.strip():
+                        return _clean_text(text_content), []
+                except Exception:
+                    pass
+    
+    except Exception as e:
+        logger.debug(f"olefile extraction failed for {fp}: {e}")
+    
+    # 모든 방법 실패 시 경고 로그 후 빈 결과 반환
+    logger.warning(f"HWP 파일 추출 실패: {fp}. python-hwp, LibreOffice, olefile 모두 사용할 수 없습니다.")
+    return "", []
+
+
+def _extract_any(path: Path) -> tuple[str, list[dict]]:
+    """통합 문서 추출 라우터"""
+    ext = _ext(path)
+    if ext == ".pdf":
+        return _extract_pdf_with_tables(path)
+    if ext in {".txt", ".text", ".md"}:
+        return _extract_plain_text(path)
+    if ext == ".docx":
+        return _extract_docx(path)
+    if ext == ".pptx":
+        return _extract_pptx(path)
+    if ext == ".csv":
+        return _extract_csv(path)
+    if ext in {".xlsx", ".xls"}:
+        return _extract_excel(path)
+    if ext == ".doc":
+        return _extract_doc(path)
+    if ext == ".ppt":
+        return _extract_ppt(path)
+    if ext == ".hwp":
+        return _extract_hwp(path)
+    # 모르는 확장자는 텍스트로 시도
+    return _extract_plain_text(path)
 
 
 # -------------------------------------------------
@@ -882,7 +1252,6 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
 # 1) PDF → 텍스트 추출 (작업유형별 보안레벨 동시 산정)
 # -------------------------------------------------
 async def extract_pdfs():
-    import fitz  # type: ignore
     from tqdm import tqdm  # type: ignore
 
     EXTRACTED_TEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -916,93 +1285,97 @@ async def extract_pdfs():
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    pdf_paths = list(RAW_DATA_DIR.rglob("*.pdf"))
+    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and _ext(p) in SUPPORTED_EXTS]
+
+    # base(문서ID 유사)별로 버전 후보 묶기: (Path, date_num)
     grouped: Dict[str, List[Tuple[Path, int]]] = defaultdict(list)
-    for p in pdf_paths:
+    for p in raw_files:
         base, date_num = _extract_base_and_date(p)
         grouped[base].append((p, date_num))
 
     kept, removed = [], []
     for base, lst in grouped.items():
-        lst_sorted = sorted(lst, key=lambda x: (x[1], len(x[0].name)))
-        keep = lst_sorted[-1]
-        kept.append(keep[0])
-        for old in [p for p, d in lst_sorted[:-1]]:
+        # lst 원소는 (Path, date_num)
+        lst_sorted = sorted(
+            lst,
+            key=lambda it: (it[1], it[0].stat().st_mtime, len(it[0].name))  # date_num → mtime → 이름 길이
+        )
+        keep_path = lst_sorted[-1][0]          # 최신 후보의 Path
+        kept.append(keep_path)
+        for old_path, _ in lst_sorted[:-1]:
             try:
-                old.unlink(missing_ok=True)
-                removed.append(str(old.relative_to(RAW_DATA_DIR)))
+                old_path.unlink(missing_ok=True)
+                removed.append(str(old_path.relative_to(RAW_DATA_DIR)))
             except Exception:
-                logger.exception("Failed to remove duplicate: %s", old)
+                logger.exception("Failed to remove duplicate: %s", old_path)
 
     if not kept:
         return {
-            "message": "처리할 PDF가 없습니다.",
+            "message": "처리할 문서가 없습니다.",
             "meta_path": str(META_JSON_PATH),
             "deduplicated": {"removedCount": len(removed), "removed": removed},
         }
 
     new_meta: Dict[str, Dict] = {}
-    for pdf_path in tqdm(kept, desc="PDF 전처리"):
+    for src in tqdm(kept, desc="문서 전처리"):
         try:
-            doc = fitz.open(pdf_path)
-            text_pages = [p.get_text("text").strip() for p in doc]
-            pdf_text = "\n\n".join(text_pages)
+            text, tables = _extract_any(src)
+            
+            # 작업유형별 보안 레벨 (본문+표 모두 포함해서 판정)
+            whole_for_level = text + "\n\n" + "\n\n".join(t.get("text","") for t in (tables or []))
+            sec_map = {task: _determine_level_for_task(
+                whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})
+            ) for task in TASK_TYPES}
 
-            # 작업유형별 보안레벨 계산
-            sec_map: Dict[str, int] = {}
-            for task in TASK_TYPES:
-                rules = all_rules.get(task, {"maxLevel": 1, "levels": {}})
-                sec_map[task] = _determine_level_for_task(pdf_text, rules)
-
-            # 폴더 배치: 3종 중 최대 레벨 폴더로 복사(기존 구조 유지)
             max_sec = max(sec_map.values()) if sec_map else 1
             sec_folder = f"securityLevel{int(max_sec)}"
 
-            rel_from_raw = pdf_path.relative_to(RAW_DATA_DIR)
-            dest_rel_pdf = Path(sec_folder) / rel_from_raw
-            dest_pdf_abs = LOCAL_DATA_ROOT / dest_rel_pdf
-            dest_pdf_abs.parent.mkdir(parents=True, exist_ok=True)
+            rel_from_raw = src.relative_to(RAW_DATA_DIR)
+            # 원본 그대로 보관
+            dest_rel = Path(sec_folder) / rel_from_raw
+            dest_abs = LOCAL_DATA_ROOT / dest_rel
+            dest_abs.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(pdf_path, dest_pdf_abs)
+                shutil.copy2(src, dest_abs)
             except Exception:
-                logger.exception("Failed to copy PDF: %s", dest_pdf_abs)
+                logger.exception("Failed to copy file: %s", dest_abs)
 
-            # 텍스트 저장 (extracted_texts/securityLevelN/...)
-            txt_path = EXTRACTED_TEXT_DIR / dest_rel_pdf.with_suffix(".txt")
-            txt_path.parent.mkdir(parents=True, exist_ok=True)
-            txt_path.write_text(pdf_text, encoding="utf-8")
+            # 추출 텍스트 저장 (확장자는 .txt로 통일)
+            txt_rel = dest_rel.with_suffix(".txt")
+            (EXTRACTED_TEXT_DIR / txt_rel).parent.mkdir(parents=True, exist_ok=True)
+            (EXTRACTED_TEXT_DIR / txt_rel).write_text(text, encoding="utf-8")
 
             # doc_id/version 유추
             stem = rel_from_raw.stem
             doc_id, version = _parse_doc_version(stem)
 
             info = {
-                "chars": len(pdf_text),
-                "lines": len(pdf_text.splitlines()),
-                "preview": (
-                    (pdf_text[:200].replace("\n", " ") + "…") if pdf_text else ""
-                ),
+                "chars": len(text),
+                "lines": len(text.splitlines()),
+                "preview": (_clean_text(text[:200].replace("\n"," ")) + "…") if text else "",
                 "security_levels": sec_map,  # 작업유형별 보안레벨
                 "doc_id": doc_id,
                 "version": version,
+                "tables": tables or [],  # ★ 표 정보 추가
+                "sourceExt": _ext(src),  # 원본 확장자 기록
             }
-            new_meta[str(dest_rel_pdf)] = info
+            new_meta[str(dest_rel)] = info
 
         except Exception as e:
-            logger.exception("Failed to process: %s", pdf_path)
+            logger.exception("Failed to process: %s", src)
             try:
-                rel_from_raw = pdf_path.relative_to(RAW_DATA_DIR)
-                dest_rel_pdf = Path("securityLevel1") / rel_from_raw
-                new_meta[str(dest_rel_pdf)] = {"error": str(e)}
+                rel_from_raw = src.relative_to(RAW_DATA_DIR)
+                dest_rel = Path("securityLevel1") / rel_from_raw
+                new_meta[str(dest_rel)] = {"error": str(e)}
             except Exception:
-                new_meta[pdf_path.name] = {"error": str(e)}
+                new_meta[src.name] = {"error": str(e)}
 
     META_JSON_PATH.write_text(
         json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return {
-        "message": "PDF 추출 완료",
-        "pdf_count": len(kept),
+        "message": "문서 추출 완료",
+        "file_count": len(kept),
         "meta_path": str(META_JSON_PATH),
         "deduplicated": {"removedCount": len(removed), "removed": removed},
     }
@@ -1058,10 +1431,13 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     total_inserted = 0
     for txt_path in EXTRACTED_TEXT_DIR.rglob("*.txt"):
         rel_txt = txt_path.relative_to(EXTRACTED_TEXT_DIR)
-        rel_pdf_key = rel_txt.with_suffix(".pdf").as_posix()
-        if rel_pdf_key not in meta:
+        # 다양한 확장자를 시도하여 메타 키 찾기
+        cands = [rel_txt.with_suffix(ext).as_posix() for ext in SUPPORTED_EXTS]
+        meta_key = next((k for k in cands if k in meta), None)
+        if not meta_key:
             continue
-        entry = meta[rel_pdf_key]
+        entry = meta[meta_key]
+        tables = entry.get("tables", [])
         sec_map = entry.get("security_levels", {}) or {}
         doc_id = entry.get("doc_id")
         version = entry.get("version", 0)
@@ -1087,8 +1463,13 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
 
         # 작업유형별 삽입
         batch: List[Dict] = []
+        tables = entry.get("tables", [])  # [{page,bbox,text}, ...]
+        TABLE_MARK = "[[TABLE"
+        
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
+            
+            # 본문 청크 삽입 (기존 그대로)
             for idx, c in enumerate(chunks):
                 vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
                 batch.append({
@@ -1100,6 +1481,32 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
                     "doc_id": str(doc_id),
                     "version": int(version),
                     "text": c,
+                })
+                if len(batch) >= 128:
+                    client.insert(COLLECTION_NAME, batch)
+                    total_inserted += len(batch)
+                    batch = []
+            
+            # ★ 표 청크 삽입 (절대 분할하지 않음)
+            base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
+            for t_i, t in enumerate(tables):
+                md = (t.get("text") or "").strip()
+                if not md:
+                    continue
+                page = int(t.get("page", 0))
+                bbox = t.get("bbox") or []
+                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+                table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
+                vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
+                batch.append({
+                    "embedding": vec.tolist(),
+                    "path": str(rel_txt),             # 경로는 동일 txt 기준 유지
+                    "chunk_idx": int(base_idx + t_i), # 본문 뒤로 이어붙임
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(version),
+                    "text": table_text,               # ★ 표 마커+마크다운
                 })
                 if len(batch) >= 128:
                     client.insert(COLLECTION_NAME, batch)
@@ -1124,16 +1531,18 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
 # 2-1) 단일 파일 인제스트(선택 작업유형)
 # -------------------------------------------------
 async def ingest_single_pdf(req: SinglePDFIngestRequest):
-    import fitz  # type: ignore
-
     try:
         from repository.documents import insert_workspace_document
     except Exception:
         insert_workspace_document = None
 
-    pdf_path = Path(req.pdf_path)
-    if not pdf_path.exists():
-        return {"error": f"PDF 경로를 찾을 수 없습니다: {pdf_path}"}
+    file_path = Path(req.pdf_path)
+    if not file_path.exists():
+        return {"error": f"파일 경로를 찾을 수 없습니다: {file_path}"}
+
+    # 지원되지 않는 확장자 체크
+    if _ext(file_path) not in SUPPORTED_EXTS:
+        return {"error": f"지원되지 않는 파일 형식입니다: {_ext(file_path)}"}
 
     # 텍스트 생성 및 메타 갱신
     if META_JSON_PATH.exists():
@@ -1141,36 +1550,39 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     else:
         meta = {}
 
-    # securityLevel 폴더는 최대레벨 기준
-    with fitz.open(pdf_path) as doc:
-        text_all = "\n\n".join(p.get_text("text").strip() for p in doc)
+    # 다중 확장자 지원으로 텍스트 추출
+    text_all, table_blocks_all = _extract_any(file_path)
 
     all_rules = get_security_level_rules_all()
+    # 본문+표 모두 포함해서 보안레벨 판정
+    whole_for_level = text_all + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
     sec_map = {
         task: _determine_level_for_task(
-            text_all, all_rules.get(task, {"maxLevel": 1, "levels": {}})
+            whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})
         )
         for task in TASK_TYPES
     }
     max_sec = max(sec_map.values()) if sec_map else 1
     sec_folder = f"securityLevel{int(max_sec)}"
 
-    rel_pdf = Path(sec_folder) / pdf_path.name
-    # 저장 경로: local_data(원본 PDF 복사) + extracted_texts(텍스트)
-    (LOCAL_DATA_ROOT / rel_pdf).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(pdf_path, LOCAL_DATA_ROOT / rel_pdf)
-    txt_path = EXTRACTED_TEXT_DIR / rel_pdf.with_suffix(".txt")
+    rel_file = Path(sec_folder) / file_path.name
+    # 저장 경로: local_data(원본 파일 복사) + extracted_texts(텍스트)
+    (LOCAL_DATA_ROOT / rel_file).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(file_path, LOCAL_DATA_ROOT / rel_file)
+    txt_path = EXTRACTED_TEXT_DIR / rel_file.with_suffix(".txt")
     txt_path.parent.mkdir(parents=True, exist_ok=True)
     txt_path.write_text(text_all, encoding="utf-8")
 
-    doc_id, ver = _parse_doc_version(pdf_path.stem)
-    meta[str(rel_pdf)] = {
+    doc_id, ver = _parse_doc_version(file_path.stem)
+    meta[str(rel_file)] = {
         "chars": len(text_all),
         "lines": len(text_all.splitlines()),
-        "preview": (text_all[:200].replace("\n", " ") + "…") if text_all else "",
+        "preview": (_clean_text(text_all[:200].replace("\n", " ")) + "…") if text_all else "",
         "security_levels": sec_map,
         "doc_id": doc_id,
         "version": ver,
+        "tables": table_blocks_all or [],  # ★ 표 정보 추가
+        "sourceExt": _ext(file_path),  # 원본 확장자 기록
     }
     META_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     META_JSON_PATH.write_text(
@@ -1209,19 +1621,49 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     tasks = req.task_types or list(TASK_TYPES)
     chunks = chunk_text(text_all)
     batch, cnt = [], 0
+    TABLE_MARK = "[[TABLE"
+    
     for task in tasks:
         lvl = int(sec_map.get(task, 1))
+        
+        # 본문 청크 삽입
         for idx, c in enumerate(chunks):
             vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
             batch.append({
                 "embedding": vec.tolist(),
-                "path": str(rel_pdf.with_suffix(".txt")),
+                "path": str(rel_file.with_suffix(".txt")),
                 "chunk_idx": int(idx),
                 "task_type": task,
                 "security_level": lvl,
                 "doc_id": str(doc_id),
                 "version": int(ver),
                 "text": c,
+            })
+            if len(batch) >= 128:
+                client.insert(COLLECTION_NAME, batch)
+                cnt += len(batch)
+                batch = []
+        
+        # ★ 표 청크 삽입 (절대 분할하지 않음)
+        base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
+        for t_i, t in enumerate(table_blocks_all):
+            md = (t.get("text") or "").strip()
+            if not md:
+                continue
+            page = int(t.get("page", 0))
+            bbox = t.get("bbox") or []
+            bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+            table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
+            vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
+            batch.append({
+                "embedding": vec.tolist(),
+                "path": str(rel_file.with_suffix(".txt")),
+                "chunk_idx": int(base_idx + t_i),
+                "task_type": task,
+                "security_level": lvl,
+                "doc_id": str(doc_id),
+                "version": int(ver),
+                "text": table_text,  # ★ 표 마커+마크다운
             })
             if len(batch) >= 128:
                 client.insert(COLLECTION_NAME, batch)
@@ -1235,8 +1677,8 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         try:
             insert_workspace_document(
                 doc_id=str(doc_id),
-                filename=rel_pdf.name,
-                docpath=str(rel_pdf),
+                filename=rel_file.name,
+                docpath=str(rel_file),
                 workspace_id=int(req.workspace_id),
                 metadata={
                     "securityLevels": sec_map,
@@ -1254,10 +1696,11 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     _ensure_collection_and_index(client, emb_dim, metric="IP")
 
     return {
-        "message": "단일 PDF 인제스트 완료(Milvus Server)",
+        "message": f"단일 파일 인제스트 완료(Milvus Server) - {_ext(file_path)}",
         "doc_id": doc_id,
         "version": ver,
         "chunks": cnt,
+        "sourceExt": _ext(file_path),
     }
 
 
@@ -1364,11 +1807,14 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
     # === 분기: 검색 방식 ===
     hits_raw = []
+    TABLE_MARK = "[[TABLE"
+    
     if search_type == "vector":
         results = _dense_search(limit=candidate)
         for hit in results[0]:
             if isinstance(hit, dict):
                 ent = hit.get("entity", {})
+                ent_text = ent.get("text")  # ★ 추가
                 path = ent.get("path")
                 cidx = int(ent.get("chunk_idx", 0))
                 ttype = ent.get("task_type")
@@ -1376,13 +1822,21 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 doc_id = ent.get("doc_id")
                 score_vec = float(hit.get("distance", 0.0))
             else:
+                ent = hit.entity
+                ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
                 path = hit.entity.get("path")
                 cidx = int(hit.entity.get("chunk_idx", 0))
                 ttype = hit.entity.get("task_type")
                 lvl = int(hit.entity.get("security_level", 1))
                 doc_id = hit.entity.get("doc_id")
                 score_vec = float(hit.score)
-            snippet = _load_snippet(path, cidx)
+            
+            # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
+            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
+                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            else:
+                snippet = _load_snippet(path, cidx)
+                
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
                 "security_level": lvl, "doc_id": doc_id,
@@ -1398,6 +1852,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             for hit in (res[0] if res and len(res) > 0 else []):
                 if isinstance(hit, dict):
                     ent = hit.get("entity", {})
+                    ent_text = ent.get("text")  # ★ 추가
                     path = ent.get("path")
                     cidx = int(ent.get("chunk_idx", 0))
                     ttype = ent.get("task_type")
@@ -1405,13 +1860,15 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                     doc_id = ent.get("doc_id")
                     score = float(hit.get("distance", 0.0))
                 else:
+                    ent = hit.entity
+                    ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
                     path = hit.entity.get("path")
                     cidx = int(hit.entity.get("chunk_idx", 0))
                     ttype = hit.entity.get("task_type")
                     lvl = int(hit.entity.get("security_level", 1))
                     doc_id = hit.entity.get("doc_id")
                     score = float(hit.score)
-                out.append(((path, cidx, ttype, lvl, doc_id), score))
+                out.append(((path, cidx, ttype, lvl, doc_id, ent_text), score))  # ★ ent_text 추가
             return out
 
         dense_list = _collect(res_dense, True)
@@ -1419,17 +1876,30 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
         # RRF 결합 폴백
         rrf: dict[tuple, float] = {}
+        text_map: dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
         K = 60.0
         for rank, (key, _s) in enumerate(dense_list, start=1):
-            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
+            if len(key) > 5:  # ent_text가 있으면 저장
+                text_map[key_short] = key[5]
         for rank, (key, _s) in enumerate(sparse_list, start=1):
-            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
+            if len(key) > 5:  # ent_text가 있으면 저장
+                text_map[key_short] = key[5]
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
         for (path, cidx, ttype, lvl, doc_id), fused in merged:
-            snippet = _load_snippet(path, cidx)
-            s_vec = next((s for (k, s) in dense_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            # 스니펫 결정 로직
+            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
+            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
+                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            else:
+                snippet = _load_snippet(path, cidx)
+            
+            s_vec = next((s for (k, s) in dense_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            s_spa = next((s for (k, s) in sparse_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
                 "security_level": lvl, "doc_id": doc_id,
@@ -1785,7 +2255,8 @@ async def drop_test_session(sid: str) -> Dict:
 # --- add: ingest_test_pdfs ---
 async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[List[str]] = None):
     """
-    업로드된 pdf_paths를 세션 전용 컬렉션에 인제스트.
+    업로드된 파일들을 세션 전용 컬렉션에 인제스트.
+    다중 확장자 지원 (pdf, txt, docx, pptx, csv, xlsx, xls, doc, ppt)
     텍스트는 EXTRACTED_TEXT_DIR/__sessions__/{sid}/securityLevelN/ 아래에 저장하여
     기존 _load_snippet 경로 로직을 그대로 활용.
     """
@@ -1825,30 +2296,37 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
     sess_txt_root.mkdir(parents=True, exist_ok=True)
 
-    import fitz  # type: ignore
-
     tasks = task_types or list(TASK_TYPES)
     total = 0
 
     for p in pdf_paths:
         p = str(p)
+        file_path = Path(p)
+        
+        # 지원되지 않는 확장자는 건너뛰기
+        if _ext(file_path) not in SUPPORTED_EXTS:
+            logger.warning(f"[test-ingest] Unsupported file type: {file_path}")
+            continue
+            
         try:
-            with fitz.open(p) as doc:
-                pdf_text = "\n\n".join(page.get_text("text").strip() for page in doc)
+            # 다중 확장자 지원으로 텍스트 추출
+            file_text, table_blocks_all = _extract_any(file_path)
         except Exception as e:
             logger.exception("[test-ingest] read failed: %s", p)
             continue
 
-        # 작업유형별 보안 레벨 산정
-        sec_map = {t: _determine_level_for_task(pdf_text, all_rules.get(t, {"maxLevel": 1, "levels": {}})) for t in TASK_TYPES}
+        # 작업유형별 보안 레벨 산정 (본문+표 모두 포함)
+        whole_for_level = file_text + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
+        sec_map = {t: _determine_level_for_task(whole_for_level, all_rules.get(t, {"maxLevel": 1, "levels": {}})) for t in TASK_TYPES}
         max_sec = max(sec_map.values()) if sec_map else 1
         sec_folder = f"securityLevel{int(max_sec)}"
 
         # 세션 텍스트 파일 저장 (EXTRACTED_TEXT_DIR 기준 상대 경로 구성)
-        rel_txt = Path("__sessions__") / sid / sec_folder / (Path(p).name).replace(".pdf", ".txt")
+        # 확장자를 .txt로 통일
+        rel_txt = Path("__sessions__") / sid / sec_folder / Path(p).with_suffix(".txt").name
         abs_txt = EXTRACTED_TEXT_DIR / rel_txt
         abs_txt.parent.mkdir(parents=True, exist_ok=True)
-        abs_txt.write_text(pdf_text, encoding="utf-8")
+        abs_txt.write_text(file_text, encoding="utf-8")
 
         # doc_id/version 유추
         stem = Path(p).stem
@@ -1861,10 +2339,14 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
             pass
 
         # 청크 → 삽입
-        chunks = chunk_text(pdf_text)
+        chunks = chunk_text(file_text)
         batch: List[Dict] = []
+        TABLE_MARK = "[[TABLE"
+        
         for t in tasks:
             lvl = int(sec_map.get(t, 1))
+            
+            # 본문 청크 삽입
             for idx, c in enumerate(chunks):
                 vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
                 batch.append({
@@ -1876,6 +2358,32 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                     "doc_id": str(doc_id),
                     "version": int(ver),
                     "text": c,
+                })
+                if len(batch) >= 128:
+                    client.insert(coll, batch)
+                    total += len(batch)
+                    batch = []
+            
+            # ★ 표 청크 삽입 (절대 분할하지 않음)
+            base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
+            for t_i, table in enumerate(table_blocks_all):
+                md = (table.get("text") or "").strip()
+                if not md:
+                    continue
+                page = int(table.get("page", 0))
+                bbox = table.get("bbox") or []
+                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+                table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
+                vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
+                batch.append({
+                    "embedding": vec.tolist(),
+                    "path": str(rel_txt.as_posix()),
+                    "chunk_idx": int(base_idx + t_i),
+                    "task_type": t,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(ver),
+                    "text": table_text,  # ★ 표 마커+마크다운
                 })
                 if len(batch) >= 128:
                     client.insert(coll, batch)
@@ -1964,11 +2472,14 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
         return snippet or " ".join(words[:max_tokens]).strip()
 
     hits_raw = []
+    TABLE_MARK = "[[TABLE"
+    
     if search_type == "vector":
         res = _dense_search(limit=candidate)
         for hit in res[0]:
             if isinstance(hit, dict):
                 ent = hit.get("entity", {})
+                ent_text = ent.get("text")  # ★ 추가
                 path = ent.get("path")
                 cidx = int(ent.get("chunk_idx", 0))
                 ttype = ent.get("task_type")
@@ -1976,13 +2487,21 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
                 doc_id = ent.get("doc_id")
                 score_vec = float(hit.get("distance", 0.0))
             else:
+                ent = hit.entity
+                ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
                 path = hit.entity.get("path")
                 cidx = int(hit.entity.get("chunk_idx", 0))
                 ttype = hit.entity.get("task_type")
                 lvl = int(hit.entity.get("security_level", 1))
                 doc_id = hit.entity.get("doc_id")
                 score_vec = float(hit.score)
-            snippet = _load_snippet_for_session(path, cidx)
+            
+            # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
+            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
+                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            else:
+                snippet = _load_snippet_for_session(path, cidx)
+                
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl,
                 "doc_id": doc_id, "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet
@@ -1996,6 +2515,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
             for hit in (res[0] if res and len(res) > 0 else []):
                 if isinstance(hit, dict):
                     ent = hit.get("entity", {})
+                    ent_text = ent.get("text")  # ★ 추가
                     path = ent.get("path")
                     cidx = int(ent.get("chunk_idx", 0))
                     ttype = ent.get("task_type")
@@ -2003,28 +2523,43 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
                     doc_id = ent.get("doc_id")
                     score = float(hit.get("distance", 0.0))
                 else:
+                    ent = hit.entity
+                    ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
                     path = hit.entity.get("path")
                     cidx = int(hit.entity.get("chunk_idx", 0))
                     ttype = hit.entity.get("task_type")
                     lvl = int(hit.entity.get("security_level", 1))
                     doc_id = hit.entity.get("doc_id")
                     score = float(hit.score)
-                out.append(((path, cidx, ttype, lvl, doc_id), score))
+                out.append(((path, cidx, ttype, lvl, doc_id, ent_text), score))  # ★ ent_text 추가
             return out
 
         dense_list = _collect(res_dense)
         sparse_list = _collect(res_sparse)
         rrf: Dict[tuple, float] = {}
+        text_map: Dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
         K = 60.0
         for rank, (key, _s) in enumerate(dense_list, start=1):
-            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
+            if len(key) > 5:  # ent_text가 있으면 저장
+                text_map[key_short] = key[5]
         for rank, (key, _s) in enumerate(sparse_list, start=1):
-            rrf[key] = rrf.get(key, 0.0) + 1.0 / (K + rank)
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
+            if len(key) > 5:  # ent_text가 있으면 저장
+                text_map[key_short] = key[5]
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
         for (path, cidx, ttype, lvl, doc_id), fused in merged:
-            snippet = _load_snippet_for_session(path, cidx)
-            s_vec = next((s for (k, s) in dense_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            # 스니펫 결정 로직
+            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
+            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
+                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            else:
+                snippet = _load_snippet_for_session(path, cidx)
+            
+            s_vec = next((s for (k, s) in dense_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            s_spa = next((s for (k, s) in sparse_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl, "doc_id": doc_id,
                 "score_vec": float(s_vec), "score_sparse": float(s_spa), "score_fused": float(fused), "snippet": snippet
