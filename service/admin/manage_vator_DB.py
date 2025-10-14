@@ -41,35 +41,131 @@ from storage.db_models import (
     SecurityLevelConfigTask,
     SecurityLevelKeywordsTask,
 )
-# 밀버스 DB 글자 수 제한 
-MILVUS_TEXT_VARCHAR_MAX = 32768
-MILVUS_TEXT_SAFE_LIMIT = 32000  # 여유 버퍼를 둔 안전 상한
-def _split_text_for_milvus(s: str, limit: int = MILVUS_TEXT_SAFE_LIMIT) -> list[str]:
-    """Milvus VARCHAR 안전 길이로 텍스트를 분할한다."""
-    s = s or ""
-    if len(s) <= limit:
-        return [s]
-    # 1차: 줄 단위로 누적 분할
-    parts, buf, blen = [], [], 0
-    for line in s.splitlines(True):  # 개행 보존
-        if blen + len(line) > limit and buf:
-            parts.append("".join(buf).strip())
-            buf, blen = [line], len(line)
-        else:
-            buf.append(line); blen += len(line)
-    if buf:
-        parts.append("".join(buf).strip())
 
-    # 2차: 여전히 넘치는 덩어리는 하드 슬라이스
-    out = []
-    for p in parts:
-        if len(p) <= limit:
-            if p: out.append(p)
-        else:
-            for i in range(0, len(p), limit):
-                chunk = p[i:i+limit].strip()
-                if chunk: out.append(chunk)
-    return out
+def _split_for_varchar_bytes(
+    text: str,
+    hard_max_bytes: int = 32768,
+    soft_max_bytes: int = 30000,   # 여유 버퍼
+    table_mark: str = "[[TABLE",
+) -> list[str]:
+    """
+    VARCHAR 초과 방지: UTF-8 바이트 기준으로 안전 분할.
+    - 표 텍스트는 헤더([[TABLE ...]])를 첫 조각에만 포함.
+    - 이후 조각엔 [[TABLE_CONT i/n]] 마커를 부여.
+    - 개행 경계 우선(backtrack), 그래도 안되면 하드컷.
+    """
+    if not text:
+        return [""]
+
+    # 표 헤더 분리
+    header = ""
+    body = text
+    if text.startswith(table_mark):
+        head_end = text.find("]]")
+        if head_end != -1:
+            head_end += 2
+            if head_end < len(text) and text[head_end] == "\n":
+                head_end += 1
+            header, body = text[:head_end], text[head_end:]
+
+    def _split_body(b: str) -> list[str]:
+        out: list[str] = []
+        b_bytes = b.encode("utf-8")
+        n = len(b_bytes)
+        i = 0
+        while i < n:
+            j = min(i + soft_max_bytes, n)
+            # 개행 경계로 뒤로 물러나기
+            k = j
+            backtracked = False
+            # j부터 i까지 역방향으로 \n 바이트(0x0A) 탐색
+            while k > i and (j - k) < 2000:  # 최대 2KB만 백트랙
+                if b_bytes[k-1:k] == b"\n":
+                    backtracked = True
+                    break
+                k -= 1
+            if backtracked and (k - i) >= int(soft_max_bytes * 0.6):
+                cut = k
+            else:
+                cut = j
+
+            # 하드 컷(멀티바이트 경계 맞추기)
+            if cut - i > hard_max_bytes:
+                cut = i + hard_max_bytes
+
+            # UTF-8 안전 디코드: 경계가 문자를 반쯤 자를 수 있으니 넉넉히 조정
+            chunk = b_bytes[i:cut]
+            # 만약 디코드 에러가 나면 한 바이트씩 줄이며 안전 경계 찾기
+            while True:
+                try:
+                    s = chunk.decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    cut -= 1
+                    if cut <= i:
+                        # 최악의 경우 한 글자라도 디코드되게 한 바이트 앞당김
+                        cut = i + 1
+                    chunk = b_bytes[i:cut]
+            out.append(s)
+            i = cut
+        return out
+
+    if len(text.encode("utf-8")) <= hard_max_bytes:
+        return [text]
+
+    parts = _split_body(body)
+    if header:
+        total = len(parts)
+        result = []
+        for idx, c in enumerate(parts, start=1):
+            if idx == 1:
+                # 첫 조각은 헤더 + 본문
+                # 전체가 하드맥스를 넘지 않게 헤더와 합친 뒤 한번 더 자르기
+                first = header + c
+                if len(first.encode("utf-8")) <= hard_max_bytes:
+                    result.append(first)
+                else:
+                    # 너무 크면 헤더는 유지하고 c를 다시 잘라 붙임
+                    # (헤더가 길 때 매우 예외적)
+                    subparts = _split_body(c)
+                    if subparts:
+                        # 첫 조각은 헤더 + 첫 sub
+                        f = header + subparts[0]
+                        if len(f.encode("utf-8")) > hard_max_bytes:
+                            # 헤더 자체가 큰 극단: 헤더만 넣고 이후 CONT로 처리
+                            result.append(header[:0] + header)  # 그대로
+                            # 나머지는 CONT
+                            for sidx, sp in enumerate(subparts, start=1):
+                                tag = f"[[TABLE_CONT {sidx}/{len(subparts)}]]\n"
+                                result.append(tag + sp)
+                        else:
+                            result.append(f)
+                            # 나머지는 CONT
+                            for sidx, sp in enumerate(subparts[1:], start=2):
+                                tag = f"[[TABLE_CONT {sidx}/{len(subparts)}]]\n"
+                                result.append(tag + sp)
+                    else:
+                        result.append(header)  # 본문이 없으면 헤더만
+            else:
+                tag = f"[[TABLE_CONT {idx}/{total}]]\n"
+                # tag + c 가 하드맥스를 넘지 않도록 재자르기
+                rest = tag + c
+                if len(rest.encode("utf-8")) <= hard_max_bytes:
+                    result.append(rest)
+                else:
+                    subs = _split_body(c)
+                    for sidx, sp in enumerate(subs, start=1):
+                        subt = f"[[TABLE_CONT {idx}.{sidx}/{total}]]\n" + sp
+                        if len(subt.encode("utf-8")) <= hard_max_bytes:
+                            result.append(subt)
+                        else:
+                            # 그래도 넘으면 하드컷으로 마지막 방어
+                            bb = subt.encode("utf-8")[:hard_max_bytes]
+                            result.append(bb.decode("utf-8", errors="ignore"))
+        return result
+    else:
+        return parts
+
 
 # KST 시간 포맷 유틸
 from utils.time import now_kst, now_kst_string
@@ -335,90 +431,108 @@ def _extract_ppt(fp: Path) -> tuple[str, list[dict]]:
         return result
     return "", []
 
-
 def _extract_hwp(fp: Path) -> tuple[str, list[dict]]:
-    """HWP 파일 추출"""
-    # 방법 1: python-hwp 라이브러리 시도
+    """HWP 파일 추출 (다단계 폴백)
+    순서: python-hwp(API) -> hwp5txt(CLI) -> LibreOffice 변환(docx) -> olefile(구버전 시도)
+    반환: (본문텍스트, 표리스트[])
+    """
+    # --- 0) 공통 헬퍼 ---
+    def _try_hwp5txt_cli(path: Path) -> Optional[str]:
+        """hwp5txt CLI로 텍스트 추출 (권장 경로)"""
+        try:
+            import shutil, subprocess, tempfile
+            if shutil.which("hwp5txt") is None:
+                return None
+            # hwp5txt 출력은 stdout. 기본 인코딩은 UTF-8로 가정
+            res = subprocess.run(
+                ["hwp5txt", str(path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+            out = res.stdout.decode("utf-8", errors="ignore")
+            return _clean_text(out) if out else ""
+        except Exception:
+            return None
+
+    # --- 1) python-hwp 모듈 시도 ---
     try:
         import pyhwp
         from pyhwp.hwp5.xmlmodel import Hwp5File
-        
+        texts, tables = [], []
         with Hwp5File(str(fp)) as hwp:
-            texts = []
-            tables = []
-            
-            # HWP 파일에서 텍스트 추출
-            for section in hwp.bodytext.sections:
-                for paragraph in section.paragraphs:
-                    text = paragraph.get_text()
-                    if text and text.strip():
-                        texts.append(_clean_text(text))
-                
-                # 표 추출 시도
-                for table in section.tables:
+            # 단순 본문 루프 (구조가 달라도 최대한 텍스트 회수)
+            for section in getattr(hwp.bodytext, "sections", []):
+                # 문단
+                for paragraph in getattr(section, "paragraphs", []):
+                    try:
+                        t = paragraph.get_text()
+                        if t and t.strip():
+                            texts.append(_clean_text(t))
+                    except Exception:
+                        continue
+                # 표(가능하면)
+                for table in getattr(section, "tables", []):
                     try:
                         rows = []
-                        for row in table.rows:
+                        for row in getattr(table, "rows", []):
                             cells = []
-                            for cell in row.cells:
-                                cell_text = cell.get_text() if hasattr(cell, 'get_text') else str(cell)
-                                cells.append(_clean_text(cell_text))
+                            for cell in getattr(row, "cells", []):
+                                ctext = cell.get_text() if hasattr(cell, "get_text") else str(cell)
+                                cells.append(_clean_text(ctext))
                             if cells:
                                 rows.append(cells)
-                        
                         if rows:
-                            md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
+                            md = "\n".join("| " + " | ".join(r) + " |" for r in rows)
                             tables.append({"page": 0, "bbox": [], "text": md})
                     except Exception:
                         continue
-            
-            return _clean_text("\n\n".join(texts)), tables
-    
+        text_joined = _clean_text("\n\n".join(texts))
+        if text_joined or tables:
+            return text_joined, tables
     except Exception as e:
         logger.debug(f"python-hwp extraction failed for {fp}: {e}")
-    
-    # 방법 2: LibreOffice 변환 시도
+
+    # --- 2) hwp5txt CLI 시도 (가장 잘 되는 편) ---
+    cli_text = _try_hwp5txt_cli(fp)
+    if cli_text is not None:
+        return cli_text, []
+
+    # --- 3) LibreOffice 변환(docx) 시도 (대부분 실패하지만 폴백으로 유지) ---
     conv = _convert_via_libreoffice(fp, "docx")
     if conv and conv.exists():
-        result = _extract_docx(conv)
         try:
-            conv.unlink()  # 임시 변환 파일 삭제
-        except Exception:
-            pass
-        return result
-    
-    # 방법 3: olefile을 사용한 기본 텍스트 추출 시도
+            text, tables = _extract_docx(conv)
+        finally:
+            try:
+                conv.unlink()
+            except Exception:
+                pass
+        if text or tables:
+            return text, tables
+
+    # --- 4) olefile (구버전 HWP에만 가끔) ---
     try:
         import olefile
-        
         if olefile.isOleFile(str(fp)):
             with olefile.OleFileIO(str(fp)) as ole:
-                # HWP 파일의 기본 텍스트 스트림 시도
-                try:
-                    # HWP 파일 구조에서 텍스트 추출 (간단한 방법)
-                    streams = ole.listdir()
-                    text_content = ""
-                    
-                    for stream in streams:
-                        try:
-                            if 'BodyText' in str(stream) or 'PrvText' in str(stream):
-                                data = ole._olestream_size.get(stream, b'')
-                                if data:
-                                    # 간단한 텍스트 추출 (완전하지 않을 수 있음)
-                                    text_content += data.decode('utf-8', errors='ignore')
-                        except Exception:
-                            continue
-                    
-                    if text_content.strip():
-                        return _clean_text(text_content), []
-                except Exception:
-                    pass
-    
+                text_content = ""
+                for stream in ole.listdir():
+                    try:
+                        # 본문 후보 스트림 이름 휴리스틱
+                        sname = "/".join(stream)
+                        if any(k in sname.lower() for k in ("bodytext", "prvtext", "section", "paragraph")):
+                            data = ole.openstream(stream).read()
+                            text_content += data.decode("utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                if text_content.strip():
+                    return _clean_text(text_content), []
     except Exception as e:
         logger.debug(f"olefile extraction failed for {fp}: {e}")
-    
-    # 모든 방법 실패 시 경고 로그 후 빈 결과 반환
-    logger.warning(f"HWP 파일 추출 실패: {fp}. python-hwp, LibreOffice, olefile 모두 사용할 수 없습니다.")
+
+    logger.warning(f"HWP 파일 추출 실패: {fp}. python-hwp, hwp5txt, LibreOffice, olefile 모두 실패.")
     return "", []
 
 
@@ -1161,27 +1275,28 @@ def _client() -> MilvusClient:
     if MILVUS_TOKEN:
         kwargs["token"] = MILVUS_TOKEN
     return MilvusClient(**kwargs)
-
-def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str = "IP", collection_name: str = COLLECTION_NAME):
-    logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 시작: {COLLECTION_NAME}")
+def _ensure_collection_and_index(
+    client: MilvusClient,
+    emb_dim: int,
+    metric: str = "IP",
+    collection_name: str = COLLECTION_NAME,
+):
+    logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 시작: {collection_name}")
     cols = client.list_collections()
-    if COLLECTION_NAME not in cols:
-        logger.info(f"[Milvus] 컬렉션 생성: {COLLECTION_NAME}")
+    if collection_name not in cols:
+        logger.info(f"[Milvus] 컬렉션 생성: {collection_name}")
         schema = client.create_schema(
-            auto_id=True, enable_dynamic_field=False, description="PDF chunks (pro)"
+            auto_id=True, enable_dynamic_field=False, description=f"PDF chunks ({collection_name})"
         )
         schema.add_field("pk", DataType.INT64, is_primary=True)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=int(emb_dim))
         schema.add_field("path", DataType.VARCHAR, max_length=500)
         schema.add_field("chunk_idx", DataType.INT64)
-        schema.add_field(
-            "task_type", DataType.VARCHAR, max_length=16
-        )  # 'doc_gen'|'summary'|'qna'
+        schema.add_field("task_type", DataType.VARCHAR, max_length=16)  # 'doc_gen'|'summary'|'qna'
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
         # 하이브리드용 텍스트/스파스 필드
-        # text: 본문 청크(분석기 활성), text_sparse: BM25 스파스 벡터
         try:
             schema.add_field("text", DataType.VARCHAR, max_length=32768, enable_analyzer=True)
         except TypeError:
@@ -1191,7 +1306,6 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
         except Exception:
             logger.warning("[Milvus] SPARSE_FLOAT_VECTOR 미지원 클라이언트입니다. 서버 BM25 하이브리드 사용 불가.")
 
-        # BM25 함수(가능한 경우: text -> text_sparse 자동생성)
         if Function is not None:
             try:
                 fn = Function(
@@ -1203,49 +1317,44 @@ def _ensure_collection_and_index(client: MilvusClient, emb_dim: int, metric: str
                 schema.add_function(fn)
                 logger.info("[Milvus] BM25 Function 연결 완료 (text -> text_sparse)")
             except Exception as e:
-                logger.warning(f"[Milvus] BM25 Function 추가 실패: {e}")
-        client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
-        logger.info(f"[Milvus] 컬렉션 생성 완료: {COLLECTION_NAME}")
+                logger.warning(f("[Milvus] BM25 Function 추가 실패: {e}"))
+        client.create_collection(collection_name=collection_name, schema=schema)
+        logger.info(f"[Milvus] 컬렉션 생성 완료: {collection_name}")
 
-    # 1) 덴스 벡터 인덱스(embedding)
+    # 1) 덴스 벡터 인덱스
     try:
-        idx_dense = client.list_indexes(collection_name=COLLECTION_NAME, field_name="embedding")
+        idx_dense = client.list_indexes(collection_name=collection_name, field_name="embedding")
     except Exception:
         idx_dense = []
     if not idx_dense:
-        logger.info(f"[Milvus] (embedding) 인덱스 생성 시작")
+        logger.info(f"[Milvus] (embedding) 인덱스 생성 시작 @ {collection_name}")
         ip = client.prepare_index_params()
-        # 덴스 벡터: 기본은 FLAT 유지(환경에 따라 HNSW/IVF 등으로 변경 가능)
         ip.add_index("embedding", "FLAT", metric_type=metric, params={})
-        client.create_index(COLLECTION_NAME, ip, timeout=180.0, sync=True)
-        logger.info(f"[Milvus] (embedding) 인덱스 생성 완료")
+        client.create_index(collection_name, ip, timeout=180.0, sync=True)
+        logger.info(f"[Milvus] (embedding) 인덱스 생성 완료 @ {collection_name}")
 
-    # 2) 스파스 벡터 인덱스(text_sparse)
+    # 2) 스파스 인덱스
     try:
-        idx_sparse = client.list_indexes(collection_name=COLLECTION_NAME, field_name="text_sparse")
+        idx_sparse = client.list_indexes(collection_name=collection_name, field_name="text_sparse")
     except Exception:
         idx_sparse = []
     if not idx_sparse:
-        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 시작")
+        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 시작 @ {collection_name}")
         ip2 = client.prepare_index_params()
         try:
-            # 최신 PyMilvus: metric_type 없이도 동작
             ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", params={})
         except TypeError:
-            # 일부 버전은 metric_type이 필요할 수 있음
             ip2.add_index("text_sparse", "SPARSE_INVERTED_INDEX", metric_type="BM25", params={})
-        client.create_index(COLLECTION_NAME, ip2, timeout=180.0, sync=True)
-        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 완료")
+        client.create_index(collection_name, ip2, timeout=180.0, sync=True)
+        logger.info(f"[Milvus] (text_sparse) 인덱스 생성 완료 @ {collection_name}")
 
-    # 인덱스 준비 후 로드(이미 로드되어 있으면 내렸다가 다시 올림)
+    # 로드
     try:
-        client.release_collection(collection_name=COLLECTION_NAME)
+        client.release_collection(collection_name=collection_name)
     except Exception:
         pass
-    client.load_collection(collection_name=COLLECTION_NAME)
-    logger.info(f"[Milvus] 컬렉션 로드 완료: {COLLECTION_NAME}")
-    
-    logger.info(f"[Milvus] 컬렉션 및 인덱스 준비 완료: {COLLECTION_NAME}")
+    client.load_collection(collection_name=collection_name)
+    logger.info(f"[Milvus] 컬렉션 로드 완료: {collection_name}")
 
 
 # -------------------------------------------------
@@ -1393,14 +1502,87 @@ def _parse_doc_version(stem: str) -> Tuple[str, int]:
 # 2) 인제스트 (bulk)
 #   - 작업유형별로 동일 청크를 각각 저장(task_type, security_level 분리)
 # -------------------------------------------------
-async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None = None, overlap: int | None = None, target_tasks: list[str] | None = None, collection_name: str = COLLECTION_NAME):
-    # rag_settings 단일 소스
+async def ingest_embeddings(
+    model_key: str | None = None,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
+    target_tasks: list[str] | None = None,
+    collection_name: str = COLLECTION_NAME,
+):
+    """
+    META_JSON을 읽어 추출된 텍스트(.txt)들을 인제스트한다.
+    - VARCHAR(32768) 초과 방지: 본문/표 모두 안전 분할(_split_for_varchar)
+    - table_text는 [[TABLE ...]] 헤더 보존, 이어지는 조각은 [[TABLE_CONT i/n]] 마커 추가
+    - collection_name 파라미터를 끝까지 사용(기본/세션 컬렉션 공용)
+    """
+    # ==== 상수/유틸 ====
+    MILVUS_TEXT_VARCHAR_MAX = 32768
+    _MILVUS_TEXT_SOFT_MAX = 32000
+    TABLE_MARK = "[[TABLE"
+
+    def _split_for_varchar(text: str,
+                           hard_max: int = MILVUS_TEXT_VARCHAR_MAX,
+                           soft_max: int = _MILVUS_TEXT_SOFT_MAX,
+                           table_mark: str = TABLE_MARK) -> list[str]:
+        """
+        VARCHAR 한도 초과 방지용 안전 분할.
+        - 표 마커([[TABLE ...]])가 있으면 첫 청크는 헤더를 유지하고,
+          이후 청크는 [[TABLE_CONT i/n]] 마커를 붙여 이어붙임을 명시.
+        - 문단/개행 경계 우선, 없으면 하드 컷.
+        """
+        if not text or len(text) <= hard_max:
+            return [text]
+
+        header = ""
+        body = text
+        if text.startswith(table_mark):
+            head_end = text.find("]]")
+            if head_end != -1:
+                head_end += 2
+                if head_end < len(text) and text[head_end] == "\n":
+                    head_end += 1
+                header, body = text[:head_end], text[head_end:]
+
+        chunks: list[str] = []
+        i = 0
+        while i < len(body):
+            j = min(i + soft_max, len(body))
+            # 문단 경계(빈 줄) 우선
+            k = body.rfind("\n\n", i, j)
+            if k == -1:
+                # 줄 경계
+                k = body.rfind("\n", i, j)
+            if k == -1 or k < i + int(soft_max * 0.6):
+                # 경계가 너무 앞이면 하드 컷
+                k = j
+            else:
+                k = k + 1  # 경계 포함
+
+            chunk = body[i:k]
+            if len(chunk) > hard_max:
+                chunk = chunk[:hard_max]
+                k = i + len(chunk)
+            chunks.append(chunk)
+            i = k
+
+        if header:
+            out = []
+            total = len(chunks)
+            for idx, c in enumerate(chunks, start=1):
+                if idx == 1:
+                    out.append(header + c)
+                else:
+                    out.append(f"[[TABLE_CONT {idx}/{total}]]\n{c}")
+            return out
+        return chunks
+
+    # ==== 설정 ====
     s = get_vector_settings()
-    MAX_TOKENS = int(s["chunkSize"])
-    OVERLAP = int(s["overlap"])
+    MAX_TOKENS = int(chunk_size if chunk_size is not None else s["chunkSize"])
+    OVERLAP = int(overlap if overlap is not None else s["overlap"])
 
     if not META_JSON_PATH.exists():
-        return {"error": "메타 JSON이 없습니다. 먼저 PDF 추출을 수행하세요."}
+        return {"error": "메타 JSON이 없습니다. 먼저 PDF/문서 추출을 수행하세요."}
 
     # 모델/검색 설정 로드(모델키 우선순위: 인자 > settings)
     settings = get_vector_settings()
@@ -1410,7 +1592,8 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
     emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
 
     client = _client()
-    _ensure_collection_and_index(client, emb_dim, metric="IP")
+    # 꼭 현재 collection_name으로 스키마/인덱스 준비
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split()
@@ -1425,10 +1608,11 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
         return chunks
 
     meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-    # 모든 TASK_TYPES 대상으로 고정
-    tasks = list(TASK_TYPES)
+    tasks = list(target_tasks or TASK_TYPES)
 
     total_inserted = 0
+    BATCH_SIZE = 128
+
     for txt_path in EXTRACTED_TEXT_DIR.rglob("*.txt"):
         rel_txt = txt_path.relative_to(EXTRACTED_TEXT_DIR)
         # 다양한 확장자를 시도하여 메타 키 찾기
@@ -1436,8 +1620,8 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
         meta_key = next((k for k in cands if k in meta), None)
         if not meta_key:
             continue
+
         entry = meta[meta_key]
-        tables = entry.get("tables", [])
         sec_map = entry.get("security_levels", {}) or {}
         doc_id = entry.get("doc_id")
         version = entry.get("version", 0)
@@ -1451,7 +1635,7 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
         # 이전 동일 doc_id/version 데이터 삭제(작업유형 전체)
         try:
             client.delete(
-                COLLECTION_NAME,
+                collection_name=collection_name,
                 filter=f"doc_id == '{doc_id}' && version <= {int(version)}",
             )
         except Exception:
@@ -1461,34 +1645,42 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
         text = txt_path.read_text(encoding="utf-8")
         chunks = chunk_text(text)
 
+        # 표 정보
+        tables = entry.get("tables", [])  # [{page,bbox,text}, ...]
+
         # 작업유형별 삽입
         batch: List[Dict] = []
-        tables = entry.get("tables", [])  # [{page,bbox,text}, ...]
-        TABLE_MARK = "[[TABLE"
-        
+
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
-            
-            # 본문 청크 삽입 (기존 그대로)
+
+            # 1) 본문 청크 삽입(추가 가드로 VARCHAR 분할)
             for idx, c in enumerate(chunks):
-                vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_txt),
-                    "chunk_idx": int(idx),
-                    "task_type": task,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(version),
-                    "text": c,
-                })
-                if len(batch) >= 128:
-                    client.insert(COLLECTION_NAME, batch)
-                    total_inserted += len(batch)
-                    batch = []
-            
-            # ★ 표 청크 삽입 (절대 분할하지 않음)
-            base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
+                for part in _split_for_varchar_bytes(c):
+                    # 최종 방어: utf-8 바이트 길이 체크
+                    if len(part.encode("utf-8")) > 32768:
+                        logger.warning("[ingest] part still too long after split (body), skip")
+                        # 필요하면 더 잘라서 넣고 싶으면 여기서 잘라서 계속 진행해도 됨
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(idx),
+                        "task_type": task,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(version),
+                        "text": part,
+                    })
+                    if len(batch) >= BATCH_SIZE:
+                        client.insert(collection_name, batch)
+                        total_inserted += len(batch)
+                        batch = []
+
+
+            # 2) 표 청크 삽입(길면 안전 분할)
+            base_idx = len(chunks)
             for t_i, t in enumerate(tables):
                 md = (t.get("text") or "").strip()
                 if not md:
@@ -1496,35 +1688,50 @@ async def ingest_embeddings(model_key: str | None = None, chunk_size: int | None
                 page = int(t.get("page", 0))
                 bbox = t.get("bbox") or []
                 bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
-                vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_txt),             # 경로는 동일 txt 기준 유지
-                    "chunk_idx": int(base_idx + t_i), # 본문 뒤로 이어붙임
-                    "task_type": task,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(version),
-                    "text": table_text,               # ★ 표 마커+마크다운
-                })
-                if len(batch) >= 128:
-                    client.insert(COLLECTION_NAME, batch)
-                    total_inserted += len(batch)
-                    batch = []
+                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+
+                for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
+                    if len(part.encode("utf-8")) > 32768:
+                        logger.warning("[ingest] part still too long after split (table), hard-cut")
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                        "task_type": task,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(version),
+                        "text": part,
+                    })
+                    if len(batch) >= BATCH_SIZE:
+                        client.insert(collection_name, batch)
+                        total_inserted += len(batch)
+                        batch = []
+
         if batch:
-            client.insert(COLLECTION_NAME, batch)
+            client.insert(collection_name, batch)
             total_inserted += len(batch)
+            batch = []
 
     try:
-        client.flush(COLLECTION_NAME)
+        client.flush(collection_name)
     except Exception:
         pass
-    _ensure_collection_and_index(client, emb_dim, metric="IP")
+    # 인덱스/로드 재보장(해당 컬렉션으로)
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
+
+    # 변동된 meta(예: doc_id/version 보정) 저장
     META_JSON_PATH.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    return {"message": "Ingest 완료(Milvus Server)", "inserted_chunks": total_inserted}
+
+    return {
+        "message": f"Ingest 완료(Milvus Server, collection={collection_name})",
+        "inserted_chunks": total_inserted,
+    }
+
 
 
 # -------------------------------------------------
@@ -1540,33 +1747,27 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     if not file_path.exists():
         return {"error": f"파일 경로를 찾을 수 없습니다: {file_path}"}
 
-    # 지원되지 않는 확장자 체크
     if _ext(file_path) not in SUPPORTED_EXTS:
         return {"error": f"지원되지 않는 파일 형식입니다: {_ext(file_path)}"}
 
-    # 텍스트 생성 및 메타 갱신
+    # 메타 로드
     if META_JSON_PATH.exists():
         meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
     else:
         meta = {}
 
-    # 다중 확장자 지원으로 텍스트 추출
+    # 추출
     text_all, table_blocks_all = _extract_any(file_path)
 
+    # 보안 레벨 판정(본문+표)
     all_rules = get_security_level_rules_all()
-    # 본문+표 모두 포함해서 보안레벨 판정
     whole_for_level = text_all + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
-    sec_map = {
-        task: _determine_level_for_task(
-            whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})
-        )
-        for task in TASK_TYPES
-    }
+    sec_map = {task: _determine_level_for_task(whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})) for task in TASK_TYPES}
     max_sec = max(sec_map.values()) if sec_map else 1
     sec_folder = f"securityLevel{int(max_sec)}"
 
+    # 보관 및 텍스트 저장
     rel_file = Path(sec_folder) / file_path.name
-    # 저장 경로: local_data(원본 파일 복사) + extracted_texts(텍스트)
     (LOCAL_DATA_ROOT / rel_file).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(file_path, LOCAL_DATA_ROOT / rel_file)
     txt_path = EXTRACTED_TEXT_DIR / rel_file.with_suffix(".txt")
@@ -1581,23 +1782,22 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         "security_levels": sec_map,
         "doc_id": doc_id,
         "version": ver,
-        "tables": table_blocks_all or [],  # ★ 표 정보 추가
-        "sourceExt": _ext(file_path),  # 원본 확장자 기록
+        "tables": table_blocks_all or [],
+        "sourceExt": _ext(file_path),
     }
     META_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    META_JSON_PATH.write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 인제스트(선택 작업유형)
+    # 인제스트
     settings = get_vector_settings()
     tok, model, device = _load_embedder(settings["embeddingModel"])
     emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
     client = _client()
-    _ensure_collection_and_index(client, emb_dim, metric="IP")
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=COLLECTION_NAME)
 
     s = get_vector_settings()
     MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
+
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split()
         chunks: List[str] = []
@@ -1612,88 +1812,77 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
     # 기존 삭제
     try:
-        client.delete(
-            COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}"
-        )
+        client.delete(COLLECTION_NAME, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
     except Exception:
         pass
 
     tasks = req.task_types or list(TASK_TYPES)
     chunks = chunk_text(text_all)
     batch, cnt = [], 0
-    TABLE_MARK = "[[TABLE"
-    
+
     for task in tasks:
         lvl = int(sec_map.get(task, 1))
-        
-        # 본문 청크 삽입
+
+        # 본문: VARCHAR 안전 분할
         for idx, c in enumerate(chunks):
-            vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
-            batch.append({
-                "embedding": vec.tolist(),
-                "path": str(rel_file.with_suffix(".txt")),
-                "chunk_idx": int(idx),
-                "task_type": task,
-                "security_level": lvl,
-                "doc_id": str(doc_id),
-                "version": int(ver),
-                "text": c,
-            })
-            if len(batch) >= 128:
-                client.insert(COLLECTION_NAME, batch)
-                cnt += len(batch)
-                batch = []
-        
-        # ★ 표 청크 삽입 (절대 분할하지 않음)
-        base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
-        for t_i, t in enumerate(table_blocks_all):
+            for part in _split_for_varchar_bytes(c):
+                if len(part.encode("utf-8")) > 32768:
+                    part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                batch.append({
+                    "embedding": vec.tolist(),
+                    "path": str(rel_file.with_suffix(".txt")),
+                    "chunk_idx": int(idx),
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(ver),
+                    "text": part,
+                })
+                if len(batch) >= 128:
+                    client.insert(COLLECTION_NAME, batch)
+                    cnt += len(batch)
+                    batch = []
+
+        # 표: VARCHAR 안전 분할
+        base_idx = len(chunks)
+        for t_i, t in enumerate(table_blocks_all or []):
             md = (t.get("text") or "").strip()
             if not md:
                 continue
             page = int(t.get("page", 0))
             bbox = t.get("bbox") or []
             bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-            table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
-            vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
-            batch.append({
-                "embedding": vec.tolist(),
-                "path": str(rel_file.with_suffix(".txt")),
-                "chunk_idx": int(base_idx + t_i),
-                "task_type": task,
-                "security_level": lvl,
-                "doc_id": str(doc_id),
-                "version": int(ver),
-                "text": table_text,  # ★ 표 마커+마크다운
-            })
-            if len(batch) >= 128:
-                client.insert(COLLECTION_NAME, batch)
-                cnt += len(batch)
-                batch = []
+            table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+
+            for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
+                if len(part.encode("utf-8")) > 32768:
+                    part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                batch.append({
+                    "embedding": vec.tolist(),
+                    "path": str(rel_file.with_suffix(".txt")),
+                    "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": str(doc_id),
+                    "version": int(ver),
+                    "text": part,
+                })
+                if len(batch) >= 128:
+                    client.insert(COLLECTION_NAME, batch)
+                    cnt += len(batch)
+                    batch = []
+
     if batch:
         client.insert(COLLECTION_NAME, batch)
         cnt += len(batch)
-
-    if req.workspace_id is not None and insert_workspace_document:
-        try:
-            insert_workspace_document(
-                doc_id=str(doc_id),
-                filename=rel_file.name,
-                docpath=str(rel_file),
-                workspace_id=int(req.workspace_id),
-                metadata={
-                    "securityLevels": sec_map,
-                    "chunks": int(cnt),
-                    "isUserUpload": True,
-                },
-            )
-        except Exception:
-            pass
 
     try:
         client.flush(COLLECTION_NAME)
     except Exception:
         pass
-    _ensure_collection_and_index(client, emb_dim, metric="IP")
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=COLLECTION_NAME)
 
     return {
         "message": f"단일 파일 인제스트 완료(Milvus Server) - {_ext(file_path)}",
@@ -1702,6 +1891,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         "chunks": cnt,
         "sourceExt": _ext(file_path),
     }
+
 
 
 # -------------------------------------------------
@@ -2005,7 +2195,6 @@ async def delete_db():
         client.drop_collection(c)
     return {"message": "삭제 완료(Milvus Server)", "dropped_collections": cols}
 
-
 async def list_indexed_files(
     limit: int = 16384,
     offset: int = 0,
@@ -2016,6 +2205,12 @@ async def list_indexed_files(
     client = _client()
     if COLLECTION_NAME not in client.list_collections():
         return []
+
+    # 메타 로드(원본 확장자 복원용)
+    try:
+        meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
 
     flt = ""
     if task_type and task_type in TASK_TYPES:
@@ -2032,15 +2227,12 @@ async def list_indexed_files(
     except Exception:
         rows = []
 
-    counts: Dict[Tuple[str, str], int] = defaultdict(int)  # (path, task_type) -> chunks
+    counts: Dict[Tuple[str, str], int] = defaultdict(int)
     level_map: Dict[Tuple[str, str], int] = {}
     for r in rows:
         path = r.get("path") if isinstance(r, dict) else r["path"]
         ttype = r.get("task_type") if isinstance(r, dict) else r["task_type"]
-        lvl = int(
-            (r.get("security_level") if isinstance(r, dict) else r["security_level"])
-            or 1
-        )
+        lvl = int((r.get("security_level") if isinstance(r, dict) else r["security_level"]) or 1)
         key = (path, ttype)
         counts[key] += 1
         level_map.setdefault(key, lvl)
@@ -2048,8 +2240,20 @@ async def list_indexed_files(
     items = []
     for (path, ttype), cnt in counts.items():
         txt_rel = Path(path)
-        pdf_rel = txt_rel.with_suffix(".pdf")
-        file_name = pdf_rel.name
+
+        # 메타에서 원래 확장자를 복원
+        cands = [txt_rel.with_suffix(ext).as_posix() for ext in SUPPORTED_EXTS]
+        meta_key = next((k for k in cands if k in meta), None)
+        if meta_key:
+            source_ext = meta.get(meta_key, {}).get("sourceExt") or Path(meta_key).suffix
+            orig_rel = txt_rel.with_suffix(source_ext)
+        else:
+            # 폴백(구버전 데이터): pdf 가정
+            orig_rel = txt_rel.with_suffix(".pdf")
+
+        file_name = orig_rel.name
+        file_path = str(orig_rel)
+
         txt_abs = EXTRACTED_TEXT_DIR / txt_rel
         try:
             stat = txt_abs.stat()
@@ -2062,7 +2266,7 @@ async def list_indexed_files(
             {
                 "taskType": ttype,
                 "fileName": file_name,
-                "filePath": str(pdf_rel),
+                "filePath": file_path,
                 "chunkCount": int(cnt),
                 "indexedAt": indexed_at,
                 "fileSize": size,
@@ -2074,7 +2278,6 @@ async def list_indexed_files(
         q = str(query)
         items = [it for it in items if q in it["fileName"]]
     return items
-
 
 async def delete_files_by_names(file_names: List[str], task_type: Optional[str] = None, collection_name: str = COLLECTION_NAME):
     """
@@ -2254,17 +2457,10 @@ async def drop_test_session(sid: str) -> Dict:
 
 # --- add: ingest_test_pdfs ---
 async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[List[str]] = None):
-    """
-    업로드된 파일들을 세션 전용 컬렉션에 인제스트.
-    다중 확장자 지원 (pdf, txt, docx, pptx, csv, xlsx, xls, doc, ppt)
-    텍스트는 EXTRACTED_TEXT_DIR/__sessions__/{sid}/securityLevelN/ 아래에 저장하여
-    기존 _load_snippet 경로 로직을 그대로 활용.
-    """
     meta = get_test_session(sid)
     if not meta:
         return {"error": "invalid sid"}
 
-    # 설정/모델 로드
     settings = get_vector_settings()
     eff_model_key = settings["embeddingModel"]
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
@@ -2274,8 +2470,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     coll = meta.get("collection") or _session_collection_name(sid)
     _ensure_collection_and_index_for(client, collection_name=coll, emb_dim=emb_dim, metric="IP")
 
-    s = get_vector_settings()
-    MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
+    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
 
     def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
         words = text.split()
@@ -2289,10 +2484,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
             start += max_tokens - overlap
         return chunks
 
-    # 보안 레벨 규칙
     all_rules = get_security_level_rules_all()
-
-    # 세션 텍스트 루트
     sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
     sess_txt_root.mkdir(parents=True, exist_ok=True)
 
@@ -2300,95 +2492,92 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     total = 0
 
     for p in pdf_paths:
-        p = str(p)
-        file_path = Path(p)
-        
-        # 지원되지 않는 확장자는 건너뛰기
+        file_path = Path(str(p))
         if _ext(file_path) not in SUPPORTED_EXTS:
             logger.warning(f"[test-ingest] Unsupported file type: {file_path}")
             continue
-            
+
         try:
-            # 다중 확장자 지원으로 텍스트 추출
             file_text, table_blocks_all = _extract_any(file_path)
-        except Exception as e:
+        except Exception:
             logger.exception("[test-ingest] read failed: %s", p)
             continue
 
-        # 작업유형별 보안 레벨 산정 (본문+표 모두 포함)
         whole_for_level = file_text + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
         sec_map = {t: _determine_level_for_task(whole_for_level, all_rules.get(t, {"maxLevel": 1, "levels": {}})) for t in TASK_TYPES}
         max_sec = max(sec_map.values()) if sec_map else 1
         sec_folder = f"securityLevel{int(max_sec)}"
 
-        # 세션 텍스트 파일 저장 (EXTRACTED_TEXT_DIR 기준 상대 경로 구성)
-        # 확장자를 .txt로 통일
-        rel_txt = Path("__sessions__") / sid / sec_folder / Path(p).with_suffix(".txt").name
+        rel_txt = Path("__sessions__") / sid / sec_folder / file_path.with_suffix(".txt").name
         abs_txt = EXTRACTED_TEXT_DIR / rel_txt
         abs_txt.parent.mkdir(parents=True, exist_ok=True)
         abs_txt.write_text(file_text, encoding="utf-8")
 
-        # doc_id/version 유추
-        stem = Path(p).stem
+        stem = file_path.stem
         doc_id, ver = _parse_doc_version(stem)
 
-        # 기존 동일 문서 제거
         try:
             client.delete(coll, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
         except Exception:
             pass
 
-        # 청크 → 삽입
         chunks = chunk_text(file_text)
         batch: List[Dict] = []
-        TABLE_MARK = "[[TABLE"
-        
+
         for t in tasks:
             lvl = int(sec_map.get(t, 1))
-            
-            # 본문 청크 삽입
+
+            # 본문: VARCHAR 안전 분할
             for idx, c in enumerate(chunks):
-                vec = _embed_text(tok, model, device, c, max_len=MAX_TOKENS)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_txt.as_posix()),
-                    "chunk_idx": int(idx),
-                    "task_type": t,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(ver),
-                    "text": c,
-                })
-                if len(batch) >= 128:
-                    client.insert(coll, batch)
-                    total += len(batch)
-                    batch = []
-            
-            # ★ 표 청크 삽입 (절대 분할하지 않음)
-            base_idx = len(chunks)  # 표는 본문 뒤 인덱스부터
-            for t_i, table in enumerate(table_blocks_all):
+                for part in _split_for_varchar_bytes(c):
+                    if len(part.encode("utf-8")) > 32768:
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(idx),
+                        "task_type": t,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(ver),
+                        "text": part,
+                    })
+                    if len(batch) >= 128:
+                        client.insert(coll, batch)
+                        total += len(batch)
+                        batch = []
+
+            # 표: VARCHAR 안전 분할
+            base_idx = len(chunks)
+            for t_i, table in enumerate(table_blocks_all or []):
                 md = (table.get("text") or "").strip()
                 if not md:
                     continue
                 page = int(table.get("page", 0))
                 bbox = table.get("bbox") or []
                 bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                table_text = f"{TABLE_MARK} page={page} bbox={bbox_str}]]\n{md}"
-                vec = _embed_text(tok, model, device, table_text, max_len=MAX_TOKENS)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_txt.as_posix()),
-                    "chunk_idx": int(base_idx + t_i),
-                    "task_type": t,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(ver),
-                    "text": table_text,  # ★ 표 마커+마크다운
-                })
-                if len(batch) >= 128:
-                    client.insert(coll, batch)
-                    total += len(batch)
-                    batch = []
+                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+
+                for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
+                    if len(part.encode("utf-8")) > 32768:
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                        "task_type": t,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(ver),
+                        "text": part,
+                    })
+                    if len(batch) >= 128:
+                        client.insert(coll, batch)
+                        total += len(batch)
+                        batch = []
+
         if batch:
             client.insert(coll, batch)
             total += len(batch)
@@ -2400,6 +2589,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     _ensure_collection_and_index_for(client, collection_name=coll, emb_dim=emb_dim, metric="IP")
 
     return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": total}
+
 
 # --- add: search_documents_test ---
 async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None) -> Dict:
