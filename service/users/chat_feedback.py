@@ -147,11 +147,13 @@ def save_chat_feedback(
     # 6. DB에 메타데이터 저장 또는 업데이트
     existing = get_feedback_by_file_info(category, subcategory, prompt_id)
     
+    # 이미 앞에서 피드백이 저장되어있다면 에러를띄움.
     if existing:
-        logger.debug(f"존재하는 피드백입니다. 업데이트 합니다.: {existing}")
+        logger.debug(f"존재하는 피드백입니다. 업데이트합니다.")
         # 기존 레코드 업데이트 (updated_at 갱신)
         update_feedback_metadata(existing["id"])
         feedback_id = existing["id"]
+        update_feedback_to_chat_worksapce(chat_id, feedback_id)
     else:
         logger.debug(f"새로운 피드백입니다. 저장합니다.: {existing}")
         # 새 레코드 생성
