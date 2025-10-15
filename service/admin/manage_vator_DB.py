@@ -236,52 +236,79 @@ def _ext(p: Path) -> str:
     """파일 확장자 반환 (소문자)"""
     return p.suffix.lower()
 
-
 def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
-    """PDF에서 표와 본문을 분리 추출 (특수문자 정리 포함)"""
+    """PDF에서 표와 본문을 분리 추출 (특수문자 정리 포함, 안전한 제외 로직)"""
     import fitz  # PyMuPDF
     doc = fitz.open(pdf_path)
     page_texts: list[str] = []
     table_blocks_all: list[dict] = []
-    
+
     for page_idx, page in enumerate(doc, start=1):
-        # 표 찾기
+        # 1) 표 탐지: lines 전략 → 실패 시 text 전략 폴백
+        tables = []
         try:
-            tf = page.find_tables()
+            tf = page.find_tables(strategy="lines")
             tables = getattr(tf, "tables", []) if tf else []
+            if not tables:
+                tf2 = page.find_tables(strategy="text")
+                tables = getattr(tf2, "tables", []) if tf2 else []
         except Exception:
             tables = []
-        
-        table_rects = []
+
+        # 2) 표 rect를 본문 제외 목록에 넣을지 말지 '마크다운 추출 성공'에 따라 결정
+        table_rects_for_exclusion = []
+
         for t in tables:
             rect = fitz.Rect(*t.bbox)
-            table_rects.append(rect)
+            md = ""
             try:
+                # 우선 마크다운 시도
                 md = t.to_markdown()
             except Exception:
+                md = ""
+
+            if not md:
+                # 행렬 추출 폴백
                 try:
-                    rows = t.extract()
-                    md = "\n".join("| " + " | ".join(_clean_text(c or "")) + " |" for c in rows)
+                    rows = t.extract()  # 2D list (환경/버전에 따라 미지원 가능)
+                    if rows:
+                        md = "\n".join("| " + " | ".join(_clean_text(c or "") for c in row) + " |"
+                                       for row in rows)
                 except Exception:
                     md = ""
+
             md = _clean_text(md)
             if md:
+                # 마크다운을 얻은 표만 table_blocks에 넣고, 해당 영역을 본문에서 제외
                 table_blocks_all.append({
                     "page": int(page_idx),
                     "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
                     "text": md,
                 })
-        
-        # 본문에서 표 영역 제외
+                table_rects_for_exclusion.append(rect)
+            # md가 비면: 본문에서 제외하지 않음(그대로 본문 텍스트로 흘려 보냄)
+
+        # 3) 본문 텍스트는 '마크다운 추출에 성공한 표(rect)와 겹치는 블록만 제외'
         parts = []
-        for x0, y0, x1, y1, btxt, *_ in page.get_text("blocks"):
-            rect = fitz.Rect(x0, y0, x1, y1)
-            if any(rect.intersects(r) for r in table_rects):
-                continue
-            if btxt and btxt.strip():
-                parts.append(_clean_text(btxt))
+        try:
+            for x0, y0, x1, y1, btxt, *_ in page.get_text("blocks"):
+                rect = fitz.Rect(x0, y0, x1, y1)
+                # 표 마크다운을 얻은 영역과 겹치면 제외
+                if any(rect.intersects(r) for r in table_rects_for_exclusion):
+                    continue
+                if btxt and btxt.strip():
+                    parts.append(_clean_text(btxt))
+        except Exception:
+            # blocks 추출이 실패하면 페이지 전체 텍스트로 폴백
+            try:
+                whole = page.get_text()
+                if whole:
+                    parts.append(_clean_text(whole))
+            except Exception:
+                pass
+
         page_texts.append("\n".join(p for p in parts if p))
-    
+
     pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
     return pdf_text, table_blocks_all
 
