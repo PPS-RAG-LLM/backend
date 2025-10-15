@@ -8,6 +8,7 @@ from config import config
 from utils import logger, free_torch_memory
 import torch
 
+
 logger = logger(__name__)
 
 @lru_cache(maxsize=2)
@@ -50,6 +51,7 @@ def stream_chat(messages, **gen_kwargs):
         tokenize=True,
         add_generation_prompt=True,
         return_tensors="pt",
+        
     ).to(model.device)
 
     defaults = config.get("default", {}) or {}

@@ -56,12 +56,13 @@ def hf_factory(model_key: str) -> Streamer:
     # 모델 패밀리에 따라 적절한 Streamer 생성
     if model_key.startswith("Qwen3") or model_key.startswith("Qwen2"):
         logger.info(f"Alibaba | Qwen Model")
-        # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
+        local_path = "/home/work/CoreIQ/backend/storage/model/Qwen3-8B"
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("qwen_2.5_vl"):
         return _Wrap(lambda messages, **kw: qwen_vl_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("gpt_oss") or model_key.startswith("gpt-oss") :
         logger.info(f"gpt_oss_20b")
+        local_path = "/home/work/CoreIQ/backend/storage/model/gpt-oss-20b"
         return _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=str(local_path), **kw))
     else:
         logger.error(f"해당모델 이름으로 시작하는 로직이 없음. {model_key}")
