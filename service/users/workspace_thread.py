@@ -6,7 +6,8 @@ from repository.workspace import get_workspace_id_by_slug_for_user
 from repository.workspace_thread import (
     get_thread_by_slug_for_user,
     update_thread_name_by_slug_for_user,
-    create_default_thread
+    create_default_thread,
+    delete_workspace_thread_by_slug
 )
 
 log = logger(__name__)
@@ -63,4 +64,22 @@ def create_new_workspace_thread_for_workspace(user_id: int, slug: str, name: str
             "workspaceId": thread["workspace_id"],
         },
         "message": "새로운 스레드가 생성되었습니다",
+    }
+
+
+def delete_workspace_thread_for_workspace(user_id: int, slug: str, thread_slug: str) -> Dict[str, Any]:
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
+    if not workspace_id:
+        raise NotFoundError("Workspace를 찾을 수 없습니다")
+
+    thread = get_thread_by_slug_for_user(user_id, thread_slug)
+    if not thread or thread.get("workspace_id") != workspace_id:
+        raise NotFoundError("Thread를 찾을 수 없습니다")
+
+    deleted = delete_workspace_thread_by_slug(user_id, thread_slug)
+    if not deleted:
+        raise NotFoundError("Thread 삭제에 실패했습니다")
+
+    return {
+        "message": "Thread가 삭제되었습니다",
     }

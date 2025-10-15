@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter,Path,Query,Body
 from service.users.chat_history import list_thread_chats_for_workspace
-from service.users.workspace_thread import update_thread_name_for_workspace, create_new_workspace_thread_for_workspace
+from service.users.workspace_thread import update_thread_name_for_workspace, create_new_workspace_thread_for_workspace, delete_workspace_thread_for_workspace
 from utils import logger
 from errors import BadRequestError
 
@@ -82,3 +82,15 @@ def create_new_workspace_thread(
     )
     return result
 
+@thread_router.delete("/{slug}/thread/{thread_slug}/delete", summary="스레드 삭제")
+def delete_workspace_thread(
+    slug: str = Path(..., description="워크스페이스 슬러그"),
+    thread_slug: str = Path(..., description="쓰레드 슬러그"),
+):
+    user_id = 3
+    result = delete_workspace_thread_for_workspace(
+        user_id=user_id,
+        slug=slug,
+        thread_slug=thread_slug,
+    )
+    return result

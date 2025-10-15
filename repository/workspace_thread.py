@@ -1,3 +1,4 @@
+from sqlalchemy.sql import delete
 from utils import logger
 from utils.database import get_session
 from utils.time import now_kst, to_kst_string
@@ -158,3 +159,10 @@ def update_thread_name_by_slug_for_user(
             logger.error(f"thread update failed: {exc}")
             session.rollback()
             raise DatabaseError(f"thread update failed: {exc}") from exc
+
+def delete_workspace_thread_by_slug(user_id: int, thread_slug: str) -> bool:
+    with get_session() as session:
+        stmt = delete(WorkspaceThread).where(WorkspaceThread.user_id == user_id, WorkspaceThread.slug == thread_slug)
+        result = session.execute(stmt)
+        session.commit()
+        return result.rowcount > 0
