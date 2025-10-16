@@ -1,8 +1,6 @@
 """Summary 카테고리 스트리밍 로직"""
 from typing import Dict, Any, Generator, List
 from errors import BadRequestError
-from repository.documents import list_doc_ids_by_workspace
-from repository.workspace import get_workspace_id_by_slug_for_user
 from utils import logger
 from .common import (
     preflight_stream_chat_for_workspace,
@@ -11,7 +9,7 @@ from .common import (
     resolve_runner,
     stream_and_persist,
 )
-from .summary_doc.document_loader import get_full_documents_for_summary
+from ..documents.full_document_loader import get_full_documents_texts
 
 logger = logger(__name__)
 
@@ -89,7 +87,7 @@ def stream_chat_for_summary(
     runner = resolve_runner(body["provider"], body["model"])
 
     # 4. 워크스페이스 ID 조회
-    parsed_documents = get_full_documents_for_summary(ws["id"])
+    parsed_documents = get_full_documents_texts(ws["id"])
     doc_ids = [doc["doc_id"] for doc in parsed_documents]
 
     # 5. 메시지 구성 (originalText + documents + userPrompt 결합)

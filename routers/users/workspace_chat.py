@@ -9,7 +9,6 @@ from service.users.chat import (
     stream_chat_for_summary,
 )
 from service.commons.doc_gen_templates import get_doc_gen_template
-from service.users.chat.common.validators import preflight_stream_chat_for_workspace
 from utils import logger
 from errors import BadRequestError
 import time, json
@@ -150,29 +149,40 @@ def doc_gen_stream_endpoint(
     slug: str = Path(..., description="워크스페이스 슬러그"),
     body: DocGenRequest = Body(..., description="문서 생성 요청 (템플릿/변수/요청사항)"),
 ):
+    from repository.workspace import get_workspace_id_by_slug_for_user
     user_id = 3
     tmpl = get_doc_gen_template(int(body.templateId))
     if not tmpl:
         raise BadRequestError("유효하지 않은 templateId 입니다.")
     allowed_keys = {str(v.get("key") or "") for v in (tmpl.get("variables") or []) if v.get("key")}
-    variables = [item.key.strip() for item in (body.variables or []) if (item.key or "").strip()]
+    variables = [(item.key.strip(), item.value) for item in (body.variables or []) if (item.key or "").strip()]
     provided_keys = {key for key, _ in variables}
     missing = {key for key in allowed_keys if key and key not in provided_keys}
     if missing:
         raise BadRequestError(f"필수 변수 누락: {sorted(missing)}")
     filtered_vars = {key: value for key, value in variables if key in allowed_keys}
 
+    logger.debug(f"allowed_keys: {allowed_keys}")
+    logger.debug(f"provided_keys: {provided_keys}")
+    logger.debug(f"missing: {missing}")
+    logger.debug(f"filtered_vars: {filtered_vars}")
+    logger.debug(f"variables: {variables}")
+
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
+
+    # Preflight 검증
+    ws = get_workspace_by_workspace_id(user_id, workspace_id)
+    
     message = (body.userPrompt or "").strip() or "요청된 템플릿에 따라 문서를 작성해 주세요."
     gen = stream_chat_for_doc_gen(
         user_id=user_id,
-        slug=slug,
+        ws=ws,
         category="doc_gen",
         body={
             "provider": body.provider,
             "model": body.model,
             "message": message,
             "mode": "chat",
-            "attachments": [a.model_dump() for a in body.attachments],
             "systemPrompt": body.systemPrompt,
             "templateId": body.templateId,
             "templateVariables": filtered_vars,

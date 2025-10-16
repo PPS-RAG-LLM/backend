@@ -8,7 +8,7 @@ import json
 logger = logger(__name__)
 
 
-def get_full_documents_for_summary(workspace_id: int) -> List[Dict[str, Any]]:
+def get_full_documents_texts(workspace_id: int) -> List[Dict[str, Any]]:
     """
    Summary용으로 워크스페이스에 등록된 문서의 전체 텍스트를 가져옴
     
