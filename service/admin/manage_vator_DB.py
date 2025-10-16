@@ -2962,3 +2962,96 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
         pass
 
     return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file, "sid": sid}
+# === 새 API: 키워드 없이 레벨 오버라이드 후 인제스트 ===
+class OverrideLevelsRequest(BaseModel):
+    """
+    키워드 규칙/자동판정 무시하고, 지정 레벨로 강제 인제스트
+    - files: 대상 파일 목록(이름 또는 경로). 비우면 META의 모든 파일 대상으로 처리
+    - level_for_tasks: {"qna":2,"summary":1,"doc_gen":3} 처럼 작업유형별 레벨 지정
+    - level: 단일 숫자(모든 작업유형 동일 레벨로 세팅). level_for_tasks가 우선
+    - tasks: 작업유형 제한 (미지정 시 모든 TASK_TYPES)
+    - collection_name: 인제스트 대상 컬렉션(미지정 시 기본 COLLECTION_NAME)
+    """
+    files: Optional[List[str]] = None
+    level_for_tasks: Optional[Dict[str, int]] = None
+    level: Optional[int] = None
+    tasks: Optional[List[str]] = None
+    collection_name: Optional[str] = None
+
+async def override_levels_and_ingest(req: OverrideLevelsRequest):
+    # 0) META 존재 체크
+    if not META_JSON_PATH.exists():
+        return {"error": "메타 JSON이 없습니다. 먼저 /v1/admin/vector/extract 를 수행하세요."}
+
+    # 1) 요청 정규화
+    target_tasks = [t for t in (req.tasks or TASK_TYPES) if t in TASK_TYPES]
+    if not target_tasks:
+        return {"error": "유효한 작업유형이 없습니다. (허용: doc_gen|summary|qna)"}
+
+    level_map = dict(req.level_for_tasks or {})
+    if not level_map and req.level is not None:
+        # 단일 레벨을 모든 대상 작업유형에 적용
+        for t in target_tasks:
+            level_map[t] = int(max(1, req.level))
+    # 레벨 미제공 방지
+    if not level_map:
+        return {"error": "적용할 보안레벨이 없습니다. level 또는 level_for_tasks 를 지정하세요."}
+
+    # 2) META 로드
+    meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
+
+    # 3) 파일 필터 만들기 (이름, 경로, 확장자 유무 모두 허용)
+    def _to_keyset(files: List[str]) -> set:
+        out = set()
+        for f in files:
+            p = Path(f)
+            out.add(p.name)       # 파일명
+            out.add(str(p))       # 경로 문자열
+            out.add(p.stem)       # 확장자 제거명(문서ID로 쓰는 경우 대응)
+        return out
+
+    targets_all = list(meta.keys())
+    if req.files:
+        keyset = _to_keyset(req.files)
+        targets = []
+        for k in targets_all:
+            # k 예: "securityLevel1/문서명.pdf"
+            name = Path(k).name
+            stem = Path(k).stem
+            if (k in keyset) or (name in keyset) or (stem in keyset):
+                targets.append(k)
+    else:
+        targets = targets_all
+
+    if not targets:
+        return {"updated": 0, "ingested": 0, "message": "대상 파일이 없습니다."}
+
+    # 4) 대상들의 security_levels를 강제로 덮어쓰기
+    updated = 0
+    for k in targets:
+        entry = meta.get(k) or {}
+        sec = entry.get("security_levels") or {}
+        for t in target_tasks:
+            lv = int(max(1, level_map.get(t, sec.get(t, 1))))
+            sec[t] = lv
+        entry["security_levels"] = sec
+        meta[k] = entry
+        updated += 1
+
+    # 5) META 저장
+    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 6) 실제 인제스트 실행 (선택한 작업유형만)
+    coll = req.collection_name or COLLECTION_NAME
+    res = await ingest_embeddings(
+        model_key=None,                 # 활성 모델 사용
+        chunk_size=None, overlap=None,  # 기존 설정 사용
+        target_tasks=target_tasks,
+        collection_name=coll,
+    )
+    return {
+        "message": "레벨 오버라이드 후 인제스트 완료",
+        "collection": coll,
+        "updated_meta_entries": updated,
+        "inserted_chunks": int(res.get("inserted_chunks", 0)),
+    }

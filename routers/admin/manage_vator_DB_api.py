@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Literal
 
 from service.admin.manage_vator_DB import (
+    OverrideLevelsRequest,
+    override_levels_and_ingest,
     # 설정
     set_vector_settings,
     get_vector_settings,
@@ -316,3 +318,12 @@ async def rag_delete_db_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[delete-all] from {request.client.host}")
     return await delete_db()
  
+@router.post("/v1/admin/vector/override-levels-upload",
+    summary="--키워드 규칙 무시하고 지정한 레벨로 보안등급을 강제로 세팅한 뒤 인제스트합니다.(files 미지정: META의 모든 파일이 대상, level_for_tasks 또는 level 중 하나는 필수)"
+    )
+async def override_levels_upload(req: OverrideLevelsRequest):
+    """
+    - files 미지정: META의 모든 파일이 대상
+    - level_for_tasks 또는 level 중 하나는 필수
+    """
+    return await override_levels_and_ingest(req)
