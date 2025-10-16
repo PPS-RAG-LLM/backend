@@ -1,10 +1,9 @@
 """
 # 다운로드
 
-python scripts/download_hf_models.py --base_dir /storage/model --hf_token ""
+python scripts/download_hf_models.py --base_dir /home/work/CoreIQ/backend/storage/model --hf_token ""
 
 """
-
 # download_hf_models.py
 from __future__ import annotations
 import os
@@ -55,7 +54,7 @@ def download_default_two(
     local_files_only: bool = False,
 ) -> dict[str, str]:
     """
-    본 요청의 두 모델을 내려받음.
+    본 요청의 모델들을 내려받음.
     include 패턴은 안전하게 필수 파일만 지정(용량 절감).
     """
     plans = [
@@ -97,7 +96,22 @@ def download_default_two(
                 "chat_template*",            # 존재 시
             ],
         },
+        # === 추가: Qwen/Qwen3-14B ===
+        {
+            "model_id": "Qwen/Qwen3-14B",
+            "dst": os.path.join(base_dir, "Qwen3-14B"),
+            "include": [
+                "*.safetensors",
+                "*.json",
+                "tokenizer.*",
+                "vocab.json",
+                "merges.txt",
+                "special_tokens_map.json",
+                "chat_template*",
+            ],
+        },
     ]
+
     out = {}
     for p in plans:
         out[p["model_id"]] = hf_download(

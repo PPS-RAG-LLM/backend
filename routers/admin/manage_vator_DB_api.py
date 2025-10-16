@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Literal
 
 from service.admin.manage_vator_DB import (
+    OverrideLevelsRequest,
+    override_levels_and_ingest,
     # 설정
     set_vector_settings,
     get_vector_settings,
@@ -33,7 +35,7 @@ from service.admin.manage_vator_DB import (
 )
 router = APIRouter(
     prefix="/v1",
-    tags=["Admin Document"],
+    tags=["Admin Document - RAG"],
     responses={
         status.HTTP_200_OK: {"description": "Successful Response"},
         status.HTTP_401_UNAUTHORIZED: {"description": "Unauthorized"},
@@ -171,7 +173,7 @@ class SecurityLevelSingleBody(BaseModel):
 
 @router.post(
     "/admin/vector/security-levels/{taskType}",
-    summary="작업유형별 보안레벨 규칙 '개별' 저장(doc_gen/summary/qna 중 하나)",
+    summary="1. 작업유형별 보안레벨 규칙 '개별' 저장(doc_gen/summary/qna 중 하나)",
     status_code=status.HTTP_200_OK,
 )
 async def set_security_levels_one(taskType: TaskLiteral, body: SecurityLevelSingleBody):
@@ -210,7 +212,7 @@ async def upload_raw_file(files: List[UploadFile] = File(...)):
     return {"savedPaths": saved_paths, "count": len(saved_paths)}
 
 
-@router.post("/admin/vector/extract",summary="3. row_data의 PDF를 텍스트로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
+@router.post("/admin/vector/extract",summary="3. [전처리 부분] row_data의 다양한 문서를 텍스트/표로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
 async def rag_extract_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
     return await extract_pdfs()
@@ -316,3 +318,12 @@ async def rag_delete_db_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[delete-all] from {request.client.host}")
     return await delete_db()
  
+@router.post("/v1/admin/vector/override-levels-upload",
+    summary="--키워드 규칙 무시하고 지정한 레벨로 보안등급을 강제로 세팅한 뒤 인제스트합니다.(files 미지정: META의 모든 파일이 대상, level_for_tasks 또는 level 중 하나는 필수)"
+    )
+async def override_levels_upload(req: OverrideLevelsRequest):
+    """
+    - files 미지정: META의 모든 파일이 대상
+    - level_for_tasks 또는 level 중 하나는 필수
+    """
+    return await override_levels_and_ingest(req)

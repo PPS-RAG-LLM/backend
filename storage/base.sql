@@ -57,7 +57,10 @@ VALUES (1,'huggingface','gpt-oss-20b',0,'./service/storage/model/gpt-oss-20b',
         (3,'huggingface','Qwen3-8B',0,'./service/storage/model/Qwen3-8B',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./service/storage/model/Qwen3-Omni-30B-A3B-Instruct',
-        'qa','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
+        'qa','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        (5,'huggingface','Qwen3-14B',0,'./service/storage/model/Qwen3-14B',
+        'all','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
+        
 
 INSERT INTO
     "rag_settings" (
