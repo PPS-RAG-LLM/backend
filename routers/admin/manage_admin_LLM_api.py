@@ -12,7 +12,7 @@ from service.admin.manage_admin_LLM import (
 
 router = APIRouter(
     prefix="/v1/admin/llm",
-    tags=["Admin LLM"],
+    tags=["Admin LLM load settings"],
     responses={200: {"description": "Success"}},
 )
 

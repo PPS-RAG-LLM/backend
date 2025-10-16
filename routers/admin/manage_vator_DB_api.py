@@ -33,7 +33,7 @@ from service.admin.manage_vator_DB import (
 )
 router = APIRouter(
     prefix="/v1",
-    tags=["Admin Document"],
+    tags=["Admin Document - RAG"],
     responses={
         status.HTTP_200_OK: {"description": "Successful Response"},
         status.HTTP_401_UNAUTHORIZED: {"description": "Unauthorized"},
