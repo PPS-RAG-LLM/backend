@@ -192,7 +192,7 @@ VAL_SESSION_ROOT = (STORAGE_DIR / "val_data").resolve()
 SESSIONS_INDEX_PATH = (VAL_SESSION_ROOT / "_sessions.json").resolve()
 
 # Milvus Server 접속 정보 (환경변수로 오버라이드 가능)
-MILVUS_URI = os.getenv("MILVUS_URI", "http://biz.ppsystem.co.kr:3006")
+MILVUS_URI = os.getenv("MILVUS_URI", "http://remote.biz.ppsystem.co.kr:3006")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", None)  # 예: "root:Milvus" (인증 사용 시)
 COLLECTION_NAME = "pdf_chunks_pro"
 
@@ -236,81 +236,156 @@ def _ext(p: Path) -> str:
     """파일 확장자 반환 (소문자)"""
     return p.suffix.lower()
 
+def _df_to_markdown_repeat_header(df, max_rows=500) -> str:
+    """
+    각 데이터 행 앞에 헤더를 반복해서 출력하는 마크다운 테이블 생성.
+    예)
+      이름 | 나이 | 성
+      기정 | 29  | 남자
+      이름 | 나이 | 성
+      수현 | 26  | 여자
+    """
+    import pandas as pd
+    if isinstance(df, pd.DataFrame) and len(df) > max_rows:
+        df = df.head(max_rows)
+
+    cols = [str(c) for c in df.columns]
+    header = "| " + " | ".join(cols) + " |"
+
+    lines = []
+    for _, row in df.iterrows():
+        lines.append(header)
+        lines.append("| " + " | ".join(_clean_text(str(v)) for v in row.tolist()) + " |")
+    return "\n".join(lines)
+
+
+def _markdown_repeat_header(md: str) -> str:
+    """기존 마크다운 표 문자열에서 데이터 행 앞에 헤더를 반복해 반환."""
+    if not md:
+        return md
+
+    lines = [line for line in md.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return md
+
+    header = lines[0]
+    sep_re = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
+    data_lines: list[str] = []
+    for line in lines[1:]:
+        if sep_re.match(line):
+            continue
+        data_lines.append(line)
+
+    if not data_lines:
+        return md
+
+    out: list[str] = []
+    for dl in data_lines:
+        out.append(header)
+        out.append(dl)
+    return "\n".join(out)
+
+
 def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
-    """PDF에서 표와 본문을 분리 추출 (특수문자 정리 포함, 안전한 제외 로직)"""
+    """
+    PDF에서 본문 텍스트는 PyMuPDF로 추출하고,
+    표는 tabula-py로 추출해 마크다운 테이블로 반환한다.
+    - tabula 가 없거나 Java 미설치 시: 기존 PyMuPDF 표검출(fitz.find_tables)로 폴백
+    - tabula 는 페이지/좌표를 기본 제공하지 않으므로 page=0, bbox=[]
+    """
+    # 1) 본문: PyMuPDF
     import fitz  # PyMuPDF
-    doc = fitz.open(pdf_path)
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception:
+        return "", []  # 열리지 않는 PDF는 빈 결과 반환
+
     page_texts: list[str] = []
-    table_blocks_all: list[dict] = []
-
-    for page_idx, page in enumerate(doc, start=1):
-        # 1) 표 탐지: lines 전략 → 실패 시 text 전략 폴백
-        tables = []
+    for page in doc:
         try:
-            tf = page.find_tables(strategy="lines")
-            tables = getattr(tf, "tables", []) if tf else []
-            if not tables:
-                tf2 = page.find_tables(strategy="text")
-                tables = getattr(tf2, "tables", []) if tf2 else []
-        except Exception:
-            tables = []
-
-        # 2) 표 rect를 본문 제외 목록에 넣을지 말지 '마크다운 추출 성공'에 따라 결정
-        table_rects_for_exclusion = []
-
-        for t in tables:
-            rect = fitz.Rect(*t.bbox)
-            md = ""
-            try:
-                # 우선 마크다운 시도
-                md = t.to_markdown()
-            except Exception:
-                md = ""
-
-            if not md:
-                # 행렬 추출 폴백
-                try:
-                    rows = t.extract()  # 2D list (환경/버전에 따라 미지원 가능)
-                    if rows:
-                        md = "\n".join("| " + " | ".join(_clean_text(c or "") for c in row) + " |"
-                                       for row in rows)
-                except Exception:
-                    md = ""
-
-            md = _clean_text(md)
-            if md:
-                # 마크다운을 얻은 표만 table_blocks에 넣고, 해당 영역을 본문에서 제외
-                table_blocks_all.append({
-                    "page": int(page_idx),
-                    "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
-                    "text": md,
-                })
-                table_rects_for_exclusion.append(rect)
-            # md가 비면: 본문에서 제외하지 않음(그대로 본문 텍스트로 흘려 보냄)
-
-        # 3) 본문 텍스트는 '마크다운 추출에 성공한 표(rect)와 겹치는 블록만 제외'
-        parts = []
-        try:
-            for x0, y0, x1, y1, btxt, *_ in page.get_text("blocks"):
-                rect = fitz.Rect(x0, y0, x1, y1)
-                # 표 마크다운을 얻은 영역과 겹치면 제외
-                if any(rect.intersects(r) for r in table_rects_for_exclusion):
-                    continue
+            blocks = page.get_text("blocks")
+            parts = []
+            for x0, y0, x1, y1, btxt, *_ in blocks:
                 if btxt and btxt.strip():
                     parts.append(_clean_text(btxt))
+            page_texts.append("\n".join(p for p in parts if p))
         except Exception:
-            # blocks 추출이 실패하면 페이지 전체 텍스트로 폴백
-            try:
-                whole = page.get_text()
-                if whole:
-                    parts.append(_clean_text(whole))
-            except Exception:
-                pass
-
-        page_texts.append("\n".join(p for p in parts if p))
-
+            # 페이지 단위 실패는 건너뛰고 계속
+            continue
     pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
-    return pdf_text, table_blocks_all
+
+    # 2) 표: tabula-py 시도 (미설치/미지원이면 폴백)
+    tables_md: list[dict] = []
+    try:
+        import tabula  # requires Java (JRE/JDK)
+
+        # lattice 먼저 시도(선 그려진 표 강함), 실패/무결과면 stream로 재시도
+        dfs = tabula.read_pdf(str(pdf_path), pages="all", multiple_tables=True, lattice=True)
+        if not dfs:
+            dfs = tabula.read_pdf(str(pdf_path), pages="all", multiple_tables=True, stream=True)
+
+        for df in dfs or []:
+            try:
+                md = _df_to_markdown_repeat_header(df)  # 이미 갖고 있는 헬퍼
+                md = _clean_text(md)
+                if md:
+                    tables_md.append({"page": 0, "bbox": [], "text": md})
+            except Exception:
+                continue
+
+        # tabula 결과가 있으면 그걸 사용
+        if tables_md:
+            return pdf_text, tables_md
+
+    except Exception:
+        # tabula 사용 불가(Java 미설치/패키지 미존재/에러)면 아래 폴백으로
+        pass
+
+    # 3) 폴백: PyMuPDF의 간이 표 검출 (기존 방식, 놓치는 표가 있을 수 있음)
+    try:
+        tables_fallback: list[dict] = []
+        doc2 = fitz.open(pdf_path)
+        for page_idx, page in enumerate(doc2, start=1):
+            try:
+                tf = page.find_tables()
+                found = getattr(tf, "tables", []) if tf else []
+            except Exception:
+                found = []
+
+            for t in found:
+                rect = fitz.Rect(*t.bbox)
+                try:
+                    md = t.to_markdown()
+                    md = _markdown_repeat_header(md)
+                except Exception:
+                    # 아주 드문 경우: 셀 추출로 대체
+                    try:
+                        rows = t.extract()
+                        md_lines: list[str] = []
+                        if rows:
+                            header_cells = [_clean_text(str(c or "")) for c in rows[0]]
+                            header_line = "| " + " | ".join(header_cells) + " |"
+                            data_rows = rows[1:] if len(rows) > 1 else []
+                            if data_rows:
+                                for r in data_rows:
+                                    row_line = "| " + " | ".join(_clean_text(str(c or "")) for c in r) + " |"
+                                    md_lines.append(header_line)
+                                    md_lines.append(row_line)
+                            else:
+                                md_lines.append(header_line)
+                        md = "\n".join(md_lines)
+                    except Exception:
+                        md = ""
+                md = _clean_text(md)
+                if md:
+                    tables_fallback.append({
+                        "page": int(page_idx),
+                        "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
+                        "text": md,
+                    })
+        return pdf_text, tables_fallback
+    except Exception:
+        return pdf_text, []
 
 
 def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:

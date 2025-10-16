@@ -75,7 +75,7 @@ os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
 DB_PATH = os.getenv("COREIQ_DB")
 
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
-ACTIVE_PROMPT_CACHE_PREFIX = "active_prompt:"     # active_prompt:qa:report
+
 RAG_TOPK_CACHE_KEY = "rag_topk"
 
 # ===== Pydantic models (변수명/스키마 고정) =====
@@ -164,61 +164,61 @@ def _connect() -> sqlite3.Connection:
     # Delegate to shared database connector (respects config/database paths and pragmas)
     return _get_db()
 # ===== Migration / helpers =====
-def _migrate_llm_models_if_needed():
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    try:
-        cur.execute("PRAGMA table_info(llm_models)")
-        cols = {r[1] for r in cur.fetchall()}  # name is at index 1
-        cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_models'")
-        row = cur.fetchone()
-        ddl = row[0] if row else ""
-        need_sub = "subcategory" not in cols
-        need_all = ("CHECK" in ddl) and ("'all'" not in ddl)
-        if not (need_sub or need_all):
-            return
-        cur.execute("PRAGMA foreign_keys=off")
-        cur.execute(
-            """
-            CREATE TABLE llm_models__new(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              provider TEXT NOT NULL,
-              name TEXT UNIQUE NOT NULL,
-              revision INTEGER,
-              model_path TEXT,
-              category TEXT NOT NULL CHECK (category IN ('qa','doc_gen','summary','all')),
-              subcategory TEXT,
-              type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
-              is_default BOOLEAN NOT NULL DEFAULT 0,
-              is_active BOOLEAN NOT NULL DEFAULT 1,
-              trained_at DATETIME,
-              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        # Copy common columns
-        keep = [
-            "id","provider","name","revision","model_path","category","type","is_default","is_active","trained_at","created_at"
-        ]
-        present = []
-        for c in keep:
-            try:
-                cur.execute(f"SELECT 1 FROM llm_models LIMIT 1")
-                present.append(c)
-            except Exception:
-                pass
-        sel = ", ".join([c for c in keep if c in cols])
-        if sel:
-            cur.execute(f"INSERT INTO llm_models__new({sel}) SELECT {sel} FROM llm_models")
-        cur.execute("DROP TABLE llm_models")
-        cur.execute("ALTER TABLE llm_models__new RENAME TO llm_models")
-        cur.execute("PRAGMA foreign_keys=on")
-        conn.commit()
-    except Exception:
-        logging.getLogger(__name__).exception("llm_models migration failed")
-    finally:
-        conn.close()
+# def _migrate_llm_models_if_needed():
+#     conn = _connect()
+#     conn.row_factory = sqlite3.Row
+#     cur = conn.cursor()
+#     try:
+#         cur.execute("PRAGMA table_info(llm_models)")
+#         cols = {r[1] for r in cur.fetchall()}  # name is at index 1
+#         cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_models'")
+#         row = cur.fetchone()
+#         ddl = row[0] if row else ""
+#         need_sub = "subcategory" not in cols
+#         need_all = ("CHECK" in ddl) and ("'all'" not in ddl)
+#         if not (need_sub or need_all):
+#             return
+#         cur.execute("PRAGMA foreign_keys=off")
+#         cur.execute(
+#             """
+#             CREATE TABLE llm_models__new(
+#               id INTEGER PRIMARY KEY AUTOINCREMENT,
+#               provider TEXT NOT NULL,
+#               name TEXT UNIQUE NOT NULL,
+#               revision INTEGER,
+#               model_path TEXT,
+#               category TEXT NOT NULL CHECK (category IN ('qa','doc_gen','summary','all')),
+#               subcategory TEXT,
+#               type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
+#               is_default BOOLEAN NOT NULL DEFAULT 0,
+#               is_active BOOLEAN NOT NULL DEFAULT 1,
+#               trained_at DATETIME,
+#               created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+#             )
+#             """
+#         )
+#         # Copy common columns
+#         keep = [
+#             "id","provider","name","revision","model_path","category","type","is_default","is_active","trained_at","created_at"
+#         ]
+#         present = []
+#         for c in keep:
+#             try:
+#                 cur.execute(f"SELECT 1 FROM llm_models LIMIT 1")
+#                 present.append(c)
+#             except Exception:
+#                 pass
+#         sel = ", ".join([c for c in keep if c in cols])
+#         if sel:
+#             cur.execute(f"INSERT INTO llm_models__new({sel}) SELECT {sel} FROM llm_models")
+#         cur.execute("DROP TABLE llm_models")
+#         cur.execute("ALTER TABLE llm_models__new RENAME TO llm_models")
+#         cur.execute("PRAGMA foreign_keys=on")
+#         conn.commit()
+#     except Exception:
+#         logging.getLogger(__name__).exception("llm_models migration failed")
+#     finally:
+#         conn.close()
 
 
 def _normalize_model_path_input(p: str) -> str:
@@ -428,11 +428,6 @@ def _norm_category(category: str) -> str:
 def _subtask_key(subtask: Optional[str]) -> str:
     return (subtask or "").strip().lower()
 
-def _active_prompt_cache_key(category: str, subtask: Optional[str]) -> str:
-    c = _norm_category(category)
-    s = _subtask_key(subtask)
-    return f"{ACTIVE_PROMPT_CACHE_PREFIX}{c}:{s or '-'}"
-
 
 
 def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional[int] = None):
@@ -447,20 +442,111 @@ def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional
 
 
 # ---------- 활성 프롬프트: 사용자 선택 저장/조회 ----------
-def get_active_prompt(category: str, subtask: Optional[str]) -> Dict[str, Any]:
-    key = _active_prompt_cache_key(category, subtask)
-    data = _get_cache(key)
-    info = json.loads(data) if data else None
+def get_active_prompt(category: str, subtask: Optional[str]) -> Dict[str, Any]: 
+    key = _active_prompt_cache_key(category, subtask) 
+    data = _get_cache(key) 
+    info = json.loads(data) if data else None 
     return {"category": _norm_category(category), "subtask": _subtask_key(subtask) or None, "active": info}
 
 
-def set_active_prompt(body: ActivePromptBody) -> Dict[str, Any]:
-    key = _active_prompt_cache_key(body.category, body.subtask)
-    payload = {"promptId": body.promptId, "setAt": _now_iso()}
-    _set_cache(key, _json(payload), "llm_admin")
-    return {"success": True, "category": _norm_category(body.category), "subtask": _subtask_key(body.subtask) or None, "active": payload}
+def get_prompt(prompt_id: int) -> Dict[str, Any]: 
+    tmpl, variables = _fetch_prompt_full(prompt_id) 
+    return { "promptId": tmpl["id"], "title": tmpl["name"], "prompt": tmpl["content"], "userPrompt": tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None), "category": tmpl["category"], "subcategory": tmpl["name"], "variables": [{"key": v["key"], "value": v["value"], "type": v["type"]} for v in variables], }
+
+def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    프롬프트 테스트 실행:
+      1) 템플릿/변수 로드 후 치환
+      2) 카테고리별 활성모델 선택
+      3) 로컬 모델 추론(가능 시) -> 답변 생성
+      4) event_logs에 평가 JSON 저장(rougeScore는 제공되면 사용, 아니면 0)
+    요청 body 예시:
+      {
+        "variables": {"date":"2025-01-01", "location":"서울"},
+        "category": "summary",
+        "modelName": "Qwen2.5-7B-RAG-FT",
+        "reference": "정답 텍스트(있을 때만)",
+        "max_tokens": 512,
+        "temperature": 0.7
+      }
+    """
+    body = body or {}
+    variables = body.get("variables", {}) or {}
+    category = body.get("category") or "summary"
+    max_tokens = int(body.get("max_tokens", 512))
+    temperature = float(body.get("temperature", 0.7))
+
+    tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
+    subcategory = (tmpl["name"] if isinstance(tmpl, dict) else getattr(tmpl, "name", None)) or None
+
+    if body.get("modelName"):
+        model_name = body["modelName"]
+    else:
+        try:
+            # helper는 test 모듈의 것을 재사용
+            from service.admin.manage_test_LLM import select_model_for_task
+            model_name = select_model_for_task(category, subcategory)
+        except Exception:
+            logging.getLogger(__name__).exception("select_model_for_task failed in admin test_prompt")
+            model_name = None
+        if not model_name:
+            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
+
+    required = json.loads(tmpl["required_vars"] or "[]")
+    missing = [k for k in required if k not in variables]
+    if missing:
+        return {"success": False, "error": f"필수 변수 누락: {', '.join(missing)}"}
+
+    system_prompt_text = _fill_template(tmpl["content"], variables)
+    user_prompt_raw = (tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None)) or ""
+    user_prompt_text = _fill_template(user_prompt_raw, variables)
+    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
+
+    answer = _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
+
+    rouge = 0
+    ref = body.get("reference")
+    if isinstance(ref, str) and ref.strip():
+        try:
+            ref_tokens = ref.strip().split()
+            ans_tokens = (answer or "").strip().split()
+            if ref_tokens:
+                overlap = len(set(ref_tokens) & set(ans_tokens))
+                rouge = int(100 * overlap / len(set(ref_tokens)))
+        except Exception:
+            rouge = 0
+
+    row = _lookup_model_by_name(model_name)
+    model_id = int(row["id"]) if row else None
+
+    meta = {
+        "category": category,
+        "subcategory": subcategory,
+        "promptId": prompt_id,
+        "promptText": prompt_text,
+        "variables": variables,
+        "modelId": model_id,
+        "modelName": model_name,
+        "answer": answer,
+        "rougeScore": rouge,
+    }
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
+            ("model_eval", _json(meta)),
+        )
+        conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to insert model_eval event")
+    finally:
+        conn.close()
+
+    return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
 
 
+    
 # ===== 새로 추가: 활성 LLM 모델 조회(로깅용) =====
 def get_active_llm_models() -> List[Dict[str, Any]]:
     """
@@ -488,6 +574,32 @@ def get_active_llm_models() -> List[Dict[str, Any]]:
             out.append(dict(r))  # best-effort
     return out
 
+def _fill_template(content: str, variables: Dict[str, Any]) -> str:
+    # 템플릿 내 {{key}} 치환
+    out = content
+    for k, v in (variables or {}).items():
+        out = out.replace("{{" + k + "}}", str(v))
+    return out
+    
+
+def _fetch_prompt_full(prompt_id: int) -> Tuple[sqlite3.Row, List[Dict[str, Any]]]:
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM system_prompt_template WHERE id=? AND ifnull(is_active,1)=1", (prompt_id,))
+    tmpl = cur.fetchone()
+    if not tmpl:
+        conn.close()
+        raise ValueError("존재하지 않거나 비활성화된 프롬프트입니다.")
+    cur.execute("""
+      SELECT v.id, v.type, v.key, v.value, v.description
+      FROM system_prompt_variables v
+      JOIN prompt_mapping m ON m.variable_id=v.id
+      WHERE m.template_id=?
+    """, (prompt_id,))
+    vars_rows = cur.fetchall()
+    conn.close()
+    variables = [{"id": r["id"], "type": r["type"], "key": r["key"], "value": r["value"], "description": r["description"]} for r in vars_rows]
+    return tmpl, variables
 
 # ===== 새로 추가: 최초 사용 시 지연 로딩 =====
 def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
@@ -1371,262 +1483,50 @@ def list_loaded_models() -> Dict[str, Any]:
         logging.getLogger(__name__).exception("failed to list loaded models")
         return {"loaded": []}
 
-
-## moved to service/admin/manage_test_LLM.py: compare_models
-
-
 def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]:
     category = _norm_category(category)
-    # subtask 인자는 하위호환. 이제는 template.name(=subcategory)로 필터
     subcat = (subtask or "").strip().lower() or None
+
     conn = _connect()
     cur = conn.cursor()
-    if subcat:
-        # name(=subcategory)으로 필터
-        cur.execute(
-            """
-            SELECT id, name, content, sub_content FROM system_prompt_template
-            WHERE category=? AND lower(name)=? AND ifnull(is_active,1)=1
-            ORDER BY id DESC
-            """,
-            (category, subcat),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT id, name, content, sub_content FROM system_prompt_template
-            WHERE category=? AND ifnull(is_active,1)=1
-            ORDER BY id DESC
-            """,
-            (category,),
-        )
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        if subcat:
+            cur.execute(
+                """
+                SELECT id, name, system_prompt, user_prompt
+                  FROM system_prompt_template
+                 WHERE category=? AND lower(name)=? AND ifnull(is_active,1)=1
+                 ORDER BY id DESC
+                """,
+                (category, subcat),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, name, system_prompt, user_prompt
+                  FROM system_prompt_template
+                 WHERE category=? AND ifnull(is_active,1)=1
+                 ORDER BY id DESC
+                """,
+                (category,),
+            )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
     prompt_list = []
     for r in rows:
         prompt_list.append({
             "promptId": r["id"],
             "title": r["name"],                 # 서브카테고리 이름
-            "prompt": r["content"],             # system prompt
-            "userPrompt": r["sub_content"],     # user prompt
+            "prompt": r["system_prompt"],       # system prompt
+            "userPrompt": r["user_prompt"],     # user prompt
             "subcategory": r["name"],           # 명시적으로 내려줌
         })
     return {"category": category, "subcategory": subcat or None, "promptList": prompt_list}
 
 
-def create_prompt(category: str, subtask: Optional[str], body: CreatePromptBody) -> Dict[str, Any]:
-    start = time.time()
-    category = _norm_category(category)
-    # subtask 인자는 무시(하위호환). 템플릿 name=body.title 가 서브카테고리.
-    conn = _connect()
-    cur = conn.cursor()
-    # 템플릿 생성
-    required_vars = [v.key for v in body.variables] if body.variables else []
-    cur.execute("""
-      INSERT INTO system_prompt_template(name, category, content, sub_content, required_vars, is_active)
-      VALUES(?,?,?,?,?,1)
-    """, (body.title, category, body.prompt, (body.userPrompt or None), _json(required_vars)))
-    template_id = cur.lastrowid
 
-    # 변수/매핑 생성
-    if body.variables:
-        for v in body.variables:
-            cur.execute("""
-              INSERT INTO system_prompt_variables(type, key, value, description)
-              VALUES(?,?,?,?)
-            """, (v.type, v.key, v.value or "", f"Prompt var for {body.title}"))
-            var_id = cur.lastrowid
-            cur.execute("""
-              INSERT INTO prompt_mapping(template_id, variable_id)
-              VALUES(?,?)
-            """, (template_id, var_id))
-
-    conn.commit()
-    conn.close()
-    return {"success": True, "durations": int((time.time() - start) * 1000)}
-
-
-def _fetch_prompt_full(prompt_id: int) -> Tuple[sqlite3.Row, List[Dict[str, Any]]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM system_prompt_template WHERE id=? AND ifnull(is_active,1)=1", (prompt_id,))
-    tmpl = cur.fetchone()
-    if not tmpl:
-        conn.close()
-        raise ValueError("존재하지 않거나 비활성화된 프롬프트입니다.")
-    cur.execute("""
-      SELECT v.id, v.type, v.key, v.value, v.description
-      FROM system_prompt_variables v
-      JOIN prompt_mapping m ON m.variable_id=v.id
-      WHERE m.template_id=?
-    """, (prompt_id,))
-    vars_rows = cur.fetchall()
-    conn.close()
-    variables = [{"id": r["id"], "type": r["type"], "key": r["key"], "value": r["value"], "description": r["description"]} for r in vars_rows]
-    return tmpl, variables
-
-
-def get_prompt(prompt_id: int) -> Dict[str, Any]:
-    tmpl, variables = _fetch_prompt_full(prompt_id)
-    return {
-        "promptId": tmpl["id"],
-        "title": tmpl["name"],                      # 서브카테고리 이름
-        "prompt": tmpl["content"],                  # system prompt
-        "userPrompt": tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None),
-        "category": tmpl["category"],
-        "subcategory": tmpl["name"],
-        "variables": [{"key": v["key"], "value": v["value"], "type": v["type"]} for v in variables],
-    }
-
-
-def update_prompt(prompt_id: int, body: UpdatePromptBody) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-
-    # 템플릿 업데이트
-    if body.title is not None:
-        cur.execute("UPDATE system_prompt_template SET name=? WHERE id=?", (body.title, prompt_id))
-    if body.prompt is not None:
-        cur.execute("UPDATE system_prompt_template SET content=? WHERE id=?", (body.prompt, prompt_id))
-    if body.userPrompt is not None:
-        cur.execute("UPDATE system_prompt_template SET sub_content=? WHERE id=?", (body.userPrompt, prompt_id))
-
-    # 변수 업데이트(간단: 모두 재구성)
-    if body.variables is not None:
-        # 기존 매핑/변수 제거
-        cur.execute("SELECT variable_id FROM prompt_mapping WHERE template_id=?", (prompt_id,))
-        var_ids = [r["variable_id"] for r in cur.fetchall()]
-        cur.execute("DELETE FROM prompt_mapping WHERE template_id=?", (prompt_id,))
-        if var_ids:
-            cur.execute(f"DELETE FROM system_prompt_variables WHERE id IN ({','.join('?'*len(var_ids))})", var_ids)
-        # 신규 삽입
-        required_vars = [v.key for v in body.variables]
-        cur.execute("UPDATE system_prompt_template SET required_vars=? WHERE id=?", (_json(required_vars), prompt_id))
-        for v in body.variables:
-            cur.execute("""
-              INSERT INTO system_prompt_variables(type, key, value, description)
-              VALUES(?,?,?,?)
-            """, (v.type, v.key, v.value or "", f"Prompt var for {body.title or ''}".strip()))
-            var_id = cur.lastrowid
-            cur.execute("INSERT INTO prompt_mapping(template_id, variable_id) VALUES(?,?)", (prompt_id, var_id))
-
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-
-def delete_prompt(prompt_id: int) -> Dict[str, Any]:
-    conn = _connect()
-    cur = conn.cursor()
-    # 하드 삭제(요청 명확성 고려). 필요시 소프트 삭제로 변경 가능.
-    cur.execute("DELETE FROM prompt_mapping WHERE template_id=?", (prompt_id,))
-    cur.execute("DELETE FROM system_prompt_template WHERE id=?", (prompt_id,))
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-
-def _fill_template(content: str, variables: Dict[str, Any]) -> str:
-    # 템플릿 내 {{key}} 치환
-    out = content
-    for k, v in (variables or {}).items():
-        out = out.replace("{{" + k + "}}", str(v))
-    return out
-
-
-## moved to service/admin/manage_test_LLM.py: test_prompt
-
-def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    프롬프트 테스트 실행:
-      1) 템플릿/변수 로드 후 치환
-      2) 카테고리별 활성모델 선택
-      3) 로컬 모델 추론(가능 시) -> 답변 생성
-      4) event_logs에 평가 JSON 저장(rougeScore는 제공되면 사용, 아니면 0)
-    요청 body 예시:
-      {
-        "variables": {"date":"2025-01-01", "location":"서울"},
-        "category": "summary",
-        "modelName": "Qwen2.5-7B-RAG-FT",
-        "reference": "정답 텍스트(있을 때만)",
-        "max_tokens": 512,
-        "temperature": 0.7
-      }
-    """
-    body = body or {}
-    variables = body.get("variables", {}) or {}
-    category = body.get("category") or "summary"
-    max_tokens = int(body.get("max_tokens", 512))
-    temperature = float(body.get("temperature", 0.7))
-
-    tmpl, tmpl_vars = _fetch_prompt_full(prompt_id)
-    subcategory = (tmpl["name"] if isinstance(tmpl, dict) else getattr(tmpl, "name", None)) or None
-
-    if body.get("modelName"):
-        model_name = body["modelName"]
-    else:
-        try:
-            # helper는 test 모듈의 것을 재사용
-            from service.admin.manage_test_LLM import select_model_for_task
-            model_name = select_model_for_task(category, subcategory)
-        except Exception:
-            logging.getLogger(__name__).exception("select_model_for_task failed in admin test_prompt")
-            model_name = None
-        if not model_name:
-            return {"success": False, "error": "기본/활성/베이스 모델을 찾을 수 없습니다. 먼저 기본 모델을 지정하거나 모델을 로드하세요."}
-
-    required = json.loads(tmpl["required_vars"] or "[]")
-    missing = [k for k in required if k not in variables]
-    if missing:
-        return {"success": False, "error": f"필수 변수 누락: {', '.join(missing)}"}
-
-    system_prompt_text = _fill_template(tmpl["content"], variables)
-    user_prompt_raw = (tmpl.get("sub_content") if isinstance(tmpl, dict) else getattr(tmpl, "sub_content", None)) or ""
-    user_prompt_text = _fill_template(user_prompt_raw, variables)
-    prompt_text = (system_prompt_text + ("\n" + user_prompt_text if user_prompt_text else "")).strip()
-
-    answer = _simple_generate(prompt_text, model_name, max_tokens=max_tokens, temperature=temperature)
-
-    rouge = 0
-    ref = body.get("reference")
-    if isinstance(ref, str) and ref.strip():
-        try:
-            ref_tokens = ref.strip().split()
-            ans_tokens = (answer or "").strip().split()
-            if ref_tokens:
-                overlap = len(set(ref_tokens) & set(ans_tokens))
-                rouge = int(100 * overlap / len(set(ref_tokens)))
-        except Exception:
-            rouge = 0
-
-    row = _lookup_model_by_name(model_name)
-    model_id = int(row["id"]) if row else None
-
-    meta = {
-        "category": category,
-        "subcategory": subcategory,
-        "promptId": prompt_id,
-        "promptText": prompt_text,
-        "variables": variables,
-        "modelId": model_id,
-        "modelName": model_name,
-        "answer": answer,
-        "rougeScore": rouge,
-    }
-    conn = _connect()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
-            ("model_eval", _json(meta)),
-        )
-        conn.commit()
-    except Exception:
-        logging.getLogger(__name__).exception("failed to insert model_eval event")
-    finally:
-        conn.close()
-
-    return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
 
 
 # ==== (추가) LORA/QLORA 베이스/어댑터 경로 인식 강화 ====
