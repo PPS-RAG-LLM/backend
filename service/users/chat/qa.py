@@ -88,13 +88,20 @@ def stream_chat_for_qa(
     body["message"] = str(body.get("message") or "").strip()
     if not body["message"]:
         raise BadRequestError("message is required")
-    logger.info(f"BODY : {body}")
+    logger.debug(f"BODY : {body}")
 
     # 3. LLM runner 준비
     runner = resolve_runner(body["provider"], body["model"])
 
-    # 4. Chat history 로드
     messages: List[Dict[str, Any]] = []
+
+    # 3.1 system prompt 준비
+    from .common.message_builder import build_system_message
+    system_prompt = ws.get("system_prompt") or ""
+    if system_prompt:
+        messages.append(build_system_message(system_prompt, category, body))
+
+    # 4. Chat history 로드
     if ws["chat_history"] > 0 and thread_id is not None:
         history = get_chat_history_by_thread_id(user_id, thread_id, ws["chat_history"])
         for chat in history[::-1]:
@@ -108,7 +115,7 @@ def stream_chat_for_qa(
 
     # 5. RAG context 검색
     snippets, temp_doc_ids = _insert_rag_context(ws, body)
-    logger.info(f"\n## 검색된 SNIPPETS 목록: \n{snippets}\n")
+    logger.debug(f"\n## 검색된 SNIPPETS 목록: \n{snippets}\n")
 
     # 6. User message에 context 포함
     user_message = build_user_message_with_context(
@@ -117,7 +124,7 @@ def stream_chat_for_qa(
         ws.get("query_refusal_response", "")
     )
     messages.append({"role": "user", "content": user_message})
-    logger.info(f"\nMESSAGES:\n{messages}")
+    logger.debug(f"\nMESSAGES:\n{messages}")
 
     # 7. 스트리밍 및 저장
     yield from stream_and_persist(

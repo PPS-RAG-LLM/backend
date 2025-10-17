@@ -50,7 +50,6 @@ def load_gpt_oss_20b(model_dir):
 def stream_chat(messages: List[Dict[str, str]], **gen_kwargs) -> Generator[str, None, None]:  
     logger.info(f"stream_chat: {gen_kwargs}\n\n")
     model_dir = gen_kwargs.get("model_path")
-    logger.info(f"\n\nInput GPT-OSS-20b messages: {messages}\n\n")
     if not model_dir:
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
