@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 
 from service.admin.manage_vator_DB import (
+    # ingest_specific_files_with_levels, 
+    TASK_TYPES,
     OverrideLevelsRequest,
     override_levels_and_ingest,
     # 설정
@@ -327,3 +329,38 @@ async def override_levels_upload(req: OverrideLevelsRequest):
     - level_for_tasks 또는 level 중 하나는 필수
     """
     return await override_levels_and_ingest(req)
+
+@router.post(
+    "/admin/vector/upload-and-ingest",
+    summary="업로드한 파일들만 전처리→(선택)레벨 강제→인제스트 일괄 수행"
+)
+async def upload_and_ingest_selected(
+    files: List[UploadFile] = File(..., description="업로드 파일들(pdf,docx,pptx,txt,csv,xlsx,hwp 등)"),
+    tasks: Optional[str] = Body(None, description="작업유형 CSV. 예: 'qna,summary,doc_gen' (기본: 전부)"),
+    level_for_tasks: Optional[str] = Body(None, description='작업유형별 레벨 JSON. 예: {"qna":2,"summary":1}'),
+    level: Optional[int] = Body(None, description="모든 작업유형 공통 레벨(>=1). level_for_tasks가 있으면 무시"),
+    collection_name: Optional[str] = Body(None, description="기본 컬렉션이 아니면 지정"),
+):
+    # tasks 파싱
+    tlist: Optional[List[str]] = None
+    if tasks:
+        tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES]
+
+    # level_for_tasks 파싱
+    lvmap: Optional[Dict[str, int]] = None
+    if level_for_tasks:
+        try:
+            import json as _json
+            parsed = _json.loads(level_for_tasks)
+            lvmap = {k: int(v) for k, v in parsed.items() if k in TASK_TYPES}
+        except Exception:
+            return {"error": 'level_for_tasks JSON 파싱 실패. 예: {"qna":2,"summary":1}'}
+
+    return await ingest_specific_files_with_levels(
+        uploads=files,
+        paths=None,
+        tasks=tlist,
+        level_for_tasks=lvmap,
+        level=level,
+        collection_name=collection_name,
+    )
