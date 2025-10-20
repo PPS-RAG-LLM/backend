@@ -8,6 +8,8 @@ from service.admin.manage_admin_LLM import (
     list_prompts,
     unload_model,
     _infer_category_from_name,
+    delete_model_full, 
+    DeleteModelBody,
 )
 
 router = APIRouter(
@@ -57,3 +59,22 @@ def get_prompts(
     ),
 ):
     return list_prompts(category, subtask)
+
+@router.post("/settings/model-delete", summary="모델 삭제(DB + 디스크). 기본: 모델 디렉터리만 제거, LORA의 base는 보존")
+def model_delete(body: DeleteModelBody):
+    """
+    Qwen2.5-7B-Instruct-1M
+    gpt-oss-20b
+    Qwen3-14B
+    Qwen3-8B
+
+    bge_m3
+    qwen3_0_6b
+    qwen3_4b
+
+    body 예:
+    {
+      "modelName": "gpt-oss-20b"
+    }
+    """
+    return delete_model_full(body.modelName)

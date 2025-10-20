@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException
+from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
+import json as _json
 
 from service.admin.manage_vator_DB import (
+    ingest_specific_files_with_levels,
+    TASK_TYPES,
     OverrideLevelsRequest,
     override_levels_and_ingest,
     # 설정
@@ -317,13 +320,117 @@ async def delete_vector_files_post(body: DeleteFilesBody = Body(...)):
 async def rag_delete_db_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[delete-all] from {request.client.host}")
     return await delete_db()
- 
-@router.post("/v1/admin/vector/override-levels-upload",
-    summary="--키워드 규칙 무시하고 지정한 레벨로 보안등급을 강제로 세팅한 뒤 인제스트합니다.(files 미지정: META의 모든 파일이 대상, level_for_tasks 또는 level 중 하나는 필수)"
+
+
+# 중복 import 제거 및 상단으로 승격됨
+
+def _parse_level_for_tasks_flex(
+    raw: Optional[str],
+    qna_level: Optional[str] = None,
+    summary_level: Optional[str] = None,
+    doc_gen_level: Optional[str] = None,
+) -> Dict[str, int]:
+    # 1) 개별 필드가 오면 우선 사용 (빈 문자열은 무시)
+    def _as_int(x: Optional[str]):
+        if x is None:
+            return None
+        s = str(x).strip()
+        if s == "":
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+
+    lvl_map: Dict[str, int] = {}
+    q = _as_int(qna_level); s = _as_int(summary_level); d = _as_int(doc_gen_level)
+    if q is not None: lvl_map["qna"] = max(1, q)
+    if s is not None: lvl_map["summary"] = max(1, s)
+    if d is not None: lvl_map["doc_gen"] = max(1, d)
+    if lvl_map:
+        return lvl_map
+
+    if raw is None or str(raw).strip() == "":
+        raise ValueError("level_for_tasks 값이 비어 있습니다.")
+
+    s = str(raw).strip()
+
+    # 2) 숫자 하나만 오면 모든 task 동일 적용
+    if s.isdigit():
+        v = max(1, int(s))
+        return {"qna": v, "summary": v, "doc_gen": v}
+
+    # 3) JSON 시도
+    try:
+        obj = _json.loads(s)
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                if k in ("qna", "summary", "doc_gen"):
+                    out[k] = max(1, int(v))
+            if out:
+                return out
+    except Exception:
+        pass
+
+    # 4) "qna:2,summary:1" / "qna=2&summary=1" 류 파싱
+    cand = s.replace("&", ",")
+    parts = [p.strip() for p in cand.split(",") if p.strip()]
+    out = {}
+    for p in parts:
+        if ":" in p:
+            k, v = p.split(":", 1)
+        elif "=" in p:
+            k, v = p.split("=", 1)
+        else:
+            continue
+        k = k.strip()
+        if k in ("qna", "summary", "doc_gen"):
+            try:
+                out[k] = max(1, int(v))
+            except Exception:
+                pass
+    if out:
+        return out
+
+    raise ValueError('level_for_tasks 파싱 실패. 예) {"qna":2,"summary":1} 또는 "qna:2,summary:1" 또는 "2"')
+    
+@router.post("/v1/admin/vector/override-levels-upload"
+    summary="-- 단일 파일 올리기 "
     )
-async def override_levels_upload(req: OverrideLevelsRequest):
-    """
-    - files 미지정: META의 모든 파일이 대상
-    - level_for_tasks 또는 level 중 하나는 필수
-    """
-    return await override_levels_and_ingest(req)
+async def override_levels_upload_form(
+    files: List[UploadFile] = File(...),
+    tasks: Optional[str] = Form(None),
+    level_for_tasks: Optional[str] = Form(None),
+    qna_level: Optional[str] = Form(None),
+    summary_level: Optional[str] = Form(None),
+    doc_gen_level: Optional[str] = Form(None),
+):
+    # 1) 파일 저장
+    saved_names = []
+    for f in files:
+        content = await f.read()
+        save_raw_file(f.filename, content)
+        saved_names.append(f.filename)
+
+    # 2) 새 파일만 포함되도록 추출(전체 재추출이긴 하지만 META에 신규 포함)
+    await extract_pdfs()
+
+    # 3) task 목록
+    tlist = None
+    if tasks:
+        tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES] or None
+
+    # 4) 레벨 파싱(유연)
+    try:
+        lvmap = _parse_level_for_tasks_flex(level_for_tasks, qna_level, summary_level, doc_gen_level)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 5) 지정 파일만 레벨 오버라이드 + 해당 파일만 인제스트
+    req = OverrideLevelsRequest(files=saved_names, level_for_tasks=lvmap, tasks=tlist)
+    result = await override_levels_and_ingest(req)
+    return {"saved": saved_names, "ingest_result": result}
+
+
+# 중복 라우트 제거됨 (유연 파서 버전만 유지)
