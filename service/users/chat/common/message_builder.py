@@ -49,8 +49,8 @@ def render_template(category: str, body: Dict[str, Any]) -> str:
 
 def build_system_message(base_prompt: str, category: str, body: Dict[str, Any]) -> Dict[str, str]:
     """시스템 메시지 구성"""
-    system_text = (base_prompt + "\n\n반드시 한국어로 대답하세요.").strip()
-    segments = [system_text or "반드시 한국어로 대답하세요."]
+    system_text = (base_prompt + f"\n\n **Please think in <think> tag and answer in <answer> tag.**").strip()
+    segments = [system_text or "**Please think in <think> tag and answer in <answer> tag.**"]
 
     if category == "doc_gen":
         tpl = render_template("doc_gen", body)

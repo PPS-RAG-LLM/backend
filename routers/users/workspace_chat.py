@@ -61,6 +61,7 @@ def to_see(gen):
     buf = []
     last_flush = time.monotonic()
     chat_id = None
+    full_response = []
 
     for chunk in gen:
         if not chunk:
@@ -71,6 +72,7 @@ def to_see(gen):
         if not buf:
             chunk = chunk.lstrip()
         buf.append(chunk)
+        full_response.append(chunk)
         text = "".join(buf)
         if (
             len(text) >= 32
@@ -78,15 +80,17 @@ def to_see(gen):
             or time.monotonic() - last_flush > 0.2
         ):
             # logger.debug(f"[flush] {repr(text)}")
-            yield f'data: {json.dumps({"content": chunk})}\n\n'
+            yield f'{json.dumps({"content": chunk})}\n\n'
             buf.clear()
             last_flush = time.monotonic()
     if buf:
         text = "".join(buf)
-        yield f'data: {json.dumps({"content": chunk})}\n\n'
+        yield f'{json.dumps({"content": chunk})}\n\n'
     if chat_id:
-        yield f'data: {json.dumps({"chat_id": chat_id, "done":True})}\n\n'
-    logger.info("[stream_chat_qa_endpoint] streaming end")
+        yield f'{json.dumps({"chat_id": chat_id, "done":True})}\n\n'
+
+    complete_response = "".join(full_response)
+    logger.info(f"======================\n\n[stream_chat_qa_endpoint] streaming end - Full response ({len(complete_response)} chars): \n\n{complete_response}\n\n======================\n")
 
 
 # ====== Unified POST APIs ======
