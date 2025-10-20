@@ -1419,7 +1419,7 @@ def _ensure_collection_and_index(
                 schema.add_function(fn)
                 logger.info("[Milvus] BM25 Function 연결 완료 (text -> text_sparse)")
             except Exception as e:
-                logger.warning(f("[Milvus] BM25 Function 추가 실패: {e}"))
+                logger.warning(f"[Milvus] BM25 Function 추가 실패: {e}")
         client.create_collection(collection_name=collection_name, schema=schema)
         logger.info(f"[Milvus] 컬렉션 생성 완료: {collection_name}")
 
@@ -1610,131 +1610,96 @@ async def ingest_embeddings(
     overlap: int | None = None,
     target_tasks: list[str] | None = None,
     collection_name: str = COLLECTION_NAME,
+    file_keys_filter: list[str] | None = None,  # ★ 추가: 특정 파일만 인제스트
 ):
     """
     META_JSON을 읽어 추출된 텍스트(.txt)들을 인제스트한다.
-    - VARCHAR(32768) 초과 방지: 본문/표 모두 안전 분할(_split_for_varchar)
-    - table_text는 [[TABLE ...]] 헤더 보존, 이어지는 조각은 [[TABLE_CONT i/n]] 마커 추가
+    - VARCHAR(32768 bytes) 초과 방지: _split_for_varchar_bytes 로 안전 분할
+    - 표는 [[TABLE ...]] 머리글 유지, 이어지는 조각은 [[TABLE_CONT i/n]] 마커로 연속성 표시
     - collection_name 파라미터를 끝까지 사용(기본/세션 컬렉션 공용)
+    - file_keys_filter 가 주어지면 해당되는 파일(meta key/파일명/스텀)이 '포함'된 항목만 인제스트
     """
-    # ==== 상수/유틸 ====
-    MILVUS_TEXT_VARCHAR_MAX = 32768
-    _MILVUS_TEXT_SOFT_MAX = 32000
-    TABLE_MARK = "[[TABLE"
-
-    def _split_for_varchar(text: str,
-                           hard_max: int = MILVUS_TEXT_VARCHAR_MAX,
-                           soft_max: int = _MILVUS_TEXT_SOFT_MAX,
-                           table_mark: str = TABLE_MARK) -> list[str]:
-        """
-        VARCHAR 한도 초과 방지용 안전 분할.
-        - 표 마커([[TABLE ...]])가 있으면 첫 청크는 헤더를 유지하고,
-          이후 청크는 [[TABLE_CONT i/n]] 마커를 붙여 이어붙임을 명시.
-        - 문단/개행 경계 우선, 없으면 하드 컷.
-        """
-        if not text or len(text) <= hard_max:
-            return [text]
-
-        header = ""
-        body = text
-        if text.startswith(table_mark):
-            head_end = text.find("]]")
-            if head_end != -1:
-                head_end += 2
-                if head_end < len(text) and text[head_end] == "\n":
-                    head_end += 1
-                header, body = text[:head_end], text[head_end:]
-
-        chunks: list[str] = []
-        i = 0
-        while i < len(body):
-            j = min(i + soft_max, len(body))
-            # 문단 경계(빈 줄) 우선
-            k = body.rfind("\n\n", i, j)
-            if k == -1:
-                # 줄 경계
-                k = body.rfind("\n", i, j)
-            if k == -1 or k < i + int(soft_max * 0.6):
-                # 경계가 너무 앞이면 하드 컷
-                k = j
-            else:
-                k = k + 1  # 경계 포함
-
-            chunk = body[i:k]
-            if len(chunk) > hard_max:
-                chunk = chunk[:hard_max]
-                k = i + len(chunk)
-            chunks.append(chunk)
-            i = k
-
-        if header:
-            out = []
-            total = len(chunks)
-            for idx, c in enumerate(chunks, start=1):
-                if idx == 1:
-                    out.append(header + c)
-                else:
-                    out.append(f"[[TABLE_CONT {idx}/{total}]]\n{c}")
-            return out
-        return chunks
-
-    # ==== 설정 ====
-    s = get_vector_settings()
-    MAX_TOKENS = int(chunk_size if chunk_size is not None else s["chunkSize"])
-    OVERLAP = int(overlap if overlap is not None else s["overlap"])
+    # ==== 설정/모델 ====
+    settings = get_vector_settings()
+    MAX_TOKENS = int(chunk_size if chunk_size is not None else settings["chunkSize"])
+    OVERLAP = int(overlap if overlap is not None else settings["overlap"])
 
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 PDF/문서 추출을 수행하세요."}
 
-    # 모델/검색 설정 로드(모델키 우선순위: 인자 > settings)
-    settings = get_vector_settings()
     eff_model_key = model_key or settings["embeddingModel"]
-
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
     emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
 
     client = _client()
-    # 꼭 현재 collection_name으로 스키마/인덱스 준비
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
 
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
+    # ==== 유틸 ====
+    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP) -> list[str]:
         words = text.split()
-        chunks: List[str] = []
+        chunks: list[str] = []
         start = 0
+        step = max(1, max_tokens - overlap)
         while start < len(words):
             end = min(start + max_tokens, len(words))
             chunk = " ".join(words[start:end]).strip()
             if chunk:
                 chunks.append(chunk)
-            start += max_tokens - overlap
+            start += step
         return chunks
 
-    meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-    tasks = list(target_tasks or TASK_TYPES)
+    # ==== META 로드 및 대상 필터 구성 ====
+    meta: dict = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
+    tasks = [t for t in (target_tasks or TASK_TYPES) if t in TASK_TYPES]
+    if not tasks:
+        return {"error": f"유효한 작업유형이 없습니다. 허용: {TASK_TYPES}"}
+
+    filter_tokens = set()
+    if file_keys_filter:
+        # meta key / 파일명 / 스템을 모두 매칭할 수 있도록 소문자 토큰화
+        for f in file_keys_filter:
+            p = Path(str(f))
+            filter_tokens.add(str(f).lower())
+            filter_tokens.add(p.name.lower())
+            filter_tokens.add(p.stem.lower())
 
     total_inserted = 0
     BATCH_SIZE = 128
 
+    # ==== 인제스트 ====
+    # 주의: EXTRACTED_TEXT_DIR 안의 *.txt 를 돌면서, 해당 txt 가 어떤 meta key(원본 확장자)와 매칭되는지 찾는다.
     for txt_path in EXTRACTED_TEXT_DIR.rglob("*.txt"):
         rel_txt = txt_path.relative_to(EXTRACTED_TEXT_DIR)
-        # 다양한 확장자를 시도하여 메타 키 찾기
+
+        # 다양한 확장자 후보로 META key 찾기
         cands = [rel_txt.with_suffix(ext).as_posix() for ext in SUPPORTED_EXTS]
         meta_key = next((k for k in cands if k in meta), None)
         if not meta_key:
             continue
 
-        entry = meta[meta_key]
+        # ★ 업로드한 것만 인제스트 옵션: meta key / 파일명 / 스템 기준 필터링
+        if filter_tokens:
+            p = Path(meta_key)
+            if (meta_key.lower() not in filter_tokens and
+                p.name.lower() not in filter_tokens and
+                p.stem.lower() not in filter_tokens):
+                continue
+
+        entry = meta.get(meta_key) or {}
         sec_map = entry.get("security_levels", {}) or {}
+
+        # doc_id / version 확보(없으면 파일명에서 유추)
         doc_id = entry.get("doc_id")
-        version = entry.get("version", 0)
+        version = int(entry.get("version", 0) or 0)
         if not doc_id or version == 0:
-            _id, _ver = _parse_doc_version(rel_txt.stem)
+            _id, _ver = _parse_doc_version(Path(meta_key).stem)
             doc_id = doc_id or _id
             version = version or _ver
             entry["doc_id"] = doc_id
             entry["version"] = version
+            meta[meta_key] = entry  # 변경사항 반영
 
-        # 이전 동일 doc_id/version 데이터 삭제(작업유형 전체)
+        # 기존 동일 문서/버전 삭제(작업유형 상관 없이)
         try:
             client.delete(
                 collection_name=collection_name,
@@ -1743,27 +1708,30 @@ async def ingest_embeddings(
         except Exception:
             pass
 
-        # 텍스트 로드/청크화
-        text = txt_path.read_text(encoding="utf-8")
+        # 본문 텍스트 로드 및 청크화
+        try:
+            text = txt_path.read_text(encoding="utf-8")
+        except Exception:
+            # 혹시 모를 인코딩 문제 폴백
+            text = txt_path.read_text(errors="ignore")
         chunks = chunk_text(text)
 
-        # 표 정보
-        tables = entry.get("tables", [])  # [{page,bbox,text}, ...]
+        # 표 블록(이미 META에 저장됨)
+        tables = entry.get("tables", []) or []
 
-        # 작업유형별 삽입
-        batch: List[Dict] = []
+        batch: list[dict] = []
 
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
 
-            # 1) 본문 청크 삽입(추가 가드로 VARCHAR 분할)
+            # 1) 본문 조각
             for idx, c in enumerate(chunks):
+                # VARCHAR 한도 안전 분할(바이트 기준)
                 for part in _split_for_varchar_bytes(c):
-                    # 최종 방어: utf-8 바이트 길이 체크
+                    # 최종 방어(예외적으로 경계 잘림 실패 시)
                     if len(part.encode("utf-8")) > 32768:
-                        logger.warning("[ingest] part still too long after split (body), skip")
-                        # 필요하면 더 잘라서 넣고 싶으면 여기서 잘라서 계속 진행해도 됨
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+
                     vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
@@ -1780,8 +1748,7 @@ async def ingest_embeddings(
                         total_inserted += len(batch)
                         batch = []
 
-
-            # 2) 표 청크 삽입(길면 안전 분할)
+            # 2) 표 조각(페이지/좌표 헤더 포함)
             base_idx = len(chunks)
             for t_i, t in enumerate(tables):
                 md = (t.get("text") or "").strip()
@@ -1794,8 +1761,8 @@ async def ingest_embeddings(
 
                 for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                     if len(part.encode("utf-8")) > 32768:
-                        logger.warning("[ingest] part still too long after split (table), hard-cut")
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+
                     vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
@@ -1815,23 +1782,23 @@ async def ingest_embeddings(
         if batch:
             client.insert(collection_name, batch)
             total_inserted += len(batch)
-            batch = []
 
+    # 인덱스/로딩 재보장 및 메타 저장(유추된 doc_id/version 반영)
     try:
         client.flush(collection_name)
     except Exception:
         pass
-    # 인덱스/로드 재보장(해당 컬렉션으로)
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
 
-    # 변동된 meta(예: doc_id/version 보정) 저장
-    META_JSON_PATH.write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    # META에 doc_id/version 보정이 있었다면 저장
+    try:
+        META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     return {
         "message": f"Ingest 완료(Milvus Server, collection={collection_name})",
-        "inserted_chunks": total_inserted,
+        "inserted_chunks": int(total_inserted),
     }
 
 
@@ -1994,7 +1961,185 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         "sourceExt": _ext(file_path),
     }
 
+async def ingest_specific_files_with_levels(
+    uploads: Optional[List[Any]] = None,          # FastAPI UploadFile 리스트
+    paths: Optional[List[str]] = None,            # 로컬 경로 리스트
+    tasks: Optional[List[str]] = None,            # 없으면 모든 TASK_TYPES
+    level_for_tasks: Optional[Dict[str, int]] = None,  # {"qna":2,"summary":1} 우선
+    level: Optional[int] = None,                  # 공통 레벨. 위 map 있으면 무시
+    collection_name: Optional[str] = None,
+):
+    if not uploads and not paths:
+        return {"error": "대상 파일이 없습니다. uploads 또는 paths 중 하나는 필요합니다."}
 
+    tasks_eff = [t for t in (tasks or TASK_TYPES) if t in TASK_TYPES]
+    if not tasks_eff:
+        return {"error": f"유효한 작업유형이 없습니다. 허용: {TASK_TYPES}"}
+
+    lvl_map: Dict[str, int] = {}
+    if level_for_tasks:
+        for k, v in level_for_tasks.items():
+            if k in TASK_TYPES:
+                lvl_map[k] = max(1, int(v))
+    elif level is not None:
+        for t in tasks_eff:
+            lvl_map[t] = max(1, int(level))
+
+    # 업로드 저장(임시) + 경로 합치기
+    run_id = uuid.uuid4().hex[:8]
+    tmp_root = (VAL_SESSION_ROOT / "adhoc" / run_id).resolve()
+    tmp_root.mkdir(parents=True, exist_ok=True)
+
+    saved: List[Path] = []
+    if uploads:
+        for f in uploads:
+            fname = Path(getattr(f, "filename", "uploaded")).name
+            tmp_path = tmp_root / fname
+            try:
+                data = await f.read()
+            except Exception:
+                data = getattr(getattr(f, "file", None), "read", lambda: b"")()
+            tmp_path.write_bytes(data or b"")
+            saved.append(tmp_path)
+    for p in (paths or []):
+        pp = Path(str(p)).resolve()
+        if pp.exists() and pp.is_file():
+            saved.append(pp)
+
+    if not saved:
+        return {"error": "저장/유효성 검사 후 남은 파일이 없습니다."}
+
+    # 임베더/컬렉션 준비
+    settings = get_vector_settings()
+    eff_model_key = settings["embeddingModel"]
+    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
+    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+
+    coll = collection_name or COLLECTION_NAME
+    client = _client()
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=coll)
+
+    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
+
+    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
+        words = text.split()
+        chunks: List[str] = []
+        start = 0
+        while start < len(words):
+            end = min(start + max_tokens, len(words))
+            chunk = " ".join(words[start:end]).strip()
+            if chunk:
+                chunks.append(chunk)
+            start += max_tokens - overlap
+        return chunks
+
+    processed, total = [], 0
+    for src in saved:
+        try:
+            text, tables = _extract_any(src)
+
+            # 레벨 결정(강제 > 규칙)
+            if lvl_map:
+                sec_map = {t: int(lvl_map.get(t, 1)) for t in tasks_eff}
+            else:
+                all_rules = get_security_level_rules_all()
+                whole = text + "\n\n" + "\n\n".join(t.get("text", "") for t in (tables or []))
+                sec_map = {
+                    t: _determine_level_for_task(whole, all_rules.get(t, {"maxLevel": 1, "levels": {}}))
+                    for t in tasks_eff
+                }
+            max_sec = max(sec_map.values()) if sec_map else 1
+
+            # 스니펫 로딩용 텍스트 저장(메인과 분리: __adhoc__)
+            rel_txt = Path("__adhoc__") / run_id / f"securityLevel{int(max_sec)}" / src.with_suffix(".txt").name
+            abs_txt = EXTRACTED_TEXT_DIR / rel_txt
+            abs_txt.parent.mkdir(parents=True, exist_ok=True)
+            abs_txt.write_text(text, encoding="utf-8")
+
+            # 문서 ID/버전
+            doc_id, ver = _parse_doc_version(src.stem)
+
+            # 기존 삭제
+            try:
+                client.delete(collection_name=coll, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
+            except Exception:
+                pass
+
+            # 본문
+            chunks = chunk_text(text)
+            batch, cnt = [], 0
+            for t in tasks_eff:
+                lvl = int(sec_map.get(t, 1))
+
+                for idx, c in enumerate(chunks):
+                    for part in _split_for_varchar_bytes(c):
+                        if len(part.encode("utf-8")) > 32768:
+                            part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        batch.append({
+                            "embedding": vec.tolist(),
+                            "path": str(rel_txt.as_posix()),
+                            "chunk_idx": int(idx),
+                            "task_type": t,
+                            "security_level": lvl,
+                            "doc_id": str(doc_id),
+                            "version": int(ver),
+                            "text": part,
+                        })
+                        if len(batch) >= 128:
+                            client.insert(coll, batch); cnt += len(batch); batch = []
+
+                # 표
+                base_idx = len(chunks)
+                for t_i, tb in enumerate(tables or []):
+                    md = (tb.get("text") or "").strip()
+                    if not md:
+                        continue
+                    page = int(tb.get("page", 0)); bbox = tb.get("bbox") or []
+                    bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+                    table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+                    for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
+                        if len(part.encode("utf-8")) > 32768:
+                            part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        batch.append({
+                            "embedding": vec.tolist(),
+                            "path": str(rel_txt.as_posix()),
+                            "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                            "task_type": t,
+                            "security_level": lvl,
+                            "doc_id": str(doc_id),
+                            "version": int(ver),
+                            "text": part,
+                        })
+                        if len(batch) >= 128:
+                            client.insert(coll, batch); cnt += len(batch); batch = []
+
+            if batch:
+                client.insert(coll, batch); cnt += len(batch)
+
+            processed.append({
+                "file": src.name, "doc_id": doc_id, "version": int(ver),
+                "levels": sec_map, "chunks": cnt
+            })
+            total += cnt
+
+        except Exception:
+            logger.exception("[upload-and-ingest] failed: %s", src)
+
+    try:
+        client.flush(coll)
+    except Exception:
+        pass
+    _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=coll)
+
+    return {
+        "message": "Upload & Ingest 완료",
+        "collection": coll,
+        "runId": run_id,
+        "processed": processed,
+        "inserted_chunks": int(total),
+    }
 
 # -------------------------------------------------
 # 3) 검색 (vector / hybrid)
@@ -2962,96 +3107,78 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
         pass
 
     return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file, "sid": sid}
+    
 # === 새 API: 키워드 없이 레벨 오버라이드 후 인제스트 ===
 class OverrideLevelsRequest(BaseModel):
     """
-    키워드 규칙/자동판정 무시하고, 지정 레벨로 강제 인제스트
-    - files: 대상 파일 목록(이름 또는 경로). 비우면 META의 모든 파일 대상으로 처리
-    - level_for_tasks: {"qna":2,"summary":1,"doc_gen":3} 처럼 작업유형별 레벨 지정
-    - level: 단일 숫자(모든 작업유형 동일 레벨로 세팅). level_for_tasks가 우선
+    업로드(or 기존) 파일들에 대해 작업유형별 레벨을 강제로 세팅하고 인제스트.
+    - files: 대상 파일 이름/경로(비우면 META 전체 대상이지만, 본 엔드포인트에서는 업로드 파일만 전달)
+    - level_for_tasks: {"qna":2,"summary":1,"doc_gen":3} (필수)
     - tasks: 작업유형 제한 (미지정 시 모든 TASK_TYPES)
-    - collection_name: 인제스트 대상 컬렉션(미지정 시 기본 COLLECTION_NAME)
     """
     files: Optional[List[str]] = None
-    level_for_tasks: Optional[Dict[str, int]] = None
-    level: Optional[int] = None
+    level_for_tasks: Dict[str, int]
     tasks: Optional[List[str]] = None
-    collection_name: Optional[str] = None
+
 
 async def override_levels_and_ingest(req: OverrideLevelsRequest):
-    # 0) META 존재 체크
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 /v1/admin/vector/extract 를 수행하세요."}
 
-    # 1) 요청 정규화
     target_tasks = [t for t in (req.tasks or TASK_TYPES) if t in TASK_TYPES]
     if not target_tasks:
         return {"error": "유효한 작업유형이 없습니다. (허용: doc_gen|summary|qna)"}
 
-    level_map = dict(req.level_for_tasks or {})
-    if not level_map and req.level is not None:
-        # 단일 레벨을 모든 대상 작업유형에 적용
-        for t in target_tasks:
-            level_map[t] = int(max(1, req.level))
-    # 레벨 미제공 방지
+    level_map = {t: int(max(1, lv)) for t, lv in (req.level_for_tasks or {}).items() if t in TASK_TYPES}
     if not level_map:
-        return {"error": "적용할 보안레벨이 없습니다. level 또는 level_for_tasks 를 지정하세요."}
+        return {"error": "적용할 보안레벨이 없습니다. level_for_tasks 를 지정하세요."}
 
-    # 2) META 로드
     meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
 
-    # 3) 파일 필터 만들기 (이름, 경로, 확장자 유무 모두 허용)
+    # 대상 파일 셋(메타키/파일명/스텀 모두 허용)
     def _to_keyset(files: List[str]) -> set:
         out = set()
         for f in files:
             p = Path(f)
-            out.add(p.name)       # 파일명
-            out.add(str(p))       # 경로 문자열
-            out.add(p.stem)       # 확장자 제거명(문서ID로 쓰는 경우 대응)
+            out.update({str(f), p.name, p.stem})
         return out
 
-    targets_all = list(meta.keys())
+    all_keys = list(meta.keys())  # "securityLevelX/.../파일명.확장자"
     if req.files:
-        keyset = _to_keyset(req.files)
-        targets = []
-        for k in targets_all:
-            # k 예: "securityLevel1/문서명.pdf"
-            name = Path(k).name
-            stem = Path(k).stem
-            if (k in keyset) or (name in keyset) or (stem in keyset):
-                targets.append(k)
+        ks = _to_keyset(req.files)
+        targets = [k for k in all_keys if (k in ks or Path(k).name in ks or Path(k).stem in ks)]
     else:
-        targets = targets_all
+        targets = all_keys
 
     if not targets:
         return {"updated": 0, "ingested": 0, "message": "대상 파일이 없습니다."}
 
-    # 4) 대상들의 security_levels를 강제로 덮어쓰기
     updated = 0
     for k in targets:
         entry = meta.get(k) or {}
         sec = entry.get("security_levels") or {}
         for t in target_tasks:
-            lv = int(max(1, level_map.get(t, sec.get(t, 1))))
-            sec[t] = lv
+            if t in level_map:
+                sec[t] = int(level_map[t])
         entry["security_levels"] = sec
         meta[k] = entry
         updated += 1
 
-    # 5) META 저장
     META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 6) 실제 인제스트 실행 (선택한 작업유형만)
-    coll = req.collection_name or COLLECTION_NAME
+    # ★ 업로드한(또는 지정한) 파일만 인제스트
     res = await ingest_embeddings(
-        model_key=None,                 # 활성 모델 사용
-        chunk_size=None, overlap=None,  # 기존 설정 사용
+        model_key=None,
+        chunk_size=None,
+        overlap=None,
         target_tasks=target_tasks,
-        collection_name=coll,
+        collection_name=COLLECTION_NAME,
+        file_keys_filter=targets,
     )
     return {
         "message": "레벨 오버라이드 후 인제스트 완료",
-        "collection": coll,
+        "collection": COLLECTION_NAME,
         "updated_meta_entries": updated,
         "inserted_chunks": int(res.get("inserted_chunks", 0)),
+        "target_count": len(targets),
     }
