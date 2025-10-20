@@ -78,6 +78,16 @@ ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
 
 RAG_TOPK_CACHE_KEY = "rag_topk"
 
+# 허용 루트 가드
+_ALLOWED_ROOTS = [
+    # 서비스 표준
+    str((BASE_BACKEND / "service" / "storage" / "model").resolve()),
+    # 레거시
+    str((BASE_BACKEND / "storage" / "model").resolve()),
+    # 컨테이너 마운트(있다면)
+    "/storage/model",
+]
+
 # ===== Pydantic models (변수명/스키마 고정) =====
 class TopKSettingsBody(BaseModel):
     topK: int = Field(..., gt=0, description="RAG 반환 문서 수")
@@ -143,10 +153,8 @@ class ActivePromptBody(BaseModel):
     promptId: int = Field(..., description="선택할 프롬프트 ID")
 
 class DeleteModelBody(BaseModel):
-    modelName: str = Field(..., description="삭제할 모델명 (llm_models.name)")
-    deleteFiles: bool = Field(True, description="모델 폴더(주 경로)를 디스크에서 삭제")
-    deleteBaseAlso: bool = Field(False, description="LORA/QLORA일 때 base(mather_path) 폴더도 함께 삭제")
-    deleteHistory: bool = Field(False, description="연관 히스토리(llm_eval_runs)까지 삭제 (기본 보존)")
+    modelName: str
+
 
 # 공통 정규화 함수 추가
 def _canon_storage_path(p: str) -> str:
@@ -1685,165 +1693,263 @@ def get_selected_model(q):
         }
     finally:
         conn.close()
-def _is_under_allowed_roots(p: str) -> bool:
-    """
-    실수로 시스템 폴더를 지우지 않도록 '모델 저장소' 하위만 허용.
-    - ./service/storage/model/...
-    - ./storage/model/...
-    - /storage/model/... (컨테이너 마운트 경로)
-    """
+
+
+def _is_under_allowed_roots(path_str: str) -> bool:
     try:
-        rp = os.path.realpath(p)
-        roots = [
-            os.path.realpath(str(STORAGE_ROOT)),
-            os.path.realpath(str(LEGACY_STORAGE_ROOT)),
-            "/storage/model",
-        ]
-        return any(rp.startswith(os.path.realpath(r)) for r in roots if r)
+        rp = str(Path(path_str).resolve())
     except Exception:
         return False
+    for root in _ALLOWED_ROOTS:
+        try:
+            if rp == str(Path(root).resolve()) or rp.startswith(str(Path(root).resolve()) + os.sep):
+                return True
+        except Exception:
+            continue
+    return False
 
-def _safe_rm_rf(path: str) -> bool:
+def _table_exists(conn, table: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    return cur.fetchone() is not None
+def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     """
-    모델 폴더를 안전하게 삭제.
-    - 경로가 허용 루트 하위가 아니면 스킵
-    - 폴더 내부에 config.json 존재 시에만 삭제(모델 폴더 힌트)
+    DB model_path를 기준으로 실제 삭제 후보 경로들을 모두 수집.
+    - 상대경로는 backend 루트 기준으로 절대화
+    - 베이스네임으로 표준/레거시/마운트 3곳 모두 후보에 포함
+    - 중복 제거
+    """
+    out: list[str] = []
+    s = (model_path_value or "").strip().replace("\\", "/")
+    if not s:
+        return out
+
+    # 1) 입력 자체를 절대화
+    try:
+        if s.startswith("./"):
+            abs1 = str((BASE_BACKEND / s.lstrip("./")).resolve())
+        else:
+            abs1 = str(Path(s).resolve())
+        out.append(abs1)
+    except Exception:
+        pass
+
+    # 2) 베이스네임 기준 표준/레거시/마운트
+    base = os.path.basename(s.rstrip("/"))
+    if base:
+        std = (BASE_BACKEND / "service" / "storage" / "model" / base).resolve()
+        leg = (BASE_BACKEND / "storage" / "model" / base).resolve()
+        mnt = Path("/storage/model") / base
+        for p in (std, leg, mnt):
+            try:
+                out.append(str(p.resolve()))
+            except Exception:
+                out.append(str(p))
+
+    # 3) 중복 제거
+    seen = set()
+    uniq: list[str] = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+def _purge_dir_contents_safe(dir_path: str, remove_dir_if_empty: bool = False) -> dict:
+    """
+    dir_path 폴더 '안의 내용'을 전부 삭제(폴더는 기본 유지).
+    remove_dir_if_empty=True면 비었을 때 폴더까지 삭제.
+    """
+    out = {"parent": None, "deleted": [], "skipped": [], "errors": [], "removed_dir": False}
+    try:
+        if not dir_path:
+            out["skipped"].append({"target": dir_path, "reason": "empty-path"})
+            return out
+        p = Path(dir_path).resolve()
+        out["parent"] = str(p)
+        if not p.exists() or not p.is_dir():
+            out["skipped"].append({"target": str(p), "reason": "not-exists-or-not-dir"})
+            return out
+        if not _is_under_allowed_roots(str(p)):
+            out["skipped"].append({"target": str(p), "reason": "not-under-allowed-roots"})
+            return out
+
+        for child in p.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink(missing_ok=True)
+                out["deleted"].append(str(child))
+            except Exception as e:
+                out["errors"].append({"target": str(child), "error": repr(e)})
+
+        if remove_dir_if_empty:
+            try:
+                if not any(p.iterdir()):
+                    p.rmdir()
+                    out["removed_dir"] = True
+            except Exception as e:
+                out["errors"].append({"target": str(p), "error": f"rmdir-failed: {e}"})
+        return out
+    except Exception as e:
+        logging.getLogger(__name__).exception("purge dir failed: %s", dir_path)
+        out["errors"].append({"target": dir_path, "error": repr(e)})
+        return out
+
+
+def _safe_remove_dir_root(dir_path: str, report: dict):
+    """
+    모델 루트 디렉터리 자체를 삭제한다.
+    - 허용 루트 내부만 실행
+    - 비어있으면 rmdir, 남아있으면 rmtree
+    - report['removed_dir'] 갱신
     """
     try:
-        if not path:
-            return False
-        if not os.path.isdir(path):
-            return False
-        if not _is_under_allowed_roots(path):
-            logging.getLogger(__name__).warning("skip delete(outside allowed roots): %s", path)
-            return False
-        cfg = os.path.join(path, "config.json")
-        if not os.path.isfile(cfg):
-            logging.getLogger(__name__).warning("skip delete(no config.json): %s", path)
-            return False
-        shutil.rmtree(path, ignore_errors=True)
-        return not os.path.exists(path)
-    except Exception:
-        logging.getLogger(__name__).exception("safe rm -rf failed: %s", path)
-        return False
+        if not dir_path:
+            report.setdefault("skipped", []).append({"target": dir_path, "reason": "empty-path"})
+            return
+        p = Path(dir_path).resolve()
+        if not p.exists():
+            report.setdefault("skipped", []).append({"target": str(p), "reason": "not-exists"})
+            return
+        if not p.is_dir():
+            report.setdefault("skipped", []).append({"target": str(p), "reason": "not-dir"})
+            return
+        if not _is_under_allowed_roots(str(p)):
+            report.setdefault("skipped", []).append({"target": str(p), "reason": "not-under-allowed-roots"})
+            return
 
-def _to_abs_model_dir(p: Optional[str]) -> Optional[str]:
-    """
-    DB에 상대경로(./service/..., ./storage/...)가 들어있을 수 있으므로 절대경로로 환원.
-    """
-    if not p:
-        return None
-    s = p.replace("\\", "/")
-    if s.startswith("./"):
-        return str((BASE_BACKEND / s.lstrip("./")).resolve())
-    return s  # 절대경로나 /storage/model 매핑 경로면 그대로
+        try:
+            p.rmdir()                       # 비어있으면 성공
+            report["removed_dir"] = True
+        except OSError:
+            try:
+                shutil.rmtree(p)            # 잔여물 있어도 통째 제거
+                report["removed_dir"] = True
+            except Exception as e:
+                report.setdefault("errors", []).append({"target": str(p), "error": repr(e)})
+    except Exception as e:
+        logging.getLogger(__name__).exception("safe remove dir root failed: %s", dir_path)
+        report.setdefault("errors", []).append({"target": dir_path, "error": repr(e)})
 
-def delete_model(body: "DeleteModelBody") -> Dict[str, Any]:
+def delete_model_full(model_name: str) -> Dict[str, Any]:
     """
-    1) 메모리에서 언로드
-    2) 연관 DB 정리(매핑/FT/default)
-    3) (옵션) 디스크 폴더 삭제
-       - LORA/QLORA: 기본은 adapter(model_path)만 삭제, deleteBaseAlso=True면 base(mather_path)도 삭제
-       - FULL/BASE: model_path(또는 base/mather_path) 삭제
-    4) (옵션) llm_eval_runs 히스토리 삭제
+    모델 전체 삭제:
+      1) 언로드(베스트에포트)
+      2) DB에서 model_path 조회
+      3) 표준/레거시/마운트 경로 후보들에 대해
+         - 디렉터리면: 내부 내용 전체 삭제 후, 디렉터리 자체도 제거
+         - 파일이면: 파일 삭제(허용 루트 내에서만)
+      4) 연관 레코드 정리 후(llm_prompt_mapping, fine_tuned_models, llm_eval_runs) 최종 llm_models 삭제
+    반환: {
+      success, modelName,
+      fs: [ { parent, deleted[], skipped[], errors[], removed_dir<bool> }, ... ],
+      dbDeleted: { llm_prompt_mapping, fine_tuned_models, llm_eval_runs, llm_models }
+    }
     """
-    name = (body.modelName or "").strip()
+    name = (model_name or "").strip()
     if not name:
         return {"success": False, "error": "modelName required"}
 
-    row = _db_get_model_record(name)
-    if not row:
-        return {"success": False, "error": f"unknown model: {name}"}
-
-    # 1) 언로드
+    # 1) 안전 언로드(실패 무시)
     try:
         unload_model(name)
+        _mark_unloaded(name)
     except Exception:
-        logging.getLogger(__name__).exception("unload on delete failed (ignored)")
+        logging.getLogger(__name__).exception("unload failed (ignored)")
 
-    # 2) DB 정리
-    conn = _connect(); cur = conn.cursor()
-    deleted = {"llm_prompt_mapping": 0, "fine_tuned_models": 0, "llm_task_defaults": 0, "llm_eval_runs": 0, "llm_models": 0}
+    conn = _connect()
+    cur = conn.cursor()
     try:
-        mdl_id = int(row["id"])
-        cur.execute("DELETE FROM llm_prompt_mapping WHERE llm_id=?", (mdl_id,))
-        deleted["llm_prompt_mapping"] = cur.rowcount or 0
+        # 2) 모델 메타 조회
+        cur.execute("SELECT id, model_path FROM llm_models WHERE name=?", (name,))
+        row = cur.fetchone()
+        if not row:
+            return {"success": False, "error": f"unknown model: {name}"}
 
-        cur.execute("DELETE FROM fine_tuned_models WHERE model_id=?", (mdl_id,))
-        deleted["fine_tuned_models"] = cur.rowcount or 0
+        mid = int(row["id"])
+        model_path_value = (row["model_path"] or "").strip()
 
-        cur.execute("DELETE FROM llm_task_defaults WHERE model_id=?", (mdl_id,))
-        deleted["llm_task_defaults"] = cur.rowcount or 0
+        # 3) 파일시스템 정리
+        targets = _collect_fs_delete_targets(model_path_value)
+        fs_results: list[dict] = []
+        for t in targets:
+            tp = Path(t)
+            if tp.is_dir():
+                # 3-1) 디렉터리 내부 전체 삭제
+                rep = _purge_dir_contents_safe(str(tp), remove_dir_if_empty=False)
+                # 3-2) 디렉터리 자체 제거까지 시도
+                _safe_remove_dir_root(str(tp), rep)
+                fs_results.append(rep)
+            elif tp.is_file():
+                info = {
+                    "parent": str(tp.parent.resolve()),
+                    "deleted": [],
+                    "skipped": [],
+                    "errors": [],
+                    "removed_dir": False,
+                }
+                try:
+                    if _is_under_allowed_roots(str(tp.parent)):
+                        tp.unlink(missing_ok=True)
+                        info["deleted"].append(str(tp.resolve()))
+                    else:
+                        info["skipped"].append(
+                            {"target": str(tp.resolve()), "reason": "not-under-allowed-roots"}
+                        )
+                except Exception as e:
+                    logging.getLogger(__name__).exception("unlink failed: %s", tp)
+                    info["errors"].append({"target": str(tp.resolve()), "error": repr(e)})
+                fs_results.append(info)
+            else:
+                fs_results.append(
+                    {
+                        "parent": str(tp),
+                        "deleted": [],
+                        "skipped": [{"target": str(tp), "reason": "not-exists"}],
+                        "errors": [],
+                        "removed_dir": False,
+                    }
+                )
 
-        if body.deleteHistory:
-            cur.execute("DELETE FROM llm_eval_runs WHERE llm_id=?", (mdl_id,))
+        # 4) DB 정리
+        deleted = {
+            "llm_prompt_mapping": 0,
+            "fine_tuned_models": 0,
+            "llm_eval_runs": 0,
+            "llm_models": 0,
+        }
+
+        if _table_exists(conn, "llm_prompt_mapping"):
+            cur.execute("DELETE FROM llm_prompt_mapping WHERE llm_id=?", (mid,))
+            deleted["llm_prompt_mapping"] = cur.rowcount or 0
+
+        if _table_exists(conn, "fine_tuned_models"):
+            cur.execute("DELETE FROM fine_tuned_models WHERE model_id=?", (mid,))
+            deleted["fine_tuned_models"] = cur.rowcount or 0
+
+        if _table_exists(conn, "llm_eval_runs"):
+            cur.execute("DELETE FROM llm_eval_runs WHERE llm_id=?", (mid,))
             deleted["llm_eval_runs"] = cur.rowcount or 0
 
-        # 마지막: llm_models 삭제
-        cur.execute("DELETE FROM llm_models WHERE id=?", (mdl_id,))
+        cur.execute("DELETE FROM llm_models WHERE id=?", (mid,))
         deleted["llm_models"] = cur.rowcount or 0
 
         conn.commit()
+
+        return {
+            "success": True,
+            "modelName": name,
+            "fs": fs_results,
+            "dbDeleted": deleted,
+        }
+
     except Exception:
-        logging.getLogger(__name__).exception("DB delete failed")
-        return {"success": False, "error": "DB delete failed"}
+        logging.getLogger(__name__).exception("delete_model_full failed")
+        return {"success": False, "error": "delete_model_full failed"}
     finally:
         try:
             conn.close()
         except Exception:
             pass
-
-    # 3) 디스크 삭제
-    removed_dirs: list[str] = []
-    skipped_dirs: list[str] = []
-
-    if body.deleteFiles:
-        # 해당 모델의 경로들 해석
-        paths = _resolve_paths_for_model(name)  # {'base':..., 'adapter':..., 'full':...}
-        t = (row["type"] or "").upper()
-
-        candidates: list[str] = []
-        if t in ("LORA", "QLORA"):
-            if paths.get("adapter"):
-                candidates.append(paths["adapter"])
-            if body.deleteBaseAlso and paths.get("base"):
-                candidates.append(paths["base"])
-        elif t == "FULL":
-            if paths.get("full"):
-                candidates.append(paths["full"])
-        elif t == "BASE":
-            if paths.get("base"):
-                candidates.append(paths["base"])
-        else:
-            # 타입 불명 → 모델 경로/규칙경로를 최대한 찾아본다
-            p = _resolve_model_path_for_name(name) or _resolve_model_fs_path(name)
-            if p:
-                candidates.append(p)
-
-        # 중복 제거 & 절대경로화
-        seen = set()
-        norm_dirs = []
-        for c in candidates:
-            if not c:
-                continue
-            absd = _to_abs_model_dir(c)
-            if not absd or absd in seen:
-                continue
-            seen.add(absd)
-            norm_dirs.append(absd)
-
-        for d in norm_dirs:
-            ok = _safe_rm_rf(d)
-            if ok:
-                removed_dirs.append(d)
-            else:
-                skipped_dirs.append(d)
-
-    return {
-        "success": True,
-        "modelName": name,
-        "dbDeleted": deleted,
-        "removedDirs": removed_dirs,
-        "skippedDirs": skipped_dirs,
-        "note": "LORA/QLORA는 기본적으로 adapter만 삭제합니다. base까지 지우려면 deleteBaseAlso=true를 사용하세요."
-    }
