@@ -1,14 +1,15 @@
 """
-# 다운로드
+# 다운로드 예시
 
 python scripts/download_hf_models.py --base_dir /home/work/CoreIQ/backend/storage/model --hf_token ""
 
 """
-# download_hf_models.py
 from __future__ import annotations
 import os
 from typing import Iterable, Optional
+
 from huggingface_hub import snapshot_download, login
+
 
 def hf_download(
     model_id: str,
@@ -22,9 +23,9 @@ def hf_download(
 ) -> str:
     """
     Hugging Face 모델 체크포인트를 로컬에 스냅샷로 다운로드.
-    - resume_download=True 로 부분 다운로드/중단 재개 지원
-    - allow_patterns 로 불필요 파일 제외 가능
-    - local_files_only=True 로 오프라인/캐시 우선 사용
+    - resume_download=True : 부분 다운로드/중단 재개 지원
+    - allow_patterns       : 불필요 파일 제외 가능
+    - local_files_only     : 캐시만 사용(오프라인 모드)
 
     Returns: 실제 저장된 로컬 디렉터리 경로
     """
@@ -34,7 +35,7 @@ def hf_download(
 
     os.makedirs(local_dir, exist_ok=True)
 
-    # 고속 전송(선택): pip install hf_transfer 후 아래 환경변수 활성화
+    # 고속 전송(선택): `pip install hf_transfer` 후 활성화
     # os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
     path = snapshot_download(
@@ -48,6 +49,7 @@ def hf_download(
     )
     return path
 
+
 def download_default_two(
     base_dir: str,
     token: Optional[str] = None,
@@ -55,7 +57,7 @@ def download_default_two(
 ) -> dict[str, str]:
     """
     본 요청의 모델들을 내려받음.
-    include 패턴은 안전하게 필수 파일만 지정(용량 절감).
+    include 패턴은 필수 파일 중심으로 지정(용량 절감).
     """
     plans = [
         {
@@ -110,9 +112,35 @@ def download_default_two(
                 "chat_template*",
             ],
         },
+        # === 추가: Qwen/Qwen3-Omni-30B-A3B-Instruct (멀티모달: 하위 디렉터리 포함 보수적 패턴) ===
+        {
+            "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            "dst": os.path.join(base_dir, "Qwen3-Omni-30B-A3B-Instruct"),
+            "include": [
+                # 가중치/샤드
+                "*.safetensors",
+                "**/*.safetensors",
+                "*.bin",                   # projector 등 일부 자산이 .bin 일 수 있음
+                "**/*.bin",
+                # 구성/인덱스/프로세서 설정
+                "*.json",
+                "**/*.json",               # *config.json, *.index.json, processor_config.json 등
+                # 토크나이저/스페셜 토큰/템플릿
+                "tokenizer.*",
+                "**/tokenizer.*",
+                "vocab.json",
+                "merges.txt",
+                "special_tokens_map.json",
+                "chat_template*",
+                "**/chat_template*",
+                # SentencePiece/기타
+                "*.model",                 # tokenizer.model
+                "**/*.model",
+            ],
+        },
     ]
 
-    out = {}
+    out: dict[str, str] = {}
     for p in plans:
         out[p["model_id"]] = hf_download(
             model_id=p["model_id"],
@@ -123,8 +151,10 @@ def download_default_two(
         )
     return out
 
+
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--base_dir", required=True, help="모델 저장 루트 디렉터리")
     parser.add_argument("--hf_token", default=None, help="Hugging Face 토큰(필요 시)")
