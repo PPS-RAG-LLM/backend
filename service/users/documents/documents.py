@@ -4,7 +4,7 @@ import tiktoken, fitz, io, json, uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import UploadFile
-from utils import logger, free_torch_memory, now_kst
+from utils import load_embedding_model, logger, free_torch_memory, now_kst
 from config import config
 from repository.documents import (
     insert_workspace_document,
@@ -103,24 +103,19 @@ def _chunk_text(text: str) -> List[str]:
 
 def _embed_chunks(chunks: List[str]) -> List[List[float]]:
     """sentence-transformers로 임베딩 생성. 모델은 config에서 읽고, 없으면 다국어 소형 기본값."""
-    try:
-        from sentence_transformers import SentenceTransformer
-    except Exception as e:
-        logger.error(f"sentence_transformers import 실패: {e}")
-        raise
-
     model_path = EMBEDDING_MODEL_DIR
     if not model_path.exists():
         raise FileNotFoundError(f"임베딩 모델 경로를 찾을 수 없음: {model_path}")
 
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SentenceTransformer(str(model_path))
+    # model = SentenceTransformer(str(model_path))
+    model = load_embedding_model()
     # model = SentenceTransformer(str(model_path), device="cpu")
     vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
-    free_torch_memory()
+    # free_torch_memory() 제거 - 싱글톤 모델을 계속 사용하므로 메모리 해제하면 안됨
     return [v.astype(float).tolist() for v in vecs]
 
-    return resp
+
 
 
 # 아래는 여러 파일 업로드 지원 함수
@@ -220,10 +215,10 @@ async def upload_document(
     vectors = _embed_chunks(chunks)
     # 청크 메타 템플릿(문서 공통 메타 + chunk text 포함)
     header_meta = (
-        "<document_metadata>\n"
-        f"sourceDocument: {filename}\n"
-        f"published: {now_str}\n"
-        "</document_metadata>\n\n"
+        "  <document_metadata>\n"
+        f"    sourceDocument: {filename}\n"
+        f"    published: {now_str}\n"
+        "  </document_metadata>\n\n"
     )
 
     vec_items = []

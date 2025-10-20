@@ -60,8 +60,12 @@ def _compose_summary_message(
     if user_prompt:
         detail = str(user_prompt).strip()
         if detail:
-            return f"{combined_contexts}\n\n<user_prompt>\n{detail}\n</user_prompt>"
-    
+            return (
+                f"{combined_contexts}\n\n"
+                f"<user_prompt>\n{detail}\nTHE ANSWER SHOULD BE IN KOREAN.</user_prompt>"
+                "Please refer to the relevant `<context>` or `<document>` inside the content"
+                "in accordance with the `<user_prompt>`'s intent."
+            )
     return combined_contexts
 
 

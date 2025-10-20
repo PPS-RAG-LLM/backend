@@ -12,7 +12,7 @@ from errors import BadRequestError, NotFoundError
 
 logger = logger(__name__)
 
-feedback_router = APIRouter(tags=["chat_feedback"], prefix="/v1/workspace")
+feedback_router = APIRouter(tags=["Chat Feedback"], prefix="/v1/workspace")
 
 
 class ChatFeedbackRequest(BaseModel):
