@@ -83,8 +83,8 @@ def stream_and_persist(
         response=json.dumps(response_json, ensure_ascii=False),
         thread_id=thread_id,
     )
-    
-    # 임시 벡터 정리
+    logger.debug(f"CHAT_ID : {chat_id}")
+
     try:
         if temp_doc_ids:
             delete_document_vectors_by_doc_ids(temp_doc_ids)

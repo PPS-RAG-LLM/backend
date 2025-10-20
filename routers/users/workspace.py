@@ -18,8 +18,8 @@ from utils import logger, validate_category
 
 logger = logger(__name__)
 
-router = APIRouter(tags=["workspace"], prefix="/v1/workspaces")
-router_singular = APIRouter(tags=["workspace"], prefix="/v1/workspace")
+router = APIRouter(tags=["Workspace"], prefix="/v1/workspaces")
+router_singular = APIRouter(tags=["Workspace"], prefix="/v1/workspace")
 
 
 class NewWorkspaceBody(BaseModel):

@@ -41,16 +41,19 @@ def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any], pa
         combined_contexts = "\n\n---\n\n".join(contexts)
         parts.append(combined_contexts)
     
+    parts.append("<user_prompt>")
+    
     # 2. 템플릿 변수 (있으면 추가)
     if template_vars:
         var_lines = "\n".join(f"- {key}: {value}" for key, value in template_vars.items())
-        parts.append(f"<template_variables>\n{var_lines}\n</template_variables>")
-    
+        parts.append(f"\n{var_lines}\n")
+
     # 3. 사용자 프롬프트 (있으면 추가)
     user_prompt_text = str(user_prompt or "").strip()
     if user_prompt_text:
-        parts.append(f"<user_prompt>\n{user_prompt_text}\n</user_prompt>")
-    
+        parts.append(f"Prompt: {user_prompt_text}\n**The Answer should be in Korean.**")
+    parts.append("</user_prompt>")
+
     # 4. 모든 parts 결합
     if parts:
         return "\n\n".join(parts)
