@@ -30,6 +30,9 @@ from errors.exceptions import BadRequestError, InternalServerError
 
 logger = logger(__name__)
 
+import re
+from urllib.parse import quote_plus
+_FEEDBACK_FILE_RE = re.compile(r"^feedback_(qa|doc_gen|summary)_p(\d+)\.csv$", re.IGNORECASE)
 
 # ===== 디바이스 유틸 =====
 def _get_model_device(model):
@@ -1342,3 +1345,71 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
+def list_feedback_datasets() -> dict:
+    """
+    ./storage/train_data 안에서 파일명 패턴
+    'feedback_{task}_p{prompt}.csv'에 매칭되는 모든 CSV를 테스크별로 반환.
+    반환 경로는 상대경로('./storage/train_data/...')를 제공한다.
+    """
+    REL_ROOT = "./storage/train_data"
+
+    try:
+        names = sorted(os.listdir(TRAIN_DATA_ROOT))
+    except FileNotFoundError:
+        names = []
+
+    entries = []
+    for name in names:
+        m = _FEEDBACK_FILE_RE.match(name)
+        if not m:
+            continue
+        task = m.group(1).lower()
+        prompt = int(m.group(2))
+        abs_path = os.path.join(TRAIN_DATA_ROOT, name)
+        if not os.path.isfile(abs_path):
+            continue
+        st = os.stat(abs_path)
+        mtime_dt = datetime.fromtimestamp(st.st_mtime)
+        entries.append({
+            "task": task,                               # qa | doc_gen | summary
+            "file": name,                               # ex) feedback_qa_p0.csv
+            "prompt": prompt,                           # 정수 p값
+            "bytes": st.st_size,                        # 파일 크기
+            "mtime": mtime_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "mtime_iso": mtime_dt.isoformat(),
+            "path": f"{REL_ROOT}/{name}",               # 상대경로 (Docker 고려)
+            "downloadUrl": f"/v1/admin/llm/feedback-datasets?file={quote_plus(name)}",
+        })
+
+    groups = {"qa": [], "doc_gen": [], "summary": []}
+    for e in entries:
+        groups[e["task"]].append(e)
+    for k in groups:
+        groups[k].sort(key=lambda x: x["prompt"])
+
+    return {
+        "root": REL_ROOT,
+        "pattern": "feedback_{task}_p{prompt}.csv",
+        "total": len(entries),
+        "counts": {k: len(v) for k, v in groups.items()},
+        "groups": groups,
+    }
+
+def resolve_feedback_download(file: str) -> tuple[str, str]:
+    """
+    다운로드용 파일 검증/해결:
+    - basename만 허용 (경로 탈출 방지)
+    - 파일명 패턴 확인
+    - ./storage/train_data 내부 존재 확인
+    성공 시: (abs_path, filename) 반환
+    """
+    if os.path.basename(file) != file:
+        raise BadRequestError("basename만 허용합니다.")
+    m = _FEEDBACK_FILE_RE.match(file)
+    if not m:
+        raise BadRequestError("잘못된 파일명 형식입니다. (feedback_{task}_p{n}.csv)")
+    abs_path = os.path.join(TRAIN_DATA_ROOT, file)
+    if not os.path.isfile(abs_path):
+        # 라우터에서 404로 매핑하기 위해 표준 예외 사용
+        raise FileNotFoundError(f"not found in {TRAIN_DATA_ROOT}: {file}")
+    return abs_path, file
