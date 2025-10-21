@@ -65,13 +65,11 @@ def build_user_message_with_context(message: str, snippets: List[Dict[str, Any]]
     if not snippets:
         return message
     
-    if parts:
-        parts = [f"[{i}] {h['text']}" for i, h in enumerate(snippets, 1)]
-        contexts = (
-            "Answer the `<user_prompt>` based on the following `<documents>`.\n"
-            "<documents>\n" + "<divider/>\n".join(parts) + "\n</documents>\n"
-        )
-        
+    parts = [f"[{i}] {h['text']}" for i, h in enumerate(snippets, 1)]
+    contexts = (
+        "Answer the `<user_prompt>` based on the following `<documents>`.\n"
+        "<documents>\n" + "<divider/>\n".join(parts) + "\n</documents>\n"
+    )
     result = f"{contexts}\n\n<user_prompt>\n- {message}\n</user_prompt>\n"
     if parts and query_refusal_response:
         result += f"\nIf the question in `<user_prompt>` is not related to the `<documents>`, answer the following query refusal response.\n- {query_refusal_response}\n\n"
