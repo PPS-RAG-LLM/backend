@@ -103,7 +103,6 @@ def save_chat_feedback(
     chat_id: int,
     like: bool,  # "true" or "false"
     category: str,
-    model_name: str,
     prompt_id: Optional[int] = None,
     subcategory: Optional[str] = None,
 ) -> dict:
@@ -140,7 +139,7 @@ def save_chat_feedback(
         question=question,
         answer=answer,
         user_feedback=like,
-        model_name=model_name
+        model_name=chat["model"]
     )
 
     

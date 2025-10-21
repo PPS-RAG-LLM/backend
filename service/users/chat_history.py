@@ -36,9 +36,6 @@ def list_thread_chats_for_workspace(
                 "role": "user", 
                 "content": chat["prompt"],
                 "sentAt": chat['created_at'],
-                "reasoningDuration": None,
-                "sources": None,
-                "attachments": None
             })
             # response는 문자열 -> JSON 파싱해서 필요한 필드 추출
             assistant_text = chat["response"]
@@ -66,7 +63,8 @@ def list_thread_chats_for_workspace(
                 "sentAt": chat['created_at'],
                 "reasoningDuration": reasoning_duration,
                 "sources": sources,
-                "attachments": attachments
+                "attachments": attachments,
+                "model": chat["model"]
             })
 
     # logger.info(f"messages: {messages}")

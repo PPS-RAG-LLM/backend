@@ -81,6 +81,7 @@ def stream_and_persist(
         prompt=body["message"],
         response=json.dumps(response_json, ensure_ascii=False),
         thread_id=thread_id,
+        model=body["model"],
     )
     logger.debug(f"CHAT_ID : {chat_id}")
     try:

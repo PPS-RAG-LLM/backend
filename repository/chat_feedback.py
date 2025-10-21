@@ -20,6 +20,7 @@ def get_chat_by_id(chat_id: int, user_id: int) -> dict | None:
             WorkspaceChat.workspace_id,
             WorkspaceChat.thread_id,
             WorkspaceChat.feedback,
+            WorkspaceChat.model,
         ).where(
             WorkspaceChat.id == chat_id,
             WorkspaceChat.user_id == user_id,
@@ -37,6 +38,7 @@ def get_chat_by_id(chat_id: int, user_id: int) -> dict | None:
             "workspace_id": m["workspace_id"],
             "thread_id": m["thread_id"],
             "feedback": m["feedback"],
+            "model": m["model"],
         }
 
 

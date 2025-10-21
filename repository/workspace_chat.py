@@ -23,6 +23,7 @@ def get_chat_history_by_workspace_id(
                 WorkspaceChat.thread_id,
                 WorkspaceChat.prompt,
                 WorkspaceChat.response,
+                WorkspaceChat.model,
                 WorkspaceChat.created_at,
             )
             .where(
@@ -47,6 +48,7 @@ def get_chat_history_by_workspace_id(
                     "thread_id": m["thread_id"],
                     "prompt": m["prompt"],
                     "response": m["response"],
+                    "model": m["model"],
                     "created_at": to_kst_string(created),
                 }
             )
@@ -62,6 +64,7 @@ def get_chat_history_by_thread_id(
                 WorkspaceChat.id,
                 WorkspaceChat.prompt,
                 WorkspaceChat.response,
+                WorkspaceChat.model,
                 WorkspaceChat.created_at,
             )
             .where(
@@ -83,6 +86,7 @@ def get_chat_history_by_thread_id(
                     "id": m["id"],
                     "prompt": m["prompt"],
                     "response": m["response"],
+                    "model": m["model"],
                     "created_at": to_kst_string(created),
                 }
             )
@@ -96,6 +100,7 @@ def insert_chat_history(
     prompt: str,
     response: str,
     thread_id: int | None = None,
+    model: str | None = None,
 ):
     with get_session() as session:
         try:
@@ -106,6 +111,7 @@ def insert_chat_history(
                 prompt=prompt,
                 response=response,
                 thread_id=thread_id,
+                model=model,
                 created_at=now_kst(),
                 updated_at=now_kst(),
             )
