@@ -1,3 +1,5 @@
+import json
+from errors.exceptions import NotFoundError
 from utils import logger
 from utils.database import get_session
 from utils.time import now_kst, to_kst_string
@@ -114,4 +116,36 @@ def insert_chat_history(
             return obj.id # id 반환
         except IntegrityError as exc:
             logger.error(f"insert_chat_history failed: {exc}")
+            raise DatabaseError(str(exc))
+
+def update_chat_metrics(chat_id: int, user_id: int, reasoning_duration: float) -> None:
+    """채팅 메시지의 reasoning_duration 업데이트"""
+    with get_session() as session:
+        try:
+            chat = session.query(WorkspaceChat).filter(
+                WorkspaceChat.id == chat_id,
+                WorkspaceChat.user_id == user_id
+            ).first()
+            
+            if not chat:
+                raise NotFoundError(f"Chat not found: chat_id={chat_id}")
+            
+            # response JSON 파싱
+            response_data = json.loads(chat.response)
+            
+            # metrics에 reasoning_duration 업데이트
+            if "metrics" in response_data:
+                response_data["metrics"]["reasoning_duration"] = round(reasoning_duration, 3)
+            else:
+                response_data["metrics"] = {"reasoning_duration": round(reasoning_duration, 3)}
+            
+            # 업데이트
+            chat.response = json.dumps(response_data, ensure_ascii=False)
+            chat.updated_at = now_kst()
+            session.commit()
+            
+            logger.info(f"update_chat_metrics success: chat_id={chat_id}, reasoning_duration={reasoning_duration}")
+        except Exception as exc:
+            session.rollback()
+            logger.error(f"update_chat_metrics failed: {exc}")
             raise DatabaseError(str(exc))

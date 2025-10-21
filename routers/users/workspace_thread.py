@@ -16,6 +16,7 @@ class ChatHistoryItem(BaseModel):
     role : str
     content : str
     sentAt : Optional[str] 
+    reasoningDuration : Optional[float] = None
     sources : Optional[List[Dict[str, Any]]] = None
 
 class ChatHistoryResponse(BaseModel):

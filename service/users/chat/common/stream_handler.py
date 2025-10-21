@@ -59,7 +59,7 @@ def stream_and_persist(
             "chunk_index": snippet.get("chunk_index"),
         })
     
-    # 응답 JSON 구성
+    # TODO : 응답 JSON 구성
     response_json = {
         "text": "".join(acc_text),
         "sources": sources,
@@ -69,11 +69,10 @@ def stream_and_persist(
             "completion_tokens": 0,
             "prompt_tokens": 0,
             "total_tokens": 0,
-            "outputTps": 0.0 if duration == 0 else len("".join(acc_text)) / max(duration, 1e-6),
+            "output_tps": 0.0 if duration == 0 else len("".join(acc_text)) / max(duration, 1e-6),
             "duration": round(duration, 3),
         },
     }
-    
     # DB 저장
     chat_id = insert_chat_history(
         user_id=user_id,
@@ -84,11 +83,11 @@ def stream_and_persist(
         thread_id=thread_id,
     )
     logger.debug(f"CHAT_ID : {chat_id}")
-
     try:
         if temp_doc_ids:
             delete_document_vectors_by_doc_ids(temp_doc_ids)
     except Exception as exc:
         logger.error(f"vector cleanup failed: {exc}")
     yield f"__CHAT_ID__: {chat_id}"
+
 

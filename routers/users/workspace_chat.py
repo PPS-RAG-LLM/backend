@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from fastapi import APIRouter, Path, Query, Body
+from fastapi import APIRouter, Depends, Path, Query, Body
 from starlette.responses import StreamingResponse
 from repository.workspace import get_workspace_by_workspace_id
 from service.users.chat import (
@@ -196,3 +196,22 @@ def doc_gen_stream_endpoint(
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
 
+class UpdateMetricsRequest(BaseModel):
+    reasoningDuration: float = Field(..., description="추론 시간 (초)", ge=0)
+
+@chat_router.patch(
+    "/{slug}/chat/{chat_id}/metrics",
+    summary="채팅 메트릭 업데이트",
+    description="프론트엔드에서 계산한 reasoning_duration을 업데이트"
+)
+def update_chat_metrics_endpoint(
+    chat_id: int = Path(..., description="채팅 ID"),
+    body: UpdateMetricsRequest = Body(..., description="채팅 메트릭 업데이트 요청"),
+):
+    """
+    프론트엔드가 스트리밍 응답 중 계산한 reasoning_duration을 저장
+    """
+    from service.users.chat.response_metrics import update_reasoning_duration
+    user_id = 3
+    result = update_reasoning_duration(user_id, chat_id, body.reasoningDuration)
+    return {"success": True, "data": result}

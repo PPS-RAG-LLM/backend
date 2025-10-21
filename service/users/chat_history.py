@@ -36,20 +36,37 @@ def list_thread_chats_for_workspace(
                 "role": "user", 
                 "content": chat["prompt"],
                 "sentAt": chat['created_at'],
-                "sources": None
+                "reasoningDuration": None,
+                "sources": None,
+                "attachments": None
             })
-            # response는 문자열 -> text만 추출
+            # response는 문자열 -> JSON 파싱해서 필요한 필드 추출
             assistant_text = chat["response"]
+            sources = None
+            attachments = None
+            reasoning_duration = None
+            
             try:
-                assistant_text = json.loads(assistant_text).get("text", assistant_text)
+                response_json = json.loads(assistant_text)
+                assistant_text = response_json.get("text", assistant_text)
+                sources = response_json.get("sources")
+                attachments = response_json.get("attachments")
+                
+                # metrics에서 reasoning_duration 추출
+                metrics = response_json.get("metrics", {})
+                if metrics:
+                    reasoning_duration = metrics.get("reasoning_duration")
             except Exception:
                 pass
+            
             messages.append({
                 "chatId": chat_id,
                 "role": "assistant", 
                 "content": assistant_text, 
                 "sentAt": chat['created_at'],
-                "sources": None
+                "reasoningDuration": reasoning_duration,
+                "sources": sources,
+                "attachments": attachments
             })
 
     # logger.info(f"messages: {messages}")
