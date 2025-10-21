@@ -152,7 +152,7 @@ def save_chat_feedback(
         # 기존 레코드 업데이트 (updated_at 갱신)
         update_feedback_metadata(existing["id"])
         feedback_id = existing["id"]
-        update_feedback_to_chat_worksapce(chat_id, feedback_id)
+        update_feedback_to_chat_worksapce(chat_id, like)
     else:
         logger.debug(f"새로운 피드백입니다. 저장합니다.: {existing}")
         # 새 레코드 생성
@@ -164,7 +164,7 @@ def save_chat_feedback(
             prompt_id=prompt_id
         )
         logger.debug(f"feedback_id: {feedback_id}")
-        update_feedback_to_chat_worksapce(chat_id, feedback_id)
+        update_feedback_to_chat_worksapce(chat_id, like)
 
     
     # 7. CSV 행 수 계산 (데이터 내부의 줄바꿈 고려)

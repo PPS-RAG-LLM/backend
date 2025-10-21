@@ -183,7 +183,7 @@ class WorkspaceChat(Base):
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
-    feedback = Column(Integer)
+    feedback = Column(Boolean)
 
     # 관계 정의
     user = relationship("User", back_populates="workspace_chats")

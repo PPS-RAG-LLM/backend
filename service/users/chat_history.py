@@ -63,8 +63,8 @@ def list_thread_chats_for_workspace(
                 "sentAt": chat['created_at'],
                 "reasoningDuration": reasoning_duration,
                 "sources": sources,
+                "feedback": chat["feedback"],
                 "attachments": attachments,
-                "model": chat["model"]
             })
 
     # logger.info(f"messages: {messages}")

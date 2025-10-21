@@ -19,7 +19,6 @@ class ChatFeedbackRequest(BaseModel):
     """채팅 피드백 요청"""
     chatId: int = Field(..., description="채팅 ID")
     like: bool = Field(..., description="좋아요(true)/싫어요(false)")
-    modelName: str = Field(..., description="사용된 모델 이름")
     promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID (선택사항)")
 
 
@@ -43,7 +42,6 @@ def save_feedback_endpoint(
         chat_id=body.chatId,
         like=body.like,
         category=category,
-        model_name=body.modelName,
         prompt_id=body.promptId,
         subcategory=subcategory,
     )

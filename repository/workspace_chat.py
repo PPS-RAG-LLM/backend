@@ -65,6 +65,7 @@ def get_chat_history_by_thread_id(
                 WorkspaceChat.prompt,
                 WorkspaceChat.response,
                 WorkspaceChat.model,
+                WorkspaceChat.feedback,
                 WorkspaceChat.created_at,
             )
             .where(
@@ -87,6 +88,7 @@ def get_chat_history_by_thread_id(
                     "prompt": m["prompt"],
                     "response": m["response"],
                     "model": m["model"],
+                    "feedback": m["feedback"],
                     "created_at": to_kst_string(created),
                 }
             )

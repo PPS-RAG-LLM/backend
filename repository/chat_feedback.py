@@ -145,11 +145,12 @@ def list_all_feedbacks(
         
         return result
 
-def update_feedback_to_chat_worksapce(chat_id: int, feedback_id: int) -> None:
+def update_feedback_to_chat_worksapce(chat_id: int, like: bool) -> None:
     """feedback이후 workspace_chat에 피드백 정보 업데이트"""
     with get_session() as session:
         stmt = select(WorkspaceChat).where(WorkspaceChat.id == chat_id)
         chat = session.execute(stmt).scalar_one_or_none()
+        logger.debug(f"update_feedback_to_chat_worksapce: chat_id={chat_id}, like={like}")
         if chat:
-            chat.feedback = feedback_id
+            chat.feedback = like
             session.commit()
