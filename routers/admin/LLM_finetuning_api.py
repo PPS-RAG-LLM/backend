@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query, UploadFile, File, Form
+from fastapi import APIRouter, Query, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, Field
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 import asyncio
 import json
 import os
@@ -13,6 +13,10 @@ from service.admin.LLM_finetuning import (
     start_fine_tuning,
     get_fine_tuning_status,
     TRAIN_DATA_ROOT,
+    BadRequestError,
+    list_feedback_datasets,
+    resolve_feedback_download,
+
 )
 
 router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
@@ -137,3 +141,32 @@ async def launch_fine_tuning(
 )
 async def read_fine_tuning_status(jobId: str = Query(..., description="조회할 작업 ID")):
     return get_fine_tuning_status(job_id=jobId)
+
+@router.get(
+    "/feedback-datasets",
+    summary="피드백 CSV 목록/다운로드 (단일 API)",
+    responses={
+        200: {"description": "목록(JSON) 또는 파일 다운로드(csv)"},
+        400: {"description": "요청 오류"},
+        404: {"description": "파일 없음"},
+    },
+)
+async def feedback_datasets(file: str | None = Query(
+    None,
+    description="다운로드할 파일명(basename만). 예: feedback_qa_p0.csv",
+)):
+    # 다운로드 분기
+    if file:
+        try:
+            abs_path, filename = resolve_feedback_download(file)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+        except BadRequestError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return FileResponse(abs_path, media_type="text/csv", filename=filename)
+
+    # 목록 반환
+    try:
+        return list_feedback_datasets()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"목록 조회 중 오류: {e}")
