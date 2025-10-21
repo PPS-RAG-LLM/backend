@@ -176,6 +176,7 @@ class WorkspaceChat(Base):
     user_id = Column(
         Integer, ForeignKey("users.id", ondelete="CASCADE", onupdate="CASCADE")
     )
+    model = Column(Text)
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
