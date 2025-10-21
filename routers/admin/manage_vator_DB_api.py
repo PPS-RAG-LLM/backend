@@ -395,7 +395,7 @@ def _parse_level_for_tasks_flex(
 
     raise ValueError('level_for_tasks 파싱 실패. 예) {"qna":2,"summary":1} 또는 "qna:2,summary:1" 또는 "2"')
     
-@router.post("/v1/admin/vector/override-levels-upload", 
+@router.post("/admin/vector/override-levels-upload", 
     summary="-- 단일 파일 올리기 "
     )
 async def override_levels_upload_form(
