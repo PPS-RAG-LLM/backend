@@ -75,12 +75,19 @@ class WorkspaceDetailResponse(BaseModel):
     category: str
     slug: str
     createdAt: str
-    temperature: Optional[float] = None
     updatedAt: str
+    temperature: Optional[float] = None
     chatHistory: int
+    provider: Optional[str] = None
+    chatModel: Optional[str] = None
+    chatMode: Optional[str] = None
+    queryRefusalResponse: Optional[str] = None
     systemPrompt: Optional[str] = ""
-    documents: List[Any] = []
-    threads: List[Any] = []
+    vectorSearchMode: Optional[str] = None
+    topN: Optional[int] = None
+    similarityThreshold: Optional[float] = None
+    vectorCount: Optional[int] = None
+    # threads: List[Any] = []
 
 
 class WorkspaceUpdateBody(BaseModel):
