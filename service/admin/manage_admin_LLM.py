@@ -1245,6 +1245,14 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     conn = _connect()
     cur = conn.cursor()
     try:
+        # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
+        ft_ids: set[int] = set()
+        try:
+            cur.execute("SELECT DISTINCT model_id FROM fine_tuned_models")
+            ft_ids = {int(r["model_id"]) for r in cur.fetchall() if r["model_id"] is not None}
+        except Exception:
+            ft_ids = set()
+
         # 1) category=all → 전체(활/비활 포함)
         if cat == "all":
             cur.execute(
@@ -1346,20 +1354,25 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         else:
             active_flag = False
 
+        # --- (ADD) fine-tuned 여부 ---
+        is_finetuned = bool(r["id"] in ft_ids)
+
         models.append({
             "id": r["id"],
             "name": name,
             "provider": r["provider"],
-            "loaded": bool(is_loaded_cluster),   # ← 클러스터 상태를 loaded로
+            "loaded": bool(is_loaded_cluster),
             "category": r["category"],
             "subcategory": sub if (cat == "doc_gen" and sub) else None,
             "active": bool(active_flag),
-            "isActive": bool(r["isActive"]),    # DB 메타 활성
+            "isActive": bool(r["isActive"]),
             "createdAt": r["created_at"],
             "rougeScore": rouge,
+            "isFineTuned": is_finetuned,  # ← 추가 필드 하나만
         })
 
     return {"category": cat, "models": models}
+
 
 def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
     """
