@@ -709,6 +709,10 @@ class _ModelManager:
         try:
             if os.path.isfile(os.path.join(fs_path, "config.json")):
                 return fs_path
+            # ← 레거시 경로도 체크
+            legacy = str(LEGACY_STORAGE_ROOT / name_or_path)
+            if os.path.isfile(os.path.join(legacy, "config.json")):
+                return legacy
         except Exception:
             # best-effort only
             self._logger.exception("failed while resolving model candidate path")
@@ -842,10 +846,10 @@ def _resolve_model_fs_path(name_or_path: str) -> str:
         # 이름만 온 경우: service → legacy
         cand = STORAGE_ROOT / os.path.basename(s)
         if (cand / "config.json").is_file():
-            return _canon_storage_path(s)
+            return _canon_storage_path(str(cand))
         cand = LEGACY_STORAGE_ROOT / os.path.basename(s)
         if (cand / "config.json").is_file():
-            return _canon_storage_path(s)
+            return _canon_storage_path(str(cand))
 
         # 절대경로 그대로 확인
         if os.path.isabs(s) and os.path.isfile(os.path.join(s, "config.json")):
