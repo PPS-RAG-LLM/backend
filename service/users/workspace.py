@@ -14,7 +14,8 @@ from repository.workspace import (
     get_workspaces_by_user,
     update_workspace_by_slug_for_user,
     get_workspace_by_workspace_id,
-    get_workspace_id_by_slug_for_user
+    get_workspace_id_by_slug_for_user,
+    update_workspace_name_by_slug_for_user
 )
 from repository.workspace_thread import (
     create_default_thread, 
@@ -202,11 +203,15 @@ def delete_workspace(user_id: int, slug: str) -> None:
         raise NotFoundError("삭제 실패")
     return None
 
+def update_workspace_name_service(user_id: int, slug: str, name: str) -> Dict[str, Any]:
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
+    if not workspace_id:
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    update_workspace_name_by_slug_for_user(user_id, slug, name)
+    return None
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # 허용 필드만 전달
-    allowed_keys = {"name", "temperature", "chatHistory", "systemPrompt"}
-    updates = {k: v for k, v in payload.items() if k in allowed_keys}
+    updates = {k: v for k, v in payload.items()}
     if not updates:
         return None
 
@@ -220,21 +225,7 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
 
     if ws is None:
         raise NotFoundError(f"Workspace not found for slug '{slug}' or update failed")
-    return {
-        "workspace": {
-            "id": ws["id"] if isinstance(ws, dict) else getattr(ws, "id", None),
-            "name": ws["name"],
-            "category": ws["category"],
-            "slug": ws["slug"],
-            "createdAt": ws["created_at"],
-            "temperature": ws["temperature"],
-            "updatedAt": ws["updated_at"],
-            "chatHistory": ws["chat_history"],
-            "systemPrompt": ws["system_prompt"],
-            "documents": [],
-        },
-        "message": None,
-    }
+    return {"message": "Workspace updated"}
 
 def upload_and_embed_document(user_id: int, slug: str, file: UploadFile) -> Dict[str, Any]:
     """임시 스텁: 파일 업로드 + 벡터 DB 인제스트 예정 구현."""

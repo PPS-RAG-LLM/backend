@@ -327,6 +327,19 @@ def get_workspace_id_by_slug_for_user(user_id: int, slug: str) -> Optional[int]:
         result = session.execute(stmt).scalar()
         return result
 
+def update_workspace_name_by_slug_for_user(user_id:int, slug: str, name: str) -> Optional[Dict[str, Any]]:
+    """워크스페이스 이름 업데이트"""
+    with get_session() as session:
+        workspace_id_subquery = (
+            select(WorkspaceUser.workspace_id)
+            .where(WorkspaceUser.user_id == user_id)
+            .join(Workspace)
+            .where(Workspace.slug == slug)
+        )
+        stmt = update(Workspace).where(Workspace.id.in_(workspace_id_subquery)).values(name=name)
+        session.execute(stmt)
+        session.commit()
+        return None
 
 def update_workspace_by_slug_for_user(
     user_id: int, slug: str, updates: Dict[str, Any]
@@ -334,11 +347,14 @@ def update_workspace_by_slug_for_user(
     """선택적 필드만 업데이트하고, 갱신된 행을 반환한다."""
     # 매핑: API 키 -> DB 컬럼
     key_to_col = {
-        "name": "name",
         "temperature": "temperature",
         "chatHistory": "chat_history",
         "systemPrompt": "system_prompt",
-        "slug": "slug",
+        "provider":"provider",
+        "vectorSearchMode":"vector_search_mode",
+        "similarityThreshold":"similarity_threshold",
+        "topN":"top_n",
+        "queryRefusalResponse":"query_refusal_response",
     }
 
     # 업데이트할 필드만 추출

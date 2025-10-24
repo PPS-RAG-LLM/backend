@@ -8,7 +8,7 @@ from service.users.workspace import (
     get_workspace_detail,
     delete_workspace as delete_workspace_service,
     update_workspace as update_workspace_service,
-    upload_and_embed_document,
+    upload_and_embed_document, update_workspace_name_service,
 )
 from service.users.documents.list_documents import list_local_documents_for_workspace
 from typing import Dict, List, Any
@@ -91,14 +91,18 @@ class WorkspaceDetailResponse(BaseModel):
 
 
 class WorkspaceUpdateBody(BaseModel):
-    name: Optional[str] = None
     temperature: Optional[float] = None
     chatHistory: Optional[int] = None
     systemPrompt: Optional[str] = ""
+    provider: Optional[str] =None # ['openai', 'huggingface']
+    systemPrompt: Optional[str] = ""
+    vectorSearchMode: Optional[str] = None #['hybrid', 'keyword', 'semantic']
+    similarityThreshold: Optional[float] = 0.25
+    topN: Optional[int] = 4
+    queryRefusalResponse: Optional[str] 
 
 
 class WorkspaceUpdateResponse(BaseModel):
-    workspace: WorkspaceDetailResponse
     message: Optional[str] = ""
 
 
@@ -161,6 +165,14 @@ def delete_workspace(slug: str):
     delete_workspace_service(user_id, slug)
     return {"message": "Workspace deleted"}
 
+class WorkspaceNameUpdateBody(BaseModel):
+    name: str
+
+@router_singular.post("/{slug}/name-update", summary="워크스페이스 이름 업데이트")
+def update_workspace_name(slug: str, body: WorkspaceNameUpdateBody):
+    user_id = 3
+    update_workspace_name_service(user_id, slug, body.name)
+    return {"message": "Workspace name updated"}
 
 #### 워크스페이스 업데이트
 @router_singular.post(
