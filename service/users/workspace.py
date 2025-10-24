@@ -14,7 +14,8 @@ from repository.workspace import (
     get_workspaces_by_user,
     update_workspace_by_slug_for_user,
     get_workspace_by_workspace_id,
-    get_workspace_id_by_slug_for_user
+    get_workspace_id_by_slug_for_user,
+    update_workspace_name_by_slug_for_user
 )
 from repository.workspace_thread import (
     create_default_thread, 
@@ -73,6 +74,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         temperature             = temperature,
         chat_history            = chat_history,
         system_prompt           = system_prompt,
+        provider                = "huggingface",
         similarity_threshold    = similarity_threshold,
         top_n                   = top_n,
         chat_mode               = chat_mode,
@@ -151,29 +153,30 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
     if not workspace_id:
         raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
     ws = get_workspace_by_workspace_id(user_id, workspace_id)
+
     if not ws:
         raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
-    threads = get_threads_by_workspace_id(workspace_id)
+
+    # from repository.documents import get_documents_by_workspace_id
+    # threads = get_threads_by_workspace_id(workspace_id)
     return {
         "id": ws["id"],
         "name": ws["name"],
         "category": ws["category"],
         "slug": ws["slug"],
         "createdAt": ws["created_at"],
-        "temperature": ws["temperature"],
         "updatedAt": ws["updated_at"],
+        "temperature": ws["temperature"],
         "chatHistory": ws["chat_history"],
         "systemPrompt": ws["system_prompt"],
-        "documents": [],
-        "threads": [
-            {
-                "id": thread["id"],
-                "name": thread["name"],
-                "thread_slug": thread["slug"],
-                "createdAt": thread["created_at"],
-                "UpdatedAt": thread["updated_at"],
-            } for thread in threads
-        ],
+        "provider": ws["provider"],
+        "chatModel": ws["chat_model"],
+        "topN": ws["top_n"],
+        "chatMode": ws["chat_mode"],
+        "queryRefusalResponse": ws["query_refusal_response"],
+        "vectorSearchMode": ws["vector_search_mode"],
+        "similarityThreshold": ws["similarity_threshold"],
+        "vectorCount": ws["vector_count"],
     }
 
 
@@ -200,11 +203,15 @@ def delete_workspace(user_id: int, slug: str) -> None:
         raise NotFoundError("삭제 실패")
     return None
 
+def update_workspace_name_service(user_id: int, slug: str, name: str) -> Dict[str, Any]:
+    workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
+    if not workspace_id:
+        raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    update_workspace_name_by_slug_for_user(user_id, slug, name)
+    return None
 
 def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # 허용 필드만 전달
-    allowed_keys = {"name", "temperature", "chatHistory", "systemPrompt"}
-    updates = {k: v for k, v in payload.items() if k in allowed_keys}
+    updates = {k: v for k, v in payload.items()}
     if not updates:
         return None
 
@@ -218,21 +225,7 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
 
     if ws is None:
         raise NotFoundError(f"Workspace not found for slug '{slug}' or update failed")
-    return {
-        "workspace": {
-            "id": ws["id"] if isinstance(ws, dict) else getattr(ws, "id", None),
-            "name": ws["name"],
-            "category": ws["category"],
-            "slug": ws["slug"],
-            "createdAt": ws["created_at"],
-            "temperature": ws["temperature"],
-            "updatedAt": ws["updated_at"],
-            "chatHistory": ws["chat_history"],
-            "systemPrompt": ws["system_prompt"],
-            "documents": [],
-        },
-        "message": None,
-    }
+    return {"message": "Workspace updated"}
 
 def upload_and_embed_document(user_id: int, slug: str, file: UploadFile) -> Dict[str, Any]:
     """임시 스텁: 파일 업로드 + 벡터 DB 인제스트 예정 구현."""

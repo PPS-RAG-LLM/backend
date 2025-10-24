@@ -1,6 +1,6 @@
+import json
 from typing import Optional, Dict, Any
 from datetime import datetime
-from repository.documents import delete_workspace_documents_by_doc_ids, list_doc_ids_by_workspace
 from utils import logger
 from utils.database import get_session
 from utils.time import to_kst_string, now_kst_string, now_kst
@@ -54,6 +54,7 @@ def insert_workspace(
     chat_history: int,
     system_prompt: Optional[str],
     similarity_threshold: Optional[float],
+    provider: str,
     top_n: int,
     chat_mode: str,
     query_refusal_response: Optional[str],
@@ -73,6 +74,7 @@ def insert_workspace(
                 top_n=top_n,
                 chat_mode=chat_mode,
                 query_refusal_response=query_refusal_response,
+                provider=provider,
                 created_at=now_dt,
                 updated_at=now_dt,
             )
@@ -224,6 +226,35 @@ def get_workspaces_by_user(user_id: int) -> list[Dict[str, Any]]:
                 m["updated_at"] = to_kst_string(m["updated_at"])
         return items
 
+def update_workspace_vector_count(workspace_id: int) -> int:
+    """
+    워크스페이스의 총 벡터 수를 계산하여 workspace.vector_count에 업데이트.
+    Returns: 업데이트된 벡터 수
+    """
+    from storage.db_models import Workspace, WorkspaceDocument
+    
+    with get_session() as session:
+        # 1) 해당 워크스페이스의 모든 문서의 chunks 합산
+        stmt = select(WorkspaceDocument.metadata_json).where(
+            WorkspaceDocument.workspace_id == workspace_id
+        )
+        rows = session.execute(stmt).scalars().all()
+        
+        total_chunks = 0
+        for metadata_json in rows:
+            metadata = json.loads(metadata_json or "{}")
+            total_chunks += metadata.get("chunks", 0)
+        
+        # 2) Workspace.vector_count 업데이트
+        stmt_update = (
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(vector_count=total_chunks)
+        )
+        session.execute(stmt_update)
+        session.commit()
+        
+        return total_chunks
 
 def get_workspace_by_workspace_id(
     user_id: int, workspace_id: int
@@ -247,7 +278,9 @@ def get_workspace_by_workspace_id(
                 Workspace.top_n,
                 Workspace.chat_mode,
                 Workspace.query_refusal_response,
+                Workspace.similarity_threshold,
                 Workspace.vector_search_mode,
+                Workspace.vector_count,
             )
             .join(WorkspaceUser)
             .where(Workspace.id == workspace_id, WorkspaceUser.user_id == user_id)
@@ -294,6 +327,19 @@ def get_workspace_id_by_slug_for_user(user_id: int, slug: str) -> Optional[int]:
         result = session.execute(stmt).scalar()
         return result
 
+def update_workspace_name_by_slug_for_user(user_id:int, slug: str, name: str) -> Optional[Dict[str, Any]]:
+    """워크스페이스 이름 업데이트"""
+    with get_session() as session:
+        workspace_id_subquery = (
+            select(WorkspaceUser.workspace_id)
+            .where(WorkspaceUser.user_id == user_id)
+            .join(Workspace)
+            .where(Workspace.slug == slug)
+        )
+        stmt = update(Workspace).where(Workspace.id.in_(workspace_id_subquery)).values(name=name)
+        session.execute(stmt)
+        session.commit()
+        return None
 
 def update_workspace_by_slug_for_user(
     user_id: int, slug: str, updates: Dict[str, Any]
@@ -301,11 +347,14 @@ def update_workspace_by_slug_for_user(
     """선택적 필드만 업데이트하고, 갱신된 행을 반환한다."""
     # 매핑: API 키 -> DB 컬럼
     key_to_col = {
-        "name": "name",
         "temperature": "temperature",
         "chatHistory": "chat_history",
         "systemPrompt": "system_prompt",
-        "slug": "slug",
+        "provider":"provider",
+        "vectorSearchMode":"vector_search_mode",
+        "similarityThreshold":"similarity_threshold",
+        "topN":"top_n",
+        "queryRefusalResponse":"query_refusal_response",
     }
 
     # 업데이트할 필드만 추출

@@ -130,7 +130,7 @@ class Workspace(Base):
     name = Column(Text, nullable=False)
     slug = Column(Text, nullable=False, unique=True)
     category = Column(Text, nullable=False)  # CHECK constraint는 DB 레벨에서 처리
-    vectorTag = Column(Text)
+    vector_count = Column(Integer, server_default=text("0"))
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )

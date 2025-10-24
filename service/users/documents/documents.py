@@ -10,7 +10,7 @@ from repository.documents import (
     insert_workspace_document,
     insert_document_vectors,
 )
-from repository.workspace import get_workspace_id_by_slug_for_user
+from repository.workspace import get_workspace_id_by_slug_for_user, update_workspace_vector_count
 from config import config
 from utils.time import now_kst
 
@@ -278,6 +278,7 @@ async def upload_document(
                     },
                 )
                 inserted_workspace = True
+                
             except Exception as e:
                 logger.error(f"insert_workspace_document failed: {e}")
     if inserted_workspace:
@@ -285,6 +286,8 @@ async def upload_document(
             insert_document_vectors(doc_id=doc_id, vector_ids=vector_ids)
         except Exception as e:
             logger.error(f"insert_document_vectors failed: {e}")
+    # 저장된 doc의 백터 수 워크스페이스 업데이트
+    update_workspace_vector_count(int(workspace_id))
     # 6) 응답
     resp = {
         "success": True,
@@ -363,6 +366,9 @@ def delete_documents_by_ids(
                 delete_workspace_documents_by_doc_ids(doc_ids, int(-1))  # 필요 시 별도 분기 구현
         except Exception as e:
             logger.error(f"delete_workspace_documents_by_doc_ids failed: {e}")
+
+    # 삭제된 doc의 백터 수 워크스페이스 업데이트
+    update_workspace_vector_count(int(workspace_id))
 
     return {
         "deleted_doc_ids": doc_ids,

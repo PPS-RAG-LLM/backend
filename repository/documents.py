@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import List, Optional, Dict, Any
+from repository.workspace import update_workspace_vector_count
 from utils import logger
 from utils.database import get_session
 from storage.db_models import WorkspaceDocument, DocumentVector
