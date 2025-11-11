@@ -1,7 +1,7 @@
 """
 # 다운로드 예시
 
-python scripts/download_hf_models.py --base_dir /home/work/CoreIQ/backend/storage/model --hf_token ""
+python scripts/download_hf_models.py --base_dir /home/wzxcv123/NIQ/backend/storage/model --hf_token ""
 
 """
 from __future__ import annotations

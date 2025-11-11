@@ -294,3 +294,15 @@ NOTE.md
 # DB files
 storage/pps_rag.db
 storage/*.db
+
+# Milvus files
+volumes/
+embedEtcd.yaml
+user.yaml
+standalone_embed.sh
+
+# Milvus Docker 설정 파일들
+embedEtcd.yaml
+standalone_embed.sh
+user.yaml
+volumes/
