@@ -192,7 +192,8 @@ VAL_SESSION_ROOT = (STORAGE_DIR / "val_data").resolve()
 SESSIONS_INDEX_PATH = (VAL_SESSION_ROOT / "_sessions.json").resolve()
 
 # Milvus Server 접속 정보 (환경변수로 오버라이드 가능)
-MILVUS_URI = os.getenv("MILVUS_URI", "http://remote.biz.ppsystem.co.kr:3006")
+#MILVUS_URI = os.getenv("MILVUS_URI", "http://remote.biz.ppsystem.co.kr:3006")
+MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", None)  # 예: "root:Milvus" (인증 사용 시)
 COLLECTION_NAME = "pdf_chunks_pro"
 
