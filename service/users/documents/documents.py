@@ -101,19 +101,22 @@ def _chunk_text(text: str) -> List[str]:
     return chunks
 
 
-def _embed_chunks(chunks: List[str]) -> List[List[float]]:
+async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
     """sentence-transformers로 임베딩 생성. 모델은 config에서 읽고, 없으면 다국어 소형 기본값."""
+    import asyncio
+    
     model_path = EMBEDDING_MODEL_DIR
     if not model_path.exists():
         raise FileNotFoundError(f"임베딩 모델 경로를 찾을 수 없음: {model_path}")
 
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # model = SentenceTransformer(str(model_path))
-    model = load_embedding_model()
-    # model = SentenceTransformer(str(model_path), device="cpu")
-    vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
-    # free_torch_memory() 제거 - 싱글톤 모델을 계속 사용하므로 메모리 해제하면 안됨
-    return [v.astype(float).tolist() for v in vecs]
+    # 동기 블로킹 작업을 별도 쓰레드에서 실행하여 이벤트 루프 차단 방지
+    def _sync_embed():
+        model = load_embedding_model()
+        vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
+        return [v.astype(float).tolist() for v in vecs]
+    
+    # asyncio.to_thread로 동기 작업을 비동기로 처리
+    return await asyncio.to_thread(_sync_embed)
 
 
 
@@ -212,7 +215,7 @@ async def upload_document(
     if not chunks:
         chunks = [page_content] if page_content else []
 
-    vectors = _embed_chunks(chunks)
+    vectors = await _embed_chunks(chunks)
     # 청크 메타 템플릿(문서 공통 메타 + chunk text 포함)
     header_meta = (
         "  <document_metadata>\n"

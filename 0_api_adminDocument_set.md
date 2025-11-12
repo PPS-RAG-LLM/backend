@@ -43,7 +43,7 @@
 {
   "question": "부정청탁에 관련된 내용용을 알려줘",
   "topK": 5,
-  "securityLevel": 1,
+  "securityLevel": 3,
   "sourceFilter": [
     "string"
   ],

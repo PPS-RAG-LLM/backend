@@ -50,15 +50,15 @@ INSERT INTO
         "trained_at",
         "created_at"
     )
-VALUES (1,'huggingface','gpt-oss-20b',0,'./service/storage/model/gpt-oss-20b',
+VALUES (1,'huggingface','gpt-oss-20b',0,'./storage/model/gpt-oss-20b',
         'all','base',1,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        (2,'huggingface','Qwen2.5-7B-Instruct-1M',0,'./service/storage/model/Qwen2.5-7B-Instruct-1M',
+        (2,'huggingface','Qwen2.5-7B-Instruct-1M',0,'./storage/model/Qwen2.5-7B-Instruct-1M',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        (3,'huggingface','Qwen3-8B',0,'./service/storage/model/Qwen3-8B',
+        (3,'huggingface','Qwen3-8B',0,'./storage/model/Qwen3-8B',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./service/storage/model/Qwen3-Omni-30B-A3B-Instruct',
+        (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./storage/model/Qwen3-Omni-30B-A3B-Instruct',
         'qa','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        (5,'huggingface','Qwen3-14B',0,'./service/storage/model/Qwen3-14B',
+        (5,'huggingface','Qwen3-14B',0,'./storage/model/Qwen3-14B',
         'all','huggingface',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
         
 

@@ -49,32 +49,32 @@ def hf_factory(model_key: str) -> Streamer:
     logger.info(f"model_info: {model_info}")
 
     # # 모델 경로 확인
-    # local_path = _resolve_model_path(model_info.get("model_path"))
+    local_path = _resolve_model_path(model_info.get("model_path"))
     # logger.info(f"local_path: {local_path}")
     logger.info(f"hf_factory: {model_key}")
 
     # 모델 패밀리에 따라 적절한 Streamer 생성
     if model_key.startswith("Qwen3-8B") :
         logger.info(f"Alibaba | Qwen Model Qwen3-8B")
-        local_path = "/home/work/CoreIQ/backend/storage/model/Qwen3-8B"
+        # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen3-8B"
         if not os.path.isdir(local_path):
             raise NotFoundError(f"모델 디렉토리를 찾을 수 없습니다: {local_path}")
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("Qwen3-14B") :
         logger.info(f"Alibaba | Qwen Model Qwen3-14B")
-        local_path = "/home/work/CoreIQ/backend/storage/model/Qwen3-14B"
+        # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen3-14B"
         if not os.path.isdir(local_path):
             raise NotFoundError(f"모델 디렉토리를 찾을 수 없습니다: {local_path}")
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if  model_key.startswith("Qwen2.5-7B-Instruct-1M"):
         logger.info(f"Alibaba | Qwen Model Qwen2.5-7B-Instruct-1M")
-        local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
+        # local_path = "/home/work/CoreIQ/backend/storage/model/Qwen2.5-7B-Instruct-1M"
         if not os.path.isdir(local_path):
             raise NotFoundError(f"모델 디렉토리를 찾을 수 없습니다: {local_path}")
         return _Wrap(lambda messages, **kw: qwen_7b.stream_chat(messages, model_path=local_path, **kw))
     if model_key.startswith("gpt_oss") or model_key.startswith("gpt-oss") :
         logger.info(f"gpt_oss_20b")
-        local_path = "/home/work/CoreIQ/backend/storage/model/gpt-oss-20b"
+        # local_path = "/home/work/CoreIQ/backend/storage/model/gpt-oss-20b"
         if not os.path.isdir(local_path):
             raise NotFoundError(f"모델 디렉토리를 찾을 수 없습니다: {local_path}")
         return _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=str(local_path), **kw))
