@@ -31,7 +31,7 @@ except Exception:
     Function = None
     class FunctionType:
         BM25 = "BM25"
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
 # ORM 추가 임포트
 from utils.database import get_session
@@ -185,6 +185,7 @@ RESOURCE_DIR = (BASE_DIR / "resources").resolve()
 EXTRACTED_TEXT_DIR = (PROJECT_ROOT / "storage" / "extracted_texts").resolve()
 META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
 MODEL_ROOT_DIR = (PROJECT_ROOT / "storage" / "embedding-models").resolve()
+RERANK_MODEL_PATH = (PROJECT_ROOT / "storage" / "rerank_model" / "Qwen3-Reranker-0.6B").resolve()
 
 SQLITE_DB_PATH = (PROJECT_ROOT / "storage" / "pps_rag.db").resolve()
 
@@ -730,12 +731,24 @@ _EMBED_CACHE: dict[str, tuple[any, any, any]] = {}  # key -> (tok, model, device
 _EMBED_ACTIVE_KEY: Optional[str] = None
 _EMBED_LOCK = threading.Lock()
 
+# === Reranker cache(singleton) ===
+_RERANK_CACHE: dict[str, tuple[any, any, any, int, int]] = {}  # key -> (tok, model, device, true_token, false_token)
+_RERANK_ACTIVE_KEY: Optional[str] = None
+_RERANK_LOCK = threading.Lock()
+
 
 def _invalidate_embedder_cache():
     global _EMBED_CACHE, _EMBED_ACTIVE_KEY
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
         _EMBED_ACTIVE_KEY = None
+
+
+def _invalidate_reranker_cache():
+    global _RERANK_CACHE, _RERANK_ACTIVE_KEY
+    with _RERANK_LOCK:
+        _RERANK_CACHE.clear()
+        _RERANK_ACTIVE_KEY = None
 
 
 def _get_or_load_embedder(model_key: str, preload: bool = False):
@@ -2171,7 +2184,7 @@ def _bm25_like_score(query: str, doc: str, k1: float = 1.2, b: float = 0.75) -> 
 
 
 async def search_documents(req: RAGSearchRequest, search_type_override: Optional[str] = None,
-                           collection_name: str = COLLECTION_NAME) -> Dict:
+                           collection_name: str = COLLECTION_NAME, rerank_top_n: Optional[int] = None) -> Dict:
     t0 = time.perf_counter()
     if req.task_type not in TASK_TYPES:
         return {
@@ -2193,8 +2206,9 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         return {"error": "컬렉션이 없습니다. 먼저 데이터 저장(인제스트)을을 수행하세요."}
 
     # 공통 파라미터
-    base_limit = int(req.top_k)
-    candidate = min(50, max(base_limit, base_limit * 4))
+    embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
+    final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
+    candidate = max(embedding_candidates, final_results * 2)  # 충분한 후보 확보
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
 
     def _dense_search(limit=candidate):
@@ -2346,23 +2360,74 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 "snippet": snippet
             })
 
-    # 최종 스코어/정렬
-    if search_type == "bm25":
-        for h in hits_raw:
-            h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
-    elif search_type == "hybrid":
-        if any("score_fused" in h for h in hits_raw):
+    # 리랭크 적용
+    if hits_raw:
+        try:
+            # 리랭크 모델 로딩
+            rerank_tokenizer, rerank_model, rerank_device, token_true_id, token_false_id = await _get_or_load_reranker_async()
+            
+            # 리랭크용 입력 준비
+            instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+            pairs = []
             for h in hits_raw:
-                h["score"] = h.get("score_fused", 0.0)
-        else:
-            for h in hits_raw:
-                h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
-    else:  # vector
-        for h in hits_raw:
-            h["score"] = h.get("score_vec", 0.0)
-        hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[:base_limit]
+                snippet = h.get("snippet", "")
+                formatted_input = _format_instruction_for_rerank(instruction, req.query, snippet)
+                pairs.append(formatted_input)
+            
+            # 배치 단위로 리랭크 점수 계산 (메모리 효율성)
+            batch_size = 16
+            rerank_scores = []
+            
+            for i in range(0, len(pairs), batch_size):
+                batch_pairs = pairs[i:i + batch_size]
+                try:
+                    batch_scores = _compute_rerank_scores(
+                        rerank_tokenizer, rerank_model, rerank_device, 
+                        token_true_id, token_false_id, batch_pairs
+                    )
+                    rerank_scores.extend(batch_scores)
+                except Exception as e:
+                    logger.warning(f"[Rerank] 배치 처리 실패: {e}")
+                    # 폴백: 기존 점수 사용
+                    fallback_scores = []
+                    for j in range(len(batch_pairs)):
+                        h_idx = i + j
+                        if h_idx < len(hits_raw):
+                            h = hits_raw[h_idx]
+                            fallback_score = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
+                            fallback_scores.append(float(fallback_score) * 0.5)  # 낮은 점수로 패널티
+                    rerank_scores.extend(fallback_scores)
+            
+            # 리랭크 점수 적용
+            for i, h in enumerate(hits_raw):
+                if i < len(rerank_scores):
+                    h["score"] = float(rerank_scores[i])
+                else:
+                    # 예외적인 경우: 기존 점수 사용
+                    h["score"] = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
+            
+        except Exception as e:
+            logger.exception(f"[Rerank] 리랭크 처리 실패, 기존 점수 사용: {e}")
+            # 폴백: 기존 점수 계산 로직
+            if search_type == "bm25":
+                for h in hits_raw:
+                    h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
+            elif search_type == "hybrid":
+                if any("score_fused" in h for h in hits_raw):
+                    for h in hits_raw:
+                        h["score"] = h.get("score_fused", 0.0)
+                else:
+                    for h in hits_raw:
+                        h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
+            else:  # vector
+                for h in hits_raw:
+                    h["score"] = h.get("score_vec", 0.0)
+    else:
+        # hits_raw가 비어있는 경우
+        pass
+    
+    # 리랭크 점수 기준 정렬 및 상위 결과 선택
+    hits_sorted = sorted(hits_raw, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
 
     # 프롬프트 컨텍스트 생성
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
@@ -2390,9 +2455,126 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     }
 
 
+def _load_reranker() -> Tuple[any, any, any, int, int]:
+    """리랭크 모델 로딩"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = RERANK_MODEL_PATH
+    
+    # 모델 파일 존재 확인
+    need_files = [
+        model_path / "config.json",
+        model_path / "tokenizer_config.json",
+    ]
+    missing_files = [f for f in need_files if not f.exists()]
+    if missing_files:
+        logger.error(f"[Reranker Model] 필수 파일 누락: {model_path}")
+        logger.error(f"[Reranker Model] 누락된 파일들: {[str(f) for f in missing_files]}")
+        raise FileNotFoundError(f"[Reranker Model] 필수 파일 누락: {model_path}")
+
+    logger.info(f"[Reranker Model] 모델 로딩 시작: {model_path}")
+    
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(model_path), 
+            trust_remote_code=True, 
+            local_files_only=True,
+            padding_side='left'
+        )
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            local_files_only=True,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        ).to(device).eval()
+        
+        # yes/no 토큰 ID 확보
+        token_false_id = tokenizer.convert_tokens_to_ids("no")
+        token_true_id = tokenizer.convert_tokens_to_ids("yes")
+        
+        logger.info(f"[Reranker Model] 모델 로딩 완료: {model_path}")
+        return tokenizer, model, device, token_true_id, token_false_id
+        
+    except Exception as e:
+        logger.exception(f"[Reranker Model] 로딩 실패: {e}")
+        raise
+
+
+def _get_or_load_reranker():
+    """전역 캐시에서 리랭크 모델 반환"""
+    global _RERANK_CACHE, _RERANK_ACTIVE_KEY
+    
+    rerank_key = "qwen3_reranker_0.6b"
+    
+    with _RERANK_LOCK:
+        if _RERANK_ACTIVE_KEY == rerank_key and rerank_key in _RERANK_CACHE:
+            return _RERANK_CACHE[rerank_key]
+            
+        # 캐시 전체 무효화
+        _RERANK_CACHE.clear()
+        tokenizer, model, device, token_true_id, token_false_id = _load_reranker()
+        _RERANK_CACHE[rerank_key] = (tokenizer, model, device, token_true_id, token_false_id)
+        _RERANK_ACTIVE_KEY = rerank_key
+        return _RERANK_CACHE[rerank_key]
+
+
+async def _get_or_load_reranker_async():
+    """비동기 래퍼: blocking 함수(_get_or_load_reranker)를 스레드풀에서 실행"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_or_load_reranker)
+
+
+def _format_instruction_for_rerank(instruction: str, query: str, doc: str) -> str:
+    """리랭크 모델용 입력 포맷팅"""
+    if instruction is None:
+        instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+    output = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
+        instruction=instruction, query=query, doc=doc
+    )
+    return output
+
+
+def _compute_rerank_scores(tokenizer, model, device, token_true_id, token_false_id, pairs: List[str]) -> List[float]:
+    """리랭크 점수 계산"""
+    if not pairs:
+        return []
+        
+    max_length = 8192
+    prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
+    suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    
+    prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
+    suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
+    
+    # 입력 처리
+    inputs = tokenizer(
+        pairs, padding=False, truncation='longest_first',
+        return_attention_mask=False, max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
+    )
+    
+    for i, ele in enumerate(inputs['input_ids']):
+        inputs['input_ids'][i] = prefix_tokens + ele + suffix_tokens
+    
+    inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
+    for key in inputs:
+        inputs[key] = inputs[key].to(device)
+    
+    # 점수 계산
+    with torch.no_grad():
+        batch_scores = model(**inputs).logits[:, -1, :]
+        true_vector = batch_scores[:, token_true_id]
+        false_vector = batch_scores[:, token_false_id]
+        batch_scores = torch.stack([false_vector, true_vector], dim=1)
+        batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+        scores = batch_scores[:, 1].exp().cpu().tolist()
+    
+    return scores
+
+
 async def execute_search(
     question: str,
-    top_k: int = 5,
+    top_k: int = 50,   # 임베딩 후보 개수
+    rerank_top_n: int = 5,    # 최종 반환 개수  
     security_level: int = 1,
     source_filter: Optional[List[str]] = None,
     task_type: str = "qna",
@@ -2406,7 +2588,7 @@ async def execute_search(
         task_type=task_type,
         model=model_key,
     )
-    res = await search_documents(req, search_type_override=search_type)
+    res = await search_documents(req, search_type_override=search_type, rerank_top_n=rerank_top_n)
     # Build check_file BEFORE optional source_filter so it reflects original candidates
     check_files: List[str] = []
     try:
@@ -2436,6 +2618,7 @@ async def execute_search(
 async def delete_db():
     # 모델 캐시 클리어
     _invalidate_embedder_cache()
+    _invalidate_reranker_cache()
 
     client = _client()
     cols = client.list_collections()
@@ -2840,7 +3023,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
 
 
 # --- add: search_documents_test ---
-async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None) -> Dict:
+async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None, rerank_top_n: Optional[int] = None) -> Dict:
     """
     세션 전용 컬렉션에서만 검색 (기존 search_documents의 세션 버전)
     """
@@ -2866,8 +3049,9 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     if coll not in client.list_collections():
         return {"error": "세션 컬렉션이 없습니다. 먼저 인제스트 하세요."}
 
-    base_limit = int(req.top_k)
-    candidate = min(50, max(base_limit, base_limit * 4))
+    embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
+    final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
+    candidate = max(embedding_candidates, final_results * 2)  # 충분한 후보 확보
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
 
     def _dense_search(limit=candidate):
@@ -3003,22 +3187,74 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
                 "score_vec": float(s_vec), "score_sparse": float(s_spa), "score_fused": float(fused), "snippet": snippet
             })
 
-    # 정렬
-    if search_type == "bm25":
-        for h in hits_raw:
-            h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-    elif search_type == "hybrid":
-        if any("score_fused" in h for h in hits_raw):
+    # 리랭크 적용 (테스트 세션)
+    if hits_raw:
+        try:
+            # 리랭크 모델 로딩
+            rerank_tokenizer, rerank_model, rerank_device, token_true_id, token_false_id = await _get_or_load_reranker_async()
+            
+            # 리랭크용 입력 준비
+            instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+            pairs = []
             for h in hits_raw:
-                h["score"] = h.get("score_fused", 0.0)
-        else:
-            for h in hits_raw:
-                h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
+                snippet = h.get("snippet", "")
+                formatted_input = _format_instruction_for_rerank(instruction, req.query, snippet)
+                pairs.append(formatted_input)
+            
+            # 배치 단위로 리랭크 점수 계산 (메모리 효율성)
+            batch_size = 16
+            rerank_scores = []
+            
+            for i in range(0, len(pairs), batch_size):
+                batch_pairs = pairs[i:i + batch_size]
+                try:
+                    batch_scores = _compute_rerank_scores(
+                        rerank_tokenizer, rerank_model, rerank_device, 
+                        token_true_id, token_false_id, batch_pairs
+                    )
+                    rerank_scores.extend(batch_scores)
+                except Exception as e:
+                    logger.warning(f"[Rerank-Test] 배치 처리 실패: {e}")
+                    # 폴백: 기존 점수 사용
+                    fallback_scores = []
+                    for j in range(len(batch_pairs)):
+                        h_idx = i + j
+                        if h_idx < len(hits_raw):
+                            h = hits_raw[h_idx]
+                            fallback_score = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
+                            fallback_scores.append(float(fallback_score) * 0.5)  # 낮은 점수로 패널티
+                    rerank_scores.extend(fallback_scores)
+            
+            # 리랭크 점수 적용
+            for i, h in enumerate(hits_raw):
+                if i < len(rerank_scores):
+                    h["score"] = float(rerank_scores[i])
+                else:
+                    # 예외적인 경우: 기존 점수 사용
+                    h["score"] = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
+            
+        except Exception as e:
+            logger.exception(f"[Rerank-Test] 리랭크 처리 실패, 기존 점수 사용: {e}")
+            # 폴백: 기존 점수 계산 로직
+            if search_type == "bm25":
+                for h in hits_raw:
+                    h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
+            elif search_type == "hybrid":
+                if any("score_fused" in h for h in hits_raw):
+                    for h in hits_raw:
+                        h["score"] = h.get("score_fused", 0.0)
+                else:
+                    for h in hits_raw:
+                        h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
+            else:  # vector
+                for h in hits_raw:
+                    h["score"] = h.get("score_vec", 0.0)
     else:
-        for h in hits_raw:
-            h["score"] = h.get("score_vec", 0.0)
+        # hits_raw가 비어있는 경우
+        pass
 
-    hits_sorted = sorted(hits_raw, key=lambda x: x["score"], reverse=True)[: int(req.top_k)]
+    # 리랭크 점수 기준 정렬 및 상위 결과 선택
+    hits_sorted = sorted(hits_raw, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
 
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
     prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."

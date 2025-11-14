@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException, Form
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Literal, Any
 import json as _json
 
@@ -89,16 +89,27 @@ class SecurityLevelsBody(BaseModel):
 
 
 class ExecuteBody(BaseModel):
-    question: str
-    topK: int = Field(5, gt=0)
+    question: str = Field(..., examples=["회사의 복리후생 제도에 대해 알려주세요"])
+    topK: int = Field(50, gt=0, description="임베딩 후보 개수")
+    rerank_topN: int = Field(5, gt=0, description="리랭크 후 최종 반환 개수")
     securityLevel: int = Field(1, ge=1)
     sourceFilter: Optional[List[str]] = None
-    taskType: Literal["doc_gen", "summary", "qna"] = Field(
-        ..., description="검색할 작업유형"
-    )
-    searchMode: Optional[Literal["hybrid", "semantic", "bm25"]] = Field(
-        None, description="검색 모드 (기본: hybrid)"
-    )
+    taskType: Literal["doc_gen", "summary", "qna"]
+    searchMode: Optional[Literal["hybrid", "semantic", "bm25"]] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "question": "회사의 복리후생 제도에 대해 알려주세요",
+                "topK": 50,
+                "rerank_topN": 5,
+                "securityLevel": 2,
+                "sourceFilter": ["회사규정.pdf", "복리후생안내.pdf"],
+                "taskType": "qna",
+                "searchMode": "hybrid",
+            }
+        }
+    }
 
 
 class SingleIngestBody(BaseModel):
@@ -246,7 +257,8 @@ async def rag_search_endpoint(body: ExecuteBody):
     model_key = get_vector_settings()["embeddingModel"]
     return await execute_search(
         question=body.question,
-        top_k=body.topK,
+        top_k=body.topK,  # 임베딩 후보 개수
+        rerank_top_n=body.rerank_topN,  # 최종 반환 개수
         security_level=body.securityLevel,
         source_filter=body.sourceFilter,
         task_type=body.taskType,
@@ -263,7 +275,8 @@ async def user_rag_search_endpoint(body: ExecuteBody):
     model_key = get_vector_settings()["embeddingModel"]
     return await execute_search(
         question=body.question,
-        top_k=body.topK,
+        top_k=body.topK,  # 임베딩 후보 개수
+        rerank_top_n=body.rerank_topN,  # 최종 반환 개수
         security_level=body.securityLevel,
         source_filter=body.sourceFilter,
         task_type=body.taskType,
