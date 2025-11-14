@@ -82,7 +82,7 @@ BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve(
 # Force DB to pps_rag.db across the process (can be overridden by env before start)
 import os as _os
 _os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
+STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "models"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
 # ===== SQLAlchemy ORM (Session) =====
@@ -106,9 +106,9 @@ def _to_rel(p: str) -> str:
 def _to_service_rel(p: str) -> str:
     """
     어떤 경로든 최종적으로 './service/<...>' 형태로 표준화.
-    예) /.../backend/storage/model/Qwen3-8B  → ./service/storage/model/Qwen3-8B
-        storage/model/Qwen3-8B               → ./service/storage/model/Qwen3-8B
-        ./service/storage/model/Qwen3-8B     → 그대로 유지
+    예) /.../backend/storage/models/Qwen3-8B  → ./service/storage/models/Qwen3-8B
+        storage/models/Qwen3-8B               → ./service/storage/models/Qwen3-8B
+        ./service/storage/models/Qwen3-8B     → 그대로 유지
     """
     # 절대경로면 backend 기준 상대경로로
     if os.path.isabs(p):
@@ -524,7 +524,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         - type 동일(대문자)
         - rouge1_f1: 최종 ROUGE 저장
     """
-    # ✅ 항상 './service/storage/model/<...>' 로 표준화
+    # ✅ 항상 './service/storage/models/<...>' 로 표준화
     rel_model_path = _to_service_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
     mdl_type = (tuning_type or "QLORA").upper()
 
@@ -550,7 +550,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         base_model_rel_path = None
         if base_model_name:
             abs_base = _resolve_model_dir(base_model_name)   # 물리 경로
-            base_model_rel_path = _to_service_rel(abs_base)  # ./service/storage/model/<...>
+            base_model_rel_path = _to_service_rel(abs_base)  # ./service/storage/models/<...>
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(

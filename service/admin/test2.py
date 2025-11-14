@@ -7,7 +7,7 @@ If arguments are omitted, defaults are used.
 
 Requirements:
 1. The specified model must exist in `llm_models` table with provider='huggingface'.
-2. Model files must be placed under `backend/storage/model/<model_name>/`.
+2. Model files must be placed under `backend/storage/models/<model_name>/`.
 3. Necessary packages: transformers, accelerate, peft, bitsandbytes, etc.
 """
 

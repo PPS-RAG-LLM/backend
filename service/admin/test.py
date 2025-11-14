@@ -4,7 +4,7 @@ Run:
     python backend/service/admin/test.py
 
 Prerequisites:
-1. `backend/storage/model/qwen-7b` (또는 qwen-2.5-7b-instruct) 폴더에 모델 파일 존재
+1. `backend/storage/models/qwen-7b` (또는 qwen-2.5-7b-instruct) 폴더에 모델 파일 존재
 2. `llm_models` 테이블에 provider="huggingface", name="qwen-7b" (또는 아래 chat_model)에 해당하는 row 존재
 3. 필수 패키지: transformers, accelerate, peft, etc.
 """

@@ -64,11 +64,11 @@ _DEFAULT_TOPK: int = 5
 # Backend root (상대 경로 기준 루트)
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
 SERVICE_ROOT = BASE_BACKEND / "service"
-# 신규 표준 저장소: ./service/storage/model
-STORAGE_ROOT = SERVICE_ROOT / "storage" / "model"
+# 신규 표준 저장소: ./service/storage/models
+STORAGE_ROOT = SERVICE_ROOT / "storage" / "models"
 
-# 레거시 위치(호환용): ./storage/model
-LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "model"
+# 레거시 위치(호환용): ./storage/models
+LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "models"
 
 # DB 경로(환경변수로 오버라이드 가능)
 os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
@@ -81,11 +81,11 @@ RAG_TOPK_CACHE_KEY = "rag_topk"
 # 허용 루트 가드
 _ALLOWED_ROOTS = [
     # 서비스 표준
-    str((BASE_BACKEND / "service" / "storage" / "model").resolve()),
+    str((BASE_BACKEND / "service" / "storage" / "models").resolve()),
     # 레거시
-    str((BASE_BACKEND / "storage" / "model").resolve()),
+    str((BASE_BACKEND / "storage" / "models").resolve()),
     # 컨테이너 마운트(있다면)
-    "/storage/model",
+    "/storage/models",
 ]
 
 # ===== Pydantic models (변수명/스키마 고정) =====
@@ -159,13 +159,13 @@ class DeleteModelBody(BaseModel):
 # 공통 정규화 함수 추가
 def _canon_storage_path(p: str) -> str:
     """
-    같은 모델 디렉터리를 항상 /storage/model/<basename> 로 통일.
+    같은 모델 디렉터리를 항상 /storage/models/<basename> 로 통일.
     해당 경로에 config.json 이 있으면 그 경로를 반환, 없으면 원본 반환.
     """
     try:
         p = (p or "").strip().replace("\\", "/")
         base = os.path.basename(p.rstrip("/"))
-        cand = f"/storage/model/{base}"
+        cand = f"/storage/models/{base}"
         if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")):
             return cand
     except Exception:
@@ -240,16 +240,16 @@ def _normalize_model_path_input(p: str) -> str:
     if not s:
         return s
     prefixes = (
-        "storage/model/",
-        "./storage/model/",
-        "/home/work/CoreIQ/backend/storage/model/",
+        "storage/models/",
+        "./storage/models/",
+        "/home/work/CoreIQ/backend/storage/models/",
     )
     for pref in prefixes:
         if s.startswith(pref):
             s = s[len(pref):]
             break
-    if "/storage/model/" in s:
-        s = s.split("/storage/model/", 1)[1]
+    if "/storage/models/" in s:
+        s = s.split("/storage/models/", 1)[1]
     return s.strip("/")
 
 
@@ -259,7 +259,7 @@ def _sanitize_name(name: str) -> str:
 
 def _std_rel_path_for_name(model_name: str) -> str:
     # DB에 저장될 규칙 경로 (반드시 ./ 로 시작)
-    return f"./service/storage/model/local_{_sanitize_name(model_name)}"
+    return f"./service/storage/models/local_{_sanitize_name(model_name)}"
 
 
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
@@ -974,7 +974,7 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
     if not val:
         return None
 
-    # Handle standardized relative paths like ./service/storage/model/...
+    # Handle standardized relative paths like ./service/storage/models/...
     if val.startswith("./"):
         abs_p = (BASE_BACKEND / val.lstrip("./"))
         if (abs_p / "config.json").is_file():
@@ -1016,14 +1016,14 @@ def _to_rel_under_storage_root(p: str) -> str:
         try:
             rp = os.path.relpath(p, str(STORAGE_ROOT))
             if rp not in (".", ""):
-                return f"./service/storage/model/{rp}".replace("\\", "/")
+                return f"./service/storage/models/{rp}".replace("\\", "/")
         except Exception:
             pass
         # 레거시(root=LEGACY_STORAGE_ROOT)
         try:
             rp = os.path.relpath(p, str(LEGACY_STORAGE_ROOT))
             if rp not in (".", ""):
-                return f"./storage/model/{rp}".replace("\\", "/")
+                return f"./storage/models/{rp}".replace("\\", "/")
         except Exception:
             pass
     except Exception:
@@ -1074,11 +1074,11 @@ def _preload_via_adapters(model_name: str) -> bool:
             logging.getLogger(__name__).warning("[preload] config.json not found: %s", raw_path)
             return False
 
-        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/model/<basename>')
+        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/models/<basename>')
         def _adapter_visible_path(p: str) -> str:
             try:
                 base = os.path.basename(p.rstrip("/"))
-                cand = f"/storage/model/{base}"
+                cand = f"/storage/models/{base}"
                 return cand if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")) else p
             except Exception:
                 return p
@@ -1184,7 +1184,7 @@ def _run_command(cmd: list[str]) -> Tuple[int, str]:
 # def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
 #     """
 #     기본 모델 등록(단일 레코드):
-#       - DB model_path는 항상 './service/storage/model/local_<name>' 로 저장
+#       - DB model_path는 항상 './service/storage/models/local_<name>' 로 저장
 #       - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
 #     """
 #     _migrate_llm_models_if_needed()
@@ -1754,9 +1754,9 @@ def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     # 2) 베이스네임 기준 표준/레거시/마운트
     base = os.path.basename(s.rstrip("/"))
     if base:
-        std = (BASE_BACKEND / "service" / "storage" / "model" / base).resolve()
-        leg = (BASE_BACKEND / "storage" / "model" / base).resolve()
-        mnt = Path("/storage/model") / base
+        std = (BASE_BACKEND / "service" / "storage" / "models" / base).resolve()
+        leg = (BASE_BACKEND / "storage" / "models" / base).resolve()
+        mnt = Path("/storage/models") / base
         for p in (std, leg, mnt):
             try:
                 out.append(str(p.resolve()))

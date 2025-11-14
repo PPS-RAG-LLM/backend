@@ -1,4 +1,5 @@
-import re, uuid
+import re, uuid, unicodedata
+from pathlib import Path
 from .database import get_db
 from .logger import logger
 
@@ -66,3 +67,21 @@ def generate_thread_slug(name: str) -> str:
         counter += 1
     conn.close()
     return slug
+
+
+### 문서 파일명 안전하게 줄이기 ###
+
+
+MAX_SAFE_STEM = 80
+
+def make_safe_filename(original: str, doc_id: str, suffix: str) -> str:
+    """긴/특수문자 파일명을 안전하게 줄여주는 헬퍼"""
+    stem = Path(original).stem
+    stem = unicodedata.normalize("NFKD", stem)
+    stem = re.sub(r"\s+", "_", stem).strip("_")
+    stem = re.sub(r"[^\w\-가-힣]", "", stem)
+    if not stem:
+        stem = "document"
+    if len(stem) > MAX_SAFE_STEM:
+        stem = stem[:MAX_SAFE_STEM]
+    return f"{stem}-{doc_id}.{suffix}"

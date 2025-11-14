@@ -194,7 +194,7 @@ if __name__ == "__main__":
         reload=True,
         reload_excludes=[
             "**/unsloth_compiled_cache/**",
-            "**/storage/model/**",
+            "**/storage/models/**",
             "**/storage/train_data/**",
         ],
         reload_dirs=["routers", "repository", "service", "utils"],
