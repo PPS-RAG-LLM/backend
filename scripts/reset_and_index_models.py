@@ -11,7 +11,7 @@ What this script does (by default):
    - llm_models
    - cache_data rows related to active models (name LIKE 'active_model:%')
 
-2) (Optional) Scan filesystem under STORAGE_ROOT (default: backend/storage/model):
+2) (Optional) Scan filesystem under STORAGE_ROOT (default: backend/storage/models):
    - Count discoverable base folders (with config.json) for your reference.
    - NOTE: Does NOT insert rows into llm_models (schema only allows qa|doc_gen|summary).
 
@@ -22,7 +22,7 @@ python scripts/reset_and_index_models.py --index            # only re-index
 
 Environment variables:
   COREIQ_DB: path to sqlite3 DB (defaults to backend/storage/coreiq.sqlite3)
-  STORAGE_MODEL_ROOT: path to model storage (defaults to backend/storage/model)
+  STORAGE_MODEL_ROOT: path to model storage (defaults to backend/storage/models)
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def _backend_root() -> Path:
 
 # Default DB to pps_rag.db (can be overridden with COREIQ_DB)
 DB_PATH = os.getenv("COREIQ_DB", "/home/work/CoreIQ/backend/storage/pps_rag.db")
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(_backend_root() / "storage" / "model"))
+STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(_backend_root() / "storage" / "models"))
 
 
 def connect_db() -> sqlite3.Connection:

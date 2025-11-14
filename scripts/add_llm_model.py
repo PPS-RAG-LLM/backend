@@ -7,7 +7,7 @@ def add_llm_model():
         "provider":  "huggingface",
         "name":      "local_gpt_oss_20b",
         "revision":  0,
-        "model_path":"./service/storage/model/local_gpt_oss_20b",
+        "model_path":"./service/storage/models/local_gpt_oss_20b",
         "category":  "qa",
         "type":      "base",
         # "is_default":0,

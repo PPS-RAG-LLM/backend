@@ -21,7 +21,7 @@ user_data/
 *.th
 pretrain/
 storage/embedding-models/*
-storage/model/*
+storage/models/*
 storage/documents/*
 system/
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,linux,windows,audio,text

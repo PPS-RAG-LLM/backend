@@ -4,7 +4,7 @@ import tiktoken, fitz, io, json, uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import UploadFile
-from utils import load_embedding_model, logger, free_torch_memory, now_kst
+from utils import load_embedding_model, logger,  now_kst, make_safe_filename
 from config import config
 from repository.documents import (
     insert_workspace_document,
@@ -162,7 +162,7 @@ async def upload_document(
         - workspace_documents: add_to_workspaces가 있을 때만 워크스페이스 매핑
         - document_vectors: doc_id:vector_id를 1:N으로 전부 기록
     """
- 
+    
     filename = file.filename or "uploaded"
     content_type = file.content_type or "application/octet-stream"
     file_bytes = await file.read()
@@ -186,7 +186,7 @@ async def upload_document(
 
     # 3) 문서 ID 생성 및 documents-info 저장
     doc_id = str(uuid.uuid4())
-    doc_info_name = f"{filename}-{doc_id}.json"
+    doc_info_name = make_safe_filename(filename, doc_id, "json")
     doc_info_path = DOC_INFO_DIR / doc_info_name
     doc_info_path.parent.mkdir(parents=True, exist_ok=True)  # 안전하게 보장
 
@@ -216,13 +216,18 @@ async def upload_document(
         chunks = [page_content] if page_content else []
 
     vectors = await _embed_chunks(chunks)
-    # 청크 메타 템플릿(문서 공통 메타 + chunk text 포함)
+    # # 청크 메타 템플릿(문서 공통 메타 + chunk text 포함)
+    logger.debug(f"filename: {filename}")
+    logger.debug(f"now_str: {now_str}")
+    logger.debug(f"page_content: {page_content}")
+   
     header_meta = (
         "  <document_metadata>\n"
         f"    sourceDocument: {filename}\n"
         f"    published: {now_str}\n"
         "  </document_metadata>\n\n"
     )
+    logger.debug(f"header_meta: {header_meta}")
 
     vec_items = []
     vector_ids: List[str] = []
@@ -248,8 +253,9 @@ async def upload_document(
                 },
             }
         )
-
-    vec_cache_path = VEC_CACHE_DIR / f"{doc_id}.json"
+    logger.debug(f"vec_items: {vec_items}")
+    vec_cache_name = make_safe_filename(filename, doc_id, "json")
+    vec_cache_path = VEC_CACHE_DIR / vec_cache_name
     vec_cache_path.parent.mkdir(parents=True, exist_ok=True)  # 안전하게 보장
     vec_cache_path.write_text(
         json.dumps(vec_items, ensure_ascii=False, separators=(",", ":")),
