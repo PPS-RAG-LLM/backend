@@ -47,38 +47,39 @@ def get_default_llm_model(category: str) -> Optional[Dict[str, str]]:
 
 def insert_workspace(
     *,
-    name: str,
-    slug: str,
-    category: str,
-    temperature: Optional[float],
-    chat_history: int,
-    system_prompt: Optional[str],
+    name                : str,
+    slug                : str,
+    category            : str,
+    temperature         : Optional[float],
+    chat_history        : int,
+    system_prompt       : Optional[str],
     similarity_threshold: Optional[float],
-    provider: str,
-    top_n: int,
-    chat_mode: str,
+    provider            : Optional[str],
+    top_n               : int,
+    chat_mode           : Optional[str],
     query_refusal_response: Optional[str],
+    vector_search_mode  : Optional[str],
 ) -> int:
     """워크스페이스 생성"""
     with get_session() as session:
         try:
             now_dt = now_kst()
             workspace = Workspace(
-                name=name,
-                slug=slug,
-                category=category,
-                temperature=temperature,
-                chat_history=chat_history,
-                system_prompt=system_prompt,
-                similarity_threshold=similarity_threshold,
-                top_n=top_n,
-                chat_mode=chat_mode,
-                query_refusal_response=query_refusal_response,
-                provider=provider,
-                created_at=now_dt,
-                updated_at=now_dt,
+                name                    = name,
+                slug                    = slug,
+                category                = category,
+                temperature             = temperature,
+                chat_history            = chat_history,
+                system_prompt           = system_prompt,
+                provider                = provider,
+                similarity_threshold    = similarity_threshold,
+                top_n                   = top_n,
+                chat_mode               = chat_mode,
+                query_refusal_response  = query_refusal_response,
+                vector_search_mode      = vector_search_mode,
+                created_at              = now_dt,
+                updated_at              = now_dt,
             )
-
             session.add(workspace)
             session.commit()
             session.refresh(workspace)
@@ -154,11 +155,11 @@ def link_workspace_to_user(user_id: int, workspace_id: int) -> None:
 
         if not existing:
             now_dt = now_kst()
-            workspace_user = WorkspaceUser(
-                user_id=user_id,
-                workspace_id=workspace_id,
-                created_at=now_dt,
-                updated_at=now_dt,
+            workspace_user  = WorkspaceUser(
+                user_id     = user_id,
+                workspace_id= workspace_id,
+                created_at  = now_dt,
+                updated_at  = now_dt,
             )
             session.add(workspace_user)
             session.commit()
@@ -174,9 +175,9 @@ def get_default_system_prompt_content(category: str) -> Optional[str]:
         stmt = (
             select(SystemPromptTemplate.system_prompt)
             .where(
-                SystemPromptTemplate.category == category,
+                SystemPromptTemplate.category   == category,
                 SystemPromptTemplate.is_default == True,
-                SystemPromptTemplate.is_active == True,
+                SystemPromptTemplate.is_active  == True,
             )
             .order_by(SystemPromptTemplate.id.desc())
             .limit(1)

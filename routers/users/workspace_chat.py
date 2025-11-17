@@ -25,33 +25,35 @@ class Attachment(BaseModel):
 
 
 class StreamChatRequest(BaseModel):
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    message: str
-    mode: Optional[str] = Field(None, pattern="^(chat|query)$")
-    sessionId: Optional[str] = None
-    attachments: List[Attachment] = Field(default_factory=list)
-    reset: Optional[bool] = False
-    rag_flag: Optional[bool] = True
+    provider    : Optional[str] = None # 공급자
+    model       : Optional[str] = None # 모델
+    message     : str # 메시지
+    mode        : Optional[str] = Field(None, pattern="^(chat|query)$")
+    sessionId   : Optional[str] = None # 세션 ID
+    attachments : List[Attachment] = Field(default_factory=list) # 첨부 파일
+    reset       : Optional[bool] = False # 리셋
+    rag_flag    : Optional[bool] = True # RAG 플래그
 
 @chat_router.post(
     "/{slug}/thread/{thread_slug}/stream-chat", summary="QnA 스트리밍 채팅 실행"
 )
 def stream_chat_qna_endpoint(
-    category: str = Query("qna"),
-    slug: str = Path(..., description="워크스페이스 슬러그"),
-    thread_slug: str = Path(..., description="채팅 스레드 슬러그"),
-    body: StreamChatRequest = Body(..., description="채팅 요청 본문"),
+    category        : str = Query("qna"), # 카테고리
+    slug            : str = Path(..., description="워크스페이스 슬러그"),
+    thread_slug     : str = Path(..., description="채팅 스레드 슬러그"),
+    body            : StreamChatRequest = Body(..., description="채팅 요청 본문"),
 ):
-    user_id = 3
+    user_id         = 3
+    security_level  = 2 # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
     logger.info(f"\n\n[stream_chat_qna_endpoint] \n\n{body}\n\n")
 
     gen = stream_chat_for_qna(
-        user_id=user_id,
-        slug=slug,
-        thread_slug=thread_slug,
-        category=category,
-        body=body.model_dump(exclude_unset=True),
+        user_id         = user_id,   # 사용자 ID
+        security_level  = security_level,         # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
+        slug            = slug,      # 워크스페이스 슬러그
+        thread_slug     = thread_slug, # 채팅 스레드 슬러그
+        category        = category,  # 카테고리
+        body            = body.model_dump(exclude_unset=True), # 요청 본문
     )
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
@@ -97,11 +99,11 @@ def to_see(gen):
 
 # ====== Unified POST APIs ======
 class SummaryRequest(BaseModel):
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    systemPrompt: Optional[str] = None
-    originalText: Optional[str] = "텍스트원문"
-    userPrompt: Optional[str] = "요청사항"
+    provider    : Optional[str] = None # 공급자
+    model       : Optional[str] = None # 모델
+    systemPrompt: Optional[str] = None # 시스템 프롬프트
+    originalText: Optional[str] = "텍스트원문" # 원문
+    userPrompt  : Optional[str] = "요청사항" # 요청사항
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")
 def summary_stream_endpoint(
@@ -167,12 +169,7 @@ def doc_gen_stream_endpoint(
     if missing:
         raise BadRequestError(f"필수 변수 누락: {sorted(missing)}")
     filtered_vars = {key: value for key, value in variables if key in allowed_keys}
-
-    logger.debug(f"allowed_keys: {allowed_keys}")
-    logger.debug(f"provided_keys: {provided_keys}")
-    logger.debug(f"missing: {missing}")
-    logger.debug(f"filtered_vars: {filtered_vars}")
-    logger.debug(f"variables: {variables}")
+    logger.debug(f"\nallowed_keys: {allowed_keys}\nprovided_keys: {provided_keys}\nmissing: {missing}\nfiltered_vars: {filtered_vars}\nvariables: {variables}")
 
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
 

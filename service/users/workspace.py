@@ -17,6 +17,7 @@ from repository.workspace import (
     get_workspace_id_by_slug_for_user,
     update_workspace_name_by_slug_for_user
 )
+from service.admin.manage_vator_DB import get_vector_settings 
 from repository.workspace_thread import (
     create_default_thread, 
     get_threads_by_workspace_id,
@@ -33,19 +34,18 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "category": category,
         "payload": payload,
     })
-
     if category not in ALLOWED_CATEGORIES:
         raise BadRequestError(f"invalid category: {category}")
-
     name = payload.get("name")
     if not name or not isinstance(name, str):
         raise BadRequestError("name is required")
-
-    # 1) llm_models의 기본 모델(필수)
-    # model = get_default_llm_model(category)
-    # if not model:
-    #     raise InternalServerError("no default llm model for category")
     
+    try: 
+        db_settings = get_vector_settings()
+    except Exception as exc :
+        logger.warning(f"Milvus DB 설정 조회 실패 : {exc}")
+        return []
+  
     if category == "qna":
         system_prompt = get_default_system_prompt_content(category)
         chat_history  = defaults["chat_history"]
@@ -59,6 +59,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     similarity_threshold    = defaults["similarity_threshold"]
     top_n                   = defaults["top_n"]
     query_refusal_response  = defaults["query_refusal_response"]
+    search_type             = db_settings.get("searchType")
 
     if chat_mode not in ("chat", "query"):
         raise BadRequestError("chatMode must be 'chat' or 'query'")
@@ -79,6 +80,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         top_n                   = top_n,
         chat_mode               = chat_mode,
         query_refusal_response  = query_refusal_response,
+        vector_search_mode      = search_type,
     )
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
@@ -109,6 +111,8 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "UpdatedAt": ws["updated_at"],
         "chatHistory": ws["chat_history"] ,
         "systemPrompt": ws["system_prompt"] or "",
+        "provider": ws["provider"] or "",
+        "vectorSearchMode": ws["vector_search_mode"] or "",
     }
     logger.info({"workspace_created": result})
     return result

@@ -20,9 +20,14 @@ import asyncio
 
 logger = logger(__name__)
 
-def _fetch_milvus_snippets(question: str, ws: Dict[str, Any], top_k: int) -> List[Dict[str, Any]]:
+def _fetch_milvus_snippets(
+    question        : str, # 질문
+    security_level  : int, # 보안레벨
+    ws              : Dict[str, Any], # 워크스페이스
+    top_k           : int, # 상위 K개
+    ) -> List[Dict[str, Any]]:
     try:
-        settings = get_vector_settings() ### TODO : 워크스페이스 설정에서 가져오도록 수정
+        settings = get_vector_settings() 
     except Exception as exc:
         logger.warning(f"[Milvus] 설정 조회 실패: {exc}")
         return []
@@ -30,8 +35,7 @@ def _fetch_milvus_snippets(question: str, ws: Dict[str, Any], top_k: int) -> Lis
     if not model_key:
         logger.info("[Milvus] 활성화된 임베딩 모델이 없어 글로벌 검색을 건너뜁니다.")
         return []
-    search_type = settings.get("searchType")
-    security_level = int(ws.get("security_level") or ws.get("securityLevel") or 1)
+    search_type = ws.get("vector_search_mode") # workspace내에 미리 저장된 검색 타입 사용
 
     logger.debug(f"###### 모델 키 model_key: {model_key}")
     logger.debug(f"###### 검색 타입 search_type: {search_type}")
@@ -39,13 +43,13 @@ def _fetch_milvus_snippets(question: str, ws: Dict[str, Any], top_k: int) -> Lis
 
     try:
         result = _run_execute_search(
-            question=question,
-            top_k=max(top_k, 5),
-            rerank_top_n=min(top_k, 2), # WORKSPACE TOP-K
-            security_level=security_level, # USER
-            task_type="qna",
-            model_key=model_key,
-            search_type=search_type,
+            question        =question,
+            # top_k=max(top_k, 5),
+            rerank_top_n    =min(top_k, 2), # WORKSPACE TOP-K
+            security_level  =security_level, # USER
+            task_type       ="qna", # 작업 유형
+            model_key       =model_key, # 모델 키
+            search_type     =search_type, # 검색 타입
         )
         logger.debug(f"\n###########################\nresult: {result[200:]}...")
     except Exception as exc:
@@ -82,7 +86,11 @@ def _run_execute_search(**kwargs):
         finally:
             loop.close()
 
-def _insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any]) -> tuple[List[Dict[str, Any]], List[str]]:
+def _insert_rag_context(
+    security_level: int, # 보안레벨
+    ws            : Dict[str, Any], # 워크스페이스
+    body          : Dict[str, Any], # 요청 본문
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
     """
     RAG 컨텍스트 검색
     Returns:
@@ -115,9 +123,9 @@ def _insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any]) -> tuple[List[
             logger.info(f"\n## Searched SNIPPETS from temporary documents: {len(snippets)}개\n")
         else:
             logger.info(f"\n## No documents found - Skipping RAG\n")
-        ###  ---------------------------------- Milvus DB 검색 ----------------------------------
-        milvus_limit = int(ws.get("top_n") or 4)
-        milvus_snippets = _fetch_milvus_snippets(body["message"], ws, milvus_limit)
+        #  ---------------------------------- Milvus DB 검색 ----------------------------------
+        top_k = int(ws.get("top_n") or 4)
+        milvus_snippets = _fetch_milvus_snippets(body["message"], security_level, ws, top_k)
         if milvus_snippets:
             logger.debug(f"\n## Milvus 글로벌 스니펫: {len(milvus_snippets)}개\n## Searched SNIPPETS from Milvus DB: \n{milvus_snippets[100:]}...\n")
             snippets.extend(milvus_snippets)
@@ -131,15 +139,14 @@ def _insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any]) -> tuple[List[
 
 
 def stream_chat_for_qna(
-    user_id: int,
-    slug: str,
-    category: str,
-    body: Dict[str, Any],
-    thread_slug: str | None = None,
+    user_id         : int, # 사용자 ID
+    security_level  : int, # 보안레벨
+    slug            : str, # 워크스페이스 슬러그
+    category        : str, # 카테고리
+    body            : Dict[str, Any], # 요청 본문
+    thread_slug     : str | None = None, # 스레드 슬러그
 ) -> Generator[str, None, None]:
-    """
-    QA 카테고리 스트리밍
-    
+    """QA 카테고리 스트리밍
     특징:
     - RAG 검색으로 관련 문서 청크 검색
     - Chat history 포함
@@ -159,9 +166,7 @@ def stream_chat_for_qna(
 
     # 3. LLM runner 준비
     runner = resolve_runner(body["provider"], body["model"])
-
     messages: List[Dict[str, Any]] = []
-
     # 3.1 system prompt 준비
     from .common.message_builder import build_system_message
     system_prompt = ws.get("system_prompt") or ""
@@ -181,7 +186,7 @@ def stream_chat_for_qna(
             messages.append({"role": "assistant", "content": assistant_text})
 
     # 5. RAG context 검색
-    snippets = List[Dict[str, Any]] = []
+    snippets : List[Dict[str, Any]] = []
     temp_doc_ids: List[str] = []
 
     rag_flag = body.get("rag_flag") 
@@ -190,8 +195,8 @@ def stream_chat_for_qna(
     rag_flag = True if rag_flag is None else bool(rag_flag) # rag_flag 가 None 이면 True, 그 외는 bool 값으로 변환
 
     if rag_flag:
-        snippets, temp_doc_ids = _insert_rag_context(ws, body)
-        logger.debug(f"\n## 검색된 SNIPPETS 목록: \n{snippets}\n")
+        snippets, temp_doc_ids = _insert_rag_context(security_level, ws, body) # 보안레벨, 워크스페이스, 정보 전달
+        logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets}\n")
     else:
         logger.info("RAG disabled for this request; skipping context retrieval.")
 

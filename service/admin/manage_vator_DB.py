@@ -2614,7 +2614,7 @@ async def execute_search(
         user_level=security_level,
         task_type=task_type,
         model=model_key,
-    )
+    )  
     res = await search_documents(req, search_type_override=search_type, rerank_top_n=rerank_top_n)
     # Build check_file BEFORE optional source_filter so it reflects original candidates
     check_files: List[str] = []
