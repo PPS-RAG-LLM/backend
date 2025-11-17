@@ -372,7 +372,7 @@ class SystemPromptTemplate(Base):
     name = Column(
         Text, nullable=False
     )  # 회의록, 보고서, 출장 계획서
-    category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
+    category = Column(Text, nullable=False)  # 'qna', 'doc_gen', 'summary'
     system_prompt = Column(Text, nullable=False)  # 시스템 프롬프트
     user_prompt = Column(Text)  # 유저 프롬프트 - DocGen 카테고리만 적용될 부분
     is_default = Column(Boolean, server_default=text("false"))
@@ -500,7 +500,7 @@ class ChatFeedback(Base):
     __tablename__ = "chat_feedback"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    category = Column(Text, nullable=False)    # 'qa', 'doc_gen', 'summary'
+    category = Column(Text, nullable=False)    # 'qna', 'doc_gen', 'summary'
     subcategory = Column(Text, nullable=True)  # 'doc_gen' 의 경우에만 저장 (meeting, business_trip, report)
     filename = Column(Text, nullable=False)    # 파일명
     file_path= Column(Text, nullable=False)    # 파일 경로
@@ -521,11 +521,11 @@ class FineTuneDataset(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(Text, nullable=False)
-    category = Column(Text, nullable=False)  # 'qa', 'doc_gen', 'summary'
+    category = Column(Text, nullable=False)  # 'qna', 'doc_gen', 'summary'
     prompt_id = Column(
         Integer,
         ForeignKey("system_prompt_template.id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=True,  # qa 카테고리는 prompt_id가 없을 수 있음
+        nullable=True,  # qna 카테고리는 prompt_id가 없을 수 있음
     )
     path = Column(Text, nullable=False)
     record_count = Column(Integer, server_default=text("0"))
@@ -606,7 +606,7 @@ class LlmEvalRun(Base):
     prompt_id = Column(Integer, ForeignKey("system_prompt_template.id"), nullable=False)
 
     # 필수 메타
-    category = Column(Text, nullable=False)         # 'qa' | 'qna' | 'doc_gen' | 'summary'
+    category = Column(Text, nullable=False)         # 'qna' | 'qna' | 'doc_gen' | 'summary'
     subcategory = Column(Text)                      # 템플릿 name(세부테스크)
     model_name = Column(Text, nullable=False)       # 조회 편의용 중복 저장
 

@@ -17,8 +17,8 @@ def preflight_stream_chat_for_workspace(
     예외는 여기서 발생시켜 StreamingResponse 시작 전 FastAPI 핸들러로 전달되게 한다.
     """
     # 카테고리 검증
-    if category not in ("qa", "doc_gen", "summary"):
-        raise BadRequestError("category must be one of: qa, doc_gen, summary")
+    if category not in ("qna", "doc_gen", "summary"):
+        raise BadRequestError("category must be one of: qna, doc_gen, summary")
     
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     if not workspace_id:
@@ -29,9 +29,9 @@ def preflight_stream_chat_for_workspace(
         raise NotFoundError("워크스페이스를 찾을 수 없습니다")
 
     # QA는 thread_id 필수
-    if category == "qa":
+    if category == "qna":
         if not thread_slug:
-            raise BadRequestError("qa 카테고리는 thread_slug가 필요합니다")
+            raise BadRequestError("qna 카테고리는 thread_slug가 필요합니다")
         thread_id = get_thread_id_by_slug_for_user(user_id, thread_slug)
         if not thread_id:
             raise NotFoundError("채팅 스레드를 찾을 수 없습니다")

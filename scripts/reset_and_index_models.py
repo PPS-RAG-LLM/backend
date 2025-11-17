@@ -13,7 +13,7 @@ What this script does (by default):
 
 2) (Optional) Scan filesystem under STORAGE_ROOT (default: backend/storage/models):
    - Count discoverable base folders (with config.json) for your reference.
-   - NOTE: Does NOT insert rows into llm_models (schema only allows qa|doc_gen|summary).
+   - NOTE: Does NOT insert rows into llm_models (schema only allows qna|doc_gen|summary).
 
 Usage:
 python scripts/reset_and_index_models.py --reset --index

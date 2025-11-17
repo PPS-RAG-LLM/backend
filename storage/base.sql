@@ -57,7 +57,7 @@ VALUES (1,'huggingface','gpt-oss-20b',0,'./storage/models/gpt-oss-20b',
         -- (3,'huggingface','Qwen3-8B',0,'./storage/models/Qwen3-8B',
         -- 'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         -- (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./storage/models/Qwen3-Omni-30B-A3B-Instruct',
-        -- 'qa','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        -- 'qna','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (2,'huggingface','Qwen3-14B',0,'./storage/models/Qwen3-14B',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (3,'huggingface','Gemma3-27B',0,'./storage/models/Gemma3-27B',
@@ -93,7 +93,7 @@ INSERT INTO
         "is_active"
     )
 VALUES 
-    (80, 'qa_prompt', 'qa',
+    (80, 'qna_prompt', 'qna',
         '당신은 첫번째 친절하고 이해하기 쉬운 설명을 제공하는 AI 어시스턴트입니다.
         사용자의 질문이나 요청에 대해 정확하고 간결하게, 그리고 가능하다면 추가적인 배경 지식과 예시를 곁들여 답변하세요.
         어려운 용어나 개념이 나올 경우, 초보자도 이해할 수 있도록 쉽게 풀어 설명하고, 필요하다면 목록·표·코드 블록 등을 활용하세요.
@@ -106,7 +106,7 @@ VALUES
 
         질문이 모호하면 추가 질문으로 의도 명확히 하기 사용자가 원할 경우 심화 정보 제공',
         '',0,1),
-    (81, 'qa_prompt', 'qa',
+    (81, 'qna_prompt', 'qna',
         'You are the second AI assistant, designed to provide kind and easy-to-understand explanations.
         Respond to the user’s questions or requests accurately and concisely, and whenever possible, include helpful background knowledge and examples.
         If technical terms or complex concepts appear, explain them in simple language that beginners can understand, using lists, tables, or code blocks when appropriate.
@@ -298,8 +298,8 @@ VALUES
     (8, 'report_issue_dataset', 'doc_gen', 108, './storage/train_data/report_issue.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
     -- summary 카테고리 데이터셋 (프롬프트 ID 5)
     (9, 'summary_general_dataset', 'summary', 91, './storage/train_data/summary_general.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00'),
-    -- qa 카테고리 데이터셋 (프롬프트 ID 100)
-    (10, 'qa_general_dataset', 'qa', 80, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
+    -- qna 카테고리 데이터셋 (프롬프트 ID 100)
+    (10, 'qna_general_dataset', 'qna', 80, './storage/train_data/data.csv', 0, '2025-09-25 09:00:00', '2025-09-25 09:00:00');
 
 -- llm_eval_runs mock rows (pdf_list 포함)
 INSERT INTO "llm_eval_runs" (
@@ -356,7 +356,7 @@ INSERT INTO "llm_eval_runs" (
    '["half_year_review_minutes.pdf"]'
   ),
 
-  (606, NULL, 1, 80, 'qa', 'QA Prompt', 'gpt-oss-20b',
+  (606, NULL, 1, 80, 'qna', 'QA Prompt', 'gpt-oss-20b',
    '당신은 친절하고 이해하기 쉬운 설명을 제공하는 AI 어시스턴트입니다. ...\n회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
    '회사 휴가 정책에 대해 알려주세요. 연차는 몇 일까지 사용할 수 있나요?',
    '["milvus://test_20250924_789012/doc_vacation_policy", "file://hr_manual_2025.pdf"]',

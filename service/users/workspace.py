@@ -24,7 +24,7 @@ from repository.workspace_thread import (
 
 logger = logger(__name__)
 
-ALLOWED_CATEGORIES = {"qa", "doc_gen", "summary"}
+ALLOWED_CATEGORIES = {"qna", "doc_gen", "summary"}
  
 def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     defaults = config["workspace"]
@@ -46,7 +46,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     # if not model:
     #     raise InternalServerError("no default llm model for category")
     
-    if category == "qa":
+    if category == "qna":
         system_prompt = get_default_system_prompt_content(category)
         chat_history  = defaults["chat_history"]
     else:
@@ -84,12 +84,12 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
 
     logger.debug(f"Creating default thread for {category} workspace: name={name}")
-    if category =="qa":
+    if category =="qna":
         thread_name = f"thread-{name}"
         thread_slug = generate_thread_slug(thread_name)
         logger.info(f"thread_name: {thread_name}, thread_slug: {thread_slug}")
         thread_id = create_default_thread(user_id=user_id, name=thread_name, thread_slug=thread_slug, workspace_id=ws_id)
-        logger.info(f"Default thread created for qa workspace: thread_id={thread_id}")
+        logger.info(f"Default thread created for qna workspace: thread_id={thread_id}")
     else:
         logger.debug(f"No default thread for {category} workspace: name={name}")
         thread_id = None
@@ -119,7 +119,7 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
     rows = get_workspaces_by_user(user_id)
     items = []
     for ws in rows:
-        if ws["category"]=="qa":
+        if ws["category"]=="qna":
             threads = get_threads_by_workspace_id(ws["id"])
         else:
             threads = []

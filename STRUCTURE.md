@@ -12,7 +12,7 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 │   │   ├── doc_generation.py         # 문서 생성 
 │   │   ├── doc_summary.py            # 문서 요약
 │   │   ├── setting_workspace.py      # 워크스페이스 설정 업데이트 (Profile, QA, Vector Search)
-│   │   └── qa.py                     # Q&A
+│   │   └── qna.py                     # Q&A
 │   └── admin/                 
 │       ├── manage_prompts_api.py     # 프롬프트 관리
 │       └── fine_tuning_api.py        # 모델 파인튜닝 관련
@@ -21,7 +21,7 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 │   ├── users/                        # 사용자 비즈니스 로직
 │   │   ├── doc_generation.py         # 다양한 파일 형식 파싱·저장 로직
 │   │   ├── setting_workspace.py      # 워크스페이스 설정 업데이트 (Profile, QA, Vector Search)
-│   │   └── qa.py                     # RAG QA 파이프라인
+│   │   └── qna.py                     # RAG QA 파이프라인
 │   └── admin/                 
 │       ├── manage_prompts.py         # 프롬프트 관리
 │       ├── manage_model_ERP.py       # ERP 관리
@@ -29,7 +29,7 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 │
 ├── repository/                    #  DB, 외부 저장소, API 호출 등 데이터 접근 계층 → CRUD 직접 처리
 │   ├── users/                 
-│   │   ├── qa.py             
+│   │   ├── qna.py             
 │   │   └── …          
 │   ├── admin/                 
 │   │    ├── prompts.py         

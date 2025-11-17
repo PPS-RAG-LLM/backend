@@ -13,7 +13,8 @@ from .exceptions import (
     InternalServerError,
     DatabaseError,
     SessionNotFoundError,
-    NotImplementedAPIError
+    NotImplementedAPIError,
+    DocumentProcessingError
 )
 
 from .handlers import (
@@ -43,6 +44,7 @@ __all__ = [
     "UnauthorizedError", "Unauthorized", 
     "SessionNotFoundError", "SessionNotFound",
     "NotImplementedAPIError", "NotImplementedAPI",
+    "DocumentProcessingError", "DocumentProcessingError",
     # 핸들러들
     "base_api_exception_handler",
     "general_exception_handler", 

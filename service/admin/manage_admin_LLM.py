@@ -74,7 +74,7 @@ LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "models"
 os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
 DB_PATH = os.getenv("COREIQ_DB")
 
-ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qa
+ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qna
 
 RAG_TOPK_CACHE_KEY = "rag_topk"
 
@@ -201,7 +201,7 @@ def _connect() -> sqlite3.Connection:
 #               name TEXT UNIQUE NOT NULL,
 #               revision INTEGER,
 #               model_path TEXT,
-#               category TEXT NOT NULL CHECK (category IN ('qa','doc_gen','summary','all')),
+#               category TEXT NOT NULL CHECK (category IN ('qna','doc_gen','summary','all')),
 #               subcategory TEXT,
 #               type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
 #               is_default BOOLEAN NOT NULL DEFAULT 0,
@@ -432,11 +432,11 @@ def _get_cache(name: str) -> Optional[str]:
     return row["data"] if row else None
 def _norm_category(category: str) -> str:
     """
-    외부 표기는 qna, 내부 스키마/기존 코드는 qa.
+    외부 표기는 qna, 내부 스키마/기존 코드는 qna.
     """
     c = (category or "").strip().lower()
     if c == "qna":
-        return "qa"
+        return "qna"
     return c
 
 def _subtask_key(subtask: Optional[str]) -> str:
@@ -649,7 +649,7 @@ def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
 
 def _ensure_models_from_fs(category: str) -> None:
     """
-    STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qa|doc_gen|summary)과 충돌을 피하기 위해
+    STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qna|doc_gen|summary)과 충돌을 피하기 위해
     여기서는 DB에 쓰지 않는다. 베이스 모델 등록은 insert-base API로만 수행한다.
     """
     return
@@ -992,8 +992,8 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
     return _canon_storage_path(resolved)
 
 def _strip_category_suffix(name: str) -> str:
-    # 허용: -qa/-doc_gen/-summary 및 _qa/_qna/_doc_gen/_summary
-    for suf in ("-qa", "-doc_gen", "-summary", "_qa", "_qna", "_doc_gen", "_summary"):
+    # 허용: -qna/-doc_gen/-summary 및 _qna/_doc_gen/_summary
+    for suf in ("-qna", "-doc_gen", "-summary", "_qna", "_doc_gen", "_summary"):
         if name.endswith(suf):
             return name[: -len(suf)]
     return name
@@ -1002,8 +1002,8 @@ def _infer_category_from_name(name: str) -> Optional[str]:
     n = (name or "").lower()
     if n.endswith(("_summary", "-summary")):
         return "summary"
-    if n.endswith(("_qna", "_qa", "-qa")):
-        return "qa"
+    if n.endswith(("_qna", "-qna")):
+        return "qna"
     if n.endswith(("_doc_gen", "-doc_gen")):
         return "doc_gen"
     return None
@@ -1309,7 +1309,7 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
             )
             rows = cur.fetchall()
 
-        # 3) 그 외(qa/summary/doc_gen 전체) → 활성만
+        # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
         else:
             cur.execute(
                 """

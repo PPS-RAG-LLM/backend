@@ -25,7 +25,7 @@ router = APIRouter(
     summary="모델 목록과 로드/활성 상태 조회 (카테고리/서브테스크별)",
 )
 def model_list(
-    category: str = Query(..., description="qa | doc_gen | summary | base | all"),
+    category: str = Query(..., description="qna | doc_gen | summary | base | all"),
     subcategory: str | None = Query(
         None, description="doc_gen 서브테스크(=template.name, 예: '출장계획서')"
     ),
@@ -53,7 +53,7 @@ def model_unload(body: ModelLoadBody = ...):
     summary="카테고리/서브테스크별 프롬프트 목록 조회(읽기 전용)",
 )
 def get_prompts(
-    category: str = Query(..., description="doc_gen | summary | qa"),
+    category: str = Query(..., description="doc_gen | summary | qna"),
     subtask: str | None = Query(
         None, description="doc_gen 전용: report | travel_plan | meeting_minutes 등"
     ),

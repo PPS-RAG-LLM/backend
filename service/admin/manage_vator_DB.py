@@ -762,7 +762,6 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
         raise ValueError(
             "활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요."
         )
-
     with _EMBED_LOCK:
         if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
             return _EMBED_CACHE[model_key]
@@ -1221,14 +1220,12 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
         if nm.startswith("embedding_"):
             res.append(nm[len("embedding_") :])
         return res
-
     for p in cands:
         if key in aliases(p):
             return p.name, p
     for p in cands:
         if key in p.name.lower():
             return p.name, p
-
     # fallback: qwen3_0_6b
     for p in cands:
         if "qwen3_0_6b" in p.name.lower():
@@ -2242,20 +2239,51 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             logger.warning(f"[Milvus] sparse search unavailable: {e}")
             return [[]]
 
+    # def _load_snippet(
+    #     path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
+    # ) -> str:
+    #     try:
+    #         full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
+    #     except Exception:
+    #         return ""
+    #     words = full_txt.split()
+    #     if not words:
+    #         return ""
+    #     start = cidx * (max_tokens - overlap)
+    #     # 보존: 추출 시와 동일 슬라이딩 윈도우는 아니지만 근사 스니펫 제공
+    #     snippet = " ".join(words[start : start + max_tokens]).strip()
+    #     return snippet or " ".join(words[:max_tokens]).strip()
+
     def _load_snippet(
         path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
     ) -> str:
+        file_path = EXTRACTED_TEXT_DIR / path
+
+        logger.debug(f"\n###########################\nfile_path: {file_path}")
         try:
-            full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
-        except Exception:
+            full_txt = file_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.warning(f"[Milvus] snippet 파일 로드 실패: {file_path} ({exc})")
+            full_txt = ""
+        if not full_txt:
+            # 필요하면 ent_text로부터 넘어온 값이나 최소 안내 문구 반환
             return ""
+
         words = full_txt.split()
         if not words:
             return ""
-        start = cidx * (max_tokens - overlap)
-        # 보존: 추출 시와 동일 슬라이딩 윈도우는 아니지만 근사 스니펫 제공
-        snippet = " ".join(words[start : start + max_tokens]).strip()
-        return snippet or " ".join(words[:max_tokens]).strip()
+
+        window = max_tokens - overlap
+        if window <= 0:
+            window = max_tokens
+
+        start = max(0, cidx * window)
+        snippet = " ".join(words[start:start + max_tokens]).strip()
+        if snippet:
+            return snippet
+
+        # fallback: 청크 범위가 벗어나면 처음 구간이라도 리턴
+        return " ".join(words[:max_tokens]).strip()
 
     # === 분기: 검색 방식 ===
     hits_raw = []
@@ -2463,7 +2491,6 @@ def _load_reranker() -> Tuple[any, any, any, int, int]:
     # 모델 파일 존재 확인
     need_files = [
         model_path / "config.json",
-        model_path / "tokenizer_config.json",
     ]
     missing_files = [f for f in need_files if not f.exists()]
     if missing_files:
@@ -2591,6 +2618,7 @@ async def execute_search(
     res = await search_documents(req, search_type_override=search_type, rerank_top_n=rerank_top_n)
     # Build check_file BEFORE optional source_filter so it reflects original candidates
     check_files: List[str] = []
+    logger.debug(f"\n###########################\nres: {res}")
     try:
         for h in res.get("hits", []):
             # Prefer doc_id when available; fallback to path-derived filename
@@ -2610,7 +2638,6 @@ async def execute_search(
 
     res["check_file"] = sorted(list(set(check_files)))
     return res
-
 
 # -------------------------------------------------
 # 4) 관리 유틸

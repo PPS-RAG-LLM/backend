@@ -9,7 +9,7 @@ logger = logger(__name__)
 def load_embedding_model():
     model_dir = (_cfg.get("user_documents", {}) or {}).get("embedding_model_dir")
     logger.info(f"load sentence model from {model_dir}")
-    return SentenceTransformer(str(model_dir), device="cpu")
+    return SentenceTransformer(str(model_dir), device="cuda")
 
 
 _MODEL_MANAGER = None

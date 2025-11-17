@@ -14,9 +14,9 @@ service/users/chat/
 │   ├── message_builder.py         # 메시지 구성 함수
 │   └── stream_handler.py          # 스트리밍 및 DB 저장
 │
-├── qa/                            # ✅ QA 카테고리
+├── qna/                            # ✅ QA 카테고리
 │   ├── __init__.py
-│   └── qa.py                      # QA 스트림 로직
+│   └── qna.py                      # QA 스트림 로직
 │
 ├── summary/                       # ✅ Summary 카테고리
 │   ├── __init__.py
@@ -37,7 +37,7 @@ service/users/chat/
 ## 카테고리별 책임
 
 ### 1. **QA (Q&A 대화)**
-**위치**: `qa/qa.py`
+**위치**: `qna/qna.py`
 
 **특징**:
 - RAG 검색으로 관련 문서 청크 검색
@@ -122,17 +122,17 @@ service/users/chat/
 
 ```python
 from service.users.chat import (
-    stream_chat_for_qa,
+    stream_chat_for_qna,
     stream_chat_for_summary,
     stream_chat_for_doc_gen,
 )
 
 # QA
-gen = stream_chat_for_qa(
+gen = stream_chat_for_qna(
     user_id=user_id,
     slug=slug,
     thread_slug=thread_slug,
-    category="qa",
+    category="qna",
     body=body.model_dump(),
 )
 
@@ -203,8 +203,8 @@ gen = stream_chat_for_doc_gen(
 | `_render_template`              | `common/message_builder.py`         |
 | `_resolve_runner`               | `common/message_builder.py`         |
 | `_stream_and_persist`           | `common/stream_handler.py`          |
-| `stream_chat_for_qa`            | `qa/qa.py`                          |
-| `insert_rag_context` (QA)       | `qa/qa.py` (private)                |
+| `stream_chat_for_qna`            | `qna/qna.py`                          |
+| `insert_rag_context` (QA)       | `qna/qna.py` (private)                |
 | `stream_chat_for_summary`       | `summary/summary.py`                |
 | `_compose_summary_message`      | `summary/summary.py` (private)      |
 | `get_full_documents_for_summary`| `summary/document_loader.py`        |

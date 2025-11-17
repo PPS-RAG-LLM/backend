@@ -8,7 +8,7 @@ def add_llm_model():
         "name":      "local_gpt_oss_20b",
         "revision":  0,
         "model_path":"./service/storage/models/local_gpt_oss_20b",
-        "category":  "qa",
+        "category":  "qna",
         "type":      "base",
         # "is_default":0,
         "is_active": 1,

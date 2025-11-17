@@ -13,6 +13,7 @@ from repository.documents import (
 from repository.workspace import get_workspace_id_by_slug_for_user, update_workspace_vector_count
 from config import config
 from utils.time import now_kst
+from errors import DocumentProcessingError
 
 logger = logger(__name__)
 
@@ -83,6 +84,7 @@ def _extract_text_and_meta(
 
 
 def _chunk_text(text: str) -> List[str]:
+    logger.debug(f"chunk_text 시작")
     # 간단한 토큰 근사: 단어 기준 슬라이딩
     conf = config["vector_defaults"]
     chunk_size = conf["chunk_size"]
@@ -104,20 +106,25 @@ def _chunk_text(text: str) -> List[str]:
 async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
     """sentence-transformers로 임베딩 생성. 모델은 config에서 읽고, 없으면 다국어 소형 기본값."""
     import asyncio
-    
-    model_path = EMBEDDING_MODEL_DIR
-    if not model_path.exists():
-        raise FileNotFoundError(f"임베딩 모델 경로를 찾을 수 없음: {model_path}")
+    try:
+        model_path = EMBEDDING_MODEL_DIR
+        if not model_path.exists():
+            raise FileNotFoundError(f"임베딩 모델 경로를 찾을 수 없음: {model_path}")
 
-    # 동기 블로킹 작업을 별도 쓰레드에서 실행하여 이벤트 루프 차단 방지
-    def _sync_embed():
-        model = load_embedding_model()
-        vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
-        return [v.astype(float).tolist() for v in vecs]
-    
-    # asyncio.to_thread로 동기 작업을 비동기로 처리
-    return await asyncio.to_thread(_sync_embed)
-
+        # 동기 블로킹 작업을 별도 쓰레드에서 실행하여 이벤트 루프 차단 방지
+        def _sync_embed():
+            model = load_embedding_model()
+            vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
+            return [v.astype(float).tolist() for v in vecs]
+        
+        # asyncio.to_thread로 동기 작업을 비동기로 처리
+        return await asyncio.to_thread(_sync_embed)
+    except FileNotFoundError as e:
+        logger.error(f"임베딩 모델 경로를 찾을 수 없음: {e}")
+        raise DocumentProcessingError("embedding_model", str(e)) from e
+    except Exception as exc:
+        logger.exception("임베딩 계산 실패")
+        raise DocumentProcessingError("embedding", str(exc)) from exc
 
 
 
@@ -139,9 +146,12 @@ async def upload_documents(
             )
             if res and res.get("documents"):
                 documents.extend(res["documents"])
-        except Exception as e:
-            logger.error(f"upload_documents: failed for {getattr(f, 'filename', None)}: {e}")
-            errors.append({"filename": getattr(f, "filename", None), "error": str(e)})
+        except DocumentProcessingError as exc:
+            logger.error(f"upload_documents: stage failure for {f.filename}: {exc.message}")
+            errors.append({"filename": getattr(f, "filename", None), "error": exc.message})
+        except Exception as exc:
+            logger.exception("upload_documents: unexpected failure")
+            errors.append({"filename": getattr(f, "filename", None), "error": str(exc)})
     return {
         "success": len(errors) == 0,
         "error": errors or None,
@@ -174,7 +184,11 @@ async def upload_document(
     # file_url = f"file://{saved_path.as_posix()}"
 
     # 2) 텍스트/메타 추출
-    page_content, meta = _extract_text_and_meta(file_bytes, filename, content_type)
+    try:
+        page_content, meta = _extract_text_and_meta(file_bytes, filename, content_type)
+    except Exception as exc:
+        logger.exception("텍스트 추출 실패")
+        raise DocumentProcessingError("extract_text", str(exc)) from exc
     word_count = len(page_content.split())
     token_est = _estimate_tokens(page_content)
     now_str = (
@@ -209,16 +223,26 @@ async def upload_document(
     doc_info_path.write_text(
         json.dumps(doc_info_json, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    logger.debug(f"청크분할 시작")
 
     # 4) 청크 분할 + 임베딩 + vector-cache 저장
-    chunks = _chunk_text(page_content)
+    try:
+        chunks = _chunk_text(page_content)
+    except Exception as exc:
+        logger.exception("청크 분할 실패")
+        raise DocumentProcessingError("chunking", str(exc)) from exc
     if not chunks:
         chunks = [page_content] if page_content else []
 
-    vectors = await _embed_chunks(chunks)
+    try:
+        vectors = await _embed_chunks(chunks)
+    except DocumentProcessingError:
+        raise
+    except Exception as exc:
+        logger.exception("임베딩 단계 실패")
+        raise DocumentProcessingError("embedding", str(exc)) from exc
     # # 청크 메타 템플릿(문서 공통 메타 + chunk text 포함)
     logger.debug(f"filename: {filename}")
-    logger.debug(f"now_str: {now_str}")
     logger.debug(f"page_content: {page_content}")
    
     header_meta = (
@@ -257,14 +281,17 @@ async def upload_document(
     vec_cache_name = make_safe_filename(filename, doc_id, "json")
     vec_cache_path = VEC_CACHE_DIR / vec_cache_name
     vec_cache_path.parent.mkdir(parents=True, exist_ok=True)  # 안전하게 보장
-    vec_cache_path.write_text(
-        json.dumps(vec_items, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    try:
+        vec_cache_path.write_text(
+            json.dumps(vec_items, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.exception("vector-cache 저장 실패")
+        raise DocumentProcessingError("vector_cache", str(exc)) from exc
 
     # 5) DB 기록
     # 5-1) document_vectors: 전체 청크 매핑(항상)
-
     inserted_workspace = False
     if add_to_workspaces:
         slugs = [s.strip() for s in add_to_workspaces.split(",") if s.strip()]
@@ -287,16 +314,18 @@ async def upload_document(
                     },
                 )
                 inserted_workspace = True
+                last_workspace_id = int(workspace_id)
                 
             except Exception as e:
                 logger.error(f"insert_workspace_document failed: {e}")
-    if inserted_workspace:
+    if inserted_workspace and last_workspace_id is not None:
         try:
             insert_document_vectors(doc_id=doc_id, vector_ids=vector_ids)
-        except Exception as e:
-            logger.error(f"insert_document_vectors failed: {e}")
-    # 저장된 doc의 백터 수 워크스페이스 업데이트
-    update_workspace_vector_count(int(workspace_id))
+        except Exception as exc:
+            logger.exception("document_vectors 기록 실패")
+            raise DocumentProcessingError("database", str(exc)) from exc
+        # 저장된 doc의 백터 수 워크스페이스 업데이트
+        update_workspace_vector_count(last_workspace_id)
     # 6) 응답
     resp = {
         "success": True,

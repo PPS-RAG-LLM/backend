@@ -26,7 +26,7 @@ def stream_and_persist(
     
     Args:
         user_id: 사용자 ID
-        category: 카테고리 (qa, summary, doc_gen)
+        category: 카테고리 (qna, summary, doc_gen)
         ws: 워크스페이스 정보
         body: 요청 본문
         runner: LLM streamer

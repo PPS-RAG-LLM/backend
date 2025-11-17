@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Path, Query, Body
 from starlette.responses import StreamingResponse
 from repository.workspace import get_workspace_by_workspace_id
 from service.users.chat import (
-    stream_chat_for_qa,
+    stream_chat_for_qna,
     stream_chat_for_doc_gen,
     stream_chat_for_summary,
 )
@@ -32,20 +32,21 @@ class StreamChatRequest(BaseModel):
     sessionId: Optional[str] = None
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
+    rag_enabled: Optional[bool] = True
 
 @chat_router.post(
     "/{slug}/thread/{thread_slug}/stream-chat", summary="QnA 스트리밍 채팅 실행"
 )
-def stream_chat_qa_endpoint(
-    category: str = Query("qa"),
+def stream_chat_qna_endpoint(
+    category: str = Query("qna"),
     slug: str = Path(..., description="워크스페이스 슬러그"),
     thread_slug: str = Path(..., description="채팅 스레드 슬러그"),
     body: StreamChatRequest = Body(..., description="채팅 요청 본문"),
 ):
     user_id = 3
-    logger.info(f"\n\n[stream_chat_qa_endpoint] \n\n{body}\n\n")
+    logger.info(f"\n\n[stream_chat_qna_endpoint] \n\n{body}\n\n")
 
-    gen = stream_chat_for_qa(
+    gen = stream_chat_for_qna(
         user_id=user_id,
         slug=slug,
         thread_slug=thread_slug,
@@ -57,7 +58,7 @@ def stream_chat_qa_endpoint(
 
 
 def to_see(gen):
-    logger.info("[stream_chat_qa_endpoint] streaming start")
+    logger.info("[stream_chat_qna_endpoint] streaming start")
     buf = []
     last_flush = time.monotonic()
     chat_id = None
@@ -90,7 +91,7 @@ def to_see(gen):
         yield f'{json.dumps({"chat_id": chat_id, "done":True})}\n\n'
 
     complete_response = "".join(full_response)
-    logger.info("======================\n\n[stream_chat_qa_endpoint] streaming end - Full response "
+    logger.info("======================\n\n[stream_chat_qna_endpoint] streaming end - Full response "
     f"({len(complete_response)} chars): \n\n{complete_response}\n\n======================\n")
 
 

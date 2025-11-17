@@ -33,7 +33,7 @@ import asyncio
 
 from routers.commons.summary_templates import router as summary_router
 from routers.commons.doc_gen_templates import router as doc_gen_templates_router
-from routers.commons.qa_templates import router as qa_templates_router
+from routers.commons.qna_templates import router as qna_templates_router
 from routers.test_error.test_error import test_error_router as test_error_router
 logger = logger(__name__)
 
@@ -169,7 +169,7 @@ app.include_router(sso_router)
 app.include_router(mock_company_router)
 app.include_router(summary_router)
 app.include_router(doc_gen_templates_router)
-app.include_router(qa_templates_router)
+app.include_router(qna_templates_router)
 # app.include_router(admin_router)
 # app.include_router(document_router)
 # === [ADD] 사용자 관리 라우터 등록 ===
@@ -196,6 +196,7 @@ if __name__ == "__main__":
             "**/unsloth_compiled_cache/**",
             "**/storage/models/**",
             "**/storage/train_data/**",
+            "service/users/chat/**",
         ],
-        reload_dirs=["routers", "repository", "service", "utils"],
+        reload_dirs=["routers", "repository", "service", "utils"],                        
     )

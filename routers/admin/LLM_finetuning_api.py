@@ -77,7 +77,7 @@ def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
 )
 async def launch_fine_tuning(
     # 텍스트(옵션) 파라미터들 — 값이 오면 사용, 없으면 기본값
-    category: str | None = Form(None, description="qa | doc_gen | summary"),
+    category: str | None = Form(None, description="qna | doc_gen | summary"),
     baseModelName: str | None = Form(None, description="베이스 모델 이름(예: gpt-oss)"),
     saveModelName: str | None = Form(None, description="저장될 모델 표시 이름(미지정 시 자동 생성)"),
     systemPrompt: str | None = Form(None, description="시스템 프롬프트"),
@@ -94,7 +94,7 @@ async def launch_fine_tuning(
     trainSet: UploadFile = File(..., description="학습 CSV 파일"),
 ):
     # 기본값 채우기
-    _category = (category or "qa").strip()
+    _category = (category or "qna").strip()
     _base = (baseModelName or "gpt-oss").strip()
     _save = saveModelName or f"fine-tuned-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     _sys = systemPrompt or "당신은 도움이 되는 AI 어시스턴트입니다."
@@ -153,7 +153,7 @@ async def read_fine_tuning_status(jobId: str = Query(..., description="조회할
 )
 async def feedback_datasets(file: str | None = Query(
     None,
-    description="다운로드할 파일명(basename만). 예: feedback_qa_p0.csv",
+    description="다운로드할 파일명(basename만). 예: feedback_qna_p0.csv",
 )):
     # 다운로드 분기
     if file:

@@ -6,7 +6,7 @@ from utils.database import get_session
 from storage.db_models import SystemPromptTemplate
 from errors import DatabaseError
 
-def repo_list_qa_templates() -> List[Dict[str, str]]:
+def repo_list_qna_templates() -> List[Dict[str, str]]:
     with get_session() as session:
         stmt = (
             select(
@@ -16,7 +16,7 @@ def repo_list_qa_templates() -> List[Dict[str, str]]:
                 SystemPromptTemplate.user_prompt,
             )
             .where(
-                SystemPromptTemplate.category == "qa",
+                SystemPromptTemplate.category == "qna",
                 SystemPromptTemplate.is_active == True,
             )
             .order_by(SystemPromptTemplate.id.desc())
@@ -25,15 +25,15 @@ def repo_list_qa_templates() -> List[Dict[str, str]]:
         return [{"id": r.id, "name": r.name, "systemPrompt": r.system_prompt, "userPrompt":r.user_prompt} for r in rows]
         
 
-def repo_create_qa_template(
+def repo_create_qna_template(
     system_prompt: str, user_prompt: Optional[str]=""
 ) -> Dict[str, Any]:
     with get_session() as session:
         """QnA 시스템프롬프트 생성"""
         try:
             template = SystemPromptTemplate(
-                name="qa_prompt",
-                category="qa",
+                name="qna_prompt",
+                category="qna",
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 is_default=False,
@@ -54,12 +54,12 @@ def repo_create_qa_template(
             raise DatabaseError(f"QA Prompt template create failed: {exc}") from exc
 
 
-def repo_update_qa_template(
+def repo_update_qna_template(
     template_id: int, system_prompt: str, user_prompt: Optional[str] = ""
     )-> Optional[Dict[str, str]]:
     with get_session() as session:
         template = session.get(SystemPromptTemplate, template_id)
-        if not template or template.category != "qa":
+        if not template or template.category != "qna":
             return None
         template.system_prompt = system_prompt
         template.user_prompt = user_prompt
@@ -72,10 +72,10 @@ def repo_update_qa_template(
             "user_prompt": template.user_prompt 
         }
 
-def repo_delete_qa_template(template_id: int) -> bool:
+def repo_delete_qna_template(template_id: int) -> bool:
     with get_session() as session:
         template = session.get(SystemPromptTemplate, template_id)
-        if not template or template.category != "qa":
+        if not template or template.category != "qna":
             return False
         
         session.delete(template)

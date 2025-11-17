@@ -12,7 +12,7 @@ logger = logger(__name__)
 
 @lru_cache(maxsize=2)
 def load_qwen_instruct_7b(model_dir):
-    logger.info(f"load qwen-7b-instruct from `{model_dir}`")
+    logger.info(f"load qwen-instruct-model from `{model_dir}`")
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir,
         local_files_only=True,

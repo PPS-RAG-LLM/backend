@@ -5,7 +5,7 @@ from errors import BadRequestError
 
 
 def validate_category_subcategory(
-    category: str = Query(..., pattern="^(qa|doc_gen|summary)$", description="카테고리"),
+    category: str = Query(..., pattern="^(qna|doc_gen|summary)$", description="카테고리"),
     subcategory: Optional[str] = Query(None, description="서브카테고리 (doc_gen: meeting, business_trip, report)")
 ) -> tuple[str, Optional[str]]:
     """
@@ -13,7 +13,7 @@ def validate_category_subcategory(
     
     Rules:
     - doc_gen: subcategory 필수 (meeting, business_trip, report)
-    - qa, summary: subcategory 불가
+    - qna, summary: subcategory 불가
     
     Returns:
         tuple[str, Optional[str]]: (category, subcategory)
@@ -32,18 +32,18 @@ def validate_category_subcategory(
             raise BadRequestError(
                 f"doc_gen 카테고리의 subcategory는 {', '.join(allowed_subcategories)} 중 하나여야 합니다"
             )
-    else:  # qa 또는 summary
+    else:  # qna 또는 summary
         if subcategory:
             raise BadRequestError(f"{category} 카테고리는 subcategory를 사용할 수 없습니다")
         subcategory = None
     
     return category, subcategory
 
-def validate_category(category: str = Query(..., pattern="^(qa|doc_gen|summary)$", description="카테고리")) -> str:
+def validate_category(category: str = Query(..., pattern="^(qna|doc_gen|summary)$", description="카테고리")) -> str:
     """
     카테고리의 유효성을 검증합니다.
     """
-    allowed_categories = ["qa", "doc_gen", "summary"]
+    allowed_categories = ["qna", "doc_gen", "summary"]
     if category not in allowed_categories:
         raise BadRequestError(f"{category} 카테고리는 사용할 수 없습니다")
     return category

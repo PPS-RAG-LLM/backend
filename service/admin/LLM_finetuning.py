@@ -32,7 +32,7 @@ logger = logger(__name__)
 
 import re
 from urllib.parse import quote_plus
-_FEEDBACK_FILE_RE = re.compile(r"^feedback_(qa|doc_gen|summary)_p(\d+)\.csv$", re.IGNORECASE)
+_FEEDBACK_FILE_RE = re.compile(r"^feedback_(qna|doc_gen|summary)_p(\d+)\.csv$", re.IGNORECASE)
 
 # ===== 디바이스 유틸 =====
 def _get_model_device(model):
@@ -141,7 +141,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
             if not model:
                 # 카테고리 접미사 제거 후 다시 찾기
                 def _strip_cat(n: str) -> str:
-                    for suf in ("-qa", "-doc_gen", "-summary"):
+                    for suf in ("-qna", "-doc_gen", "-summary"):
                         if n.endswith(suf):
                             return n[: -len(suf)]
                     return n
@@ -222,7 +222,7 @@ def _looks_like_mxfp4_model(dir_or_name: str) -> bool:
 # ===== Schemas =====
 class FineTuneRequest(BaseModel):
     # === 공통 태그(필수) ===
-    category: str = Field(..., description="qa | doc_gen | summary")
+    category: str = Field(..., description="qna | doc_gen | summary")
     subcategory: Optional[str] = Field(None, description="세부 테스크. 현재 주로 doc_gen에서 사용")
 
     baseModelName: str
@@ -252,7 +252,7 @@ class FineTuneRequest(BaseModel):
     @field_validator("category")
     @classmethod
     def _v_category(cls, v: str) -> str:
-        allowed = {"qa", "doc_gen", "summary"}
+        allowed = {"qna", "doc_gen", "summary"}
         vv = (v or "").strip().lower()
         if vv not in allowed:
             raise ValueError(f"category must be one of {sorted(allowed)}")
@@ -1165,7 +1165,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     # body.category를 최종 신뢰(하위호환을 위해 인수 category는 fallback)
     category = (body.category or category).lower()
     suffix = (body.tuningType or "QLORA").upper()
-    # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
+    # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qna)
     save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"
     _ensure_output_dir(save_name_with_suffix)
 
@@ -1371,8 +1371,8 @@ def list_feedback_datasets() -> dict:
         st = os.stat(abs_path)
         mtime_dt = datetime.fromtimestamp(st.st_mtime)
         entries.append({
-            "task": task,                               # qa | doc_gen | summary
-            "file": name,                               # ex) feedback_qa_p0.csv
+            "task": task,                               # qna | doc_gen | summary
+            "file": name,                               # ex) feedback_qna_p0.csv
             "prompt": prompt,                           # 정수 p값
             "bytes": st.st_size,                        # 파일 크기
             "mtime": mtime_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1381,7 +1381,7 @@ def list_feedback_datasets() -> dict:
             "downloadUrl": f"/v1/admin/llm/feedback-datasets?file={quote_plus(name)}",
         })
 
-    groups = {"qa": [], "doc_gen": [], "summary": []}
+    groups = {"qna": [], "doc_gen": [], "summary": []}
     for e in entries:
         groups[e["task"]].append(e)
     for k in groups:

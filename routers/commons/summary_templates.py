@@ -49,7 +49,7 @@ class CreateTemplateRequest(BaseModel):
     userPrompt: str  ="(require)유저 프롬프트"
 
 @router.post("/template", summary="관리자용 | QA 시스템 프롬프트 생성")
-def create_qa_systemPrompt(body:CreateTemplateRequest):
+def create_qna_systemPrompt(body:CreateTemplateRequest):
     item = generate_summary_template(body.systemPrompt, body.userPrompt)
     return item
 

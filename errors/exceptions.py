@@ -57,4 +57,8 @@ class DatabaseError(InternalServerError):
     def __init__(self, message: str = "데이터베이스 처리 중 오류가 발생했습니다"):
         super().__init__(f"데이터베이스 오류: {message}")
 
-
+class DocumentProcessingError(InternalServerError):
+    """문서 처리 오류"""
+    def __init__(self, stage: str, detail: str):
+        message = f"문서 처리({stage}) 중 오류가 발생했습니다: {detail}"
+        super().__init__(message)
