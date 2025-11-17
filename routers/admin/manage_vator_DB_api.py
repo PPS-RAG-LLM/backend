@@ -254,8 +254,12 @@ async def rag_ingest_one_endpoint(body: SingleIngestBody = Body(...)):
 
 @router.post("/admin/vector/execute",summary="관리자 검색")
 async def rag_search_endpoint(body: ExecuteBody):
+    print(f"🎯 [API] 관리자 검색 엔드포인트 호출: question='{body.question}', topK={body.topK}, rerank_topN={body.rerank_topN}")
+    
     model_key = get_vector_settings()["embeddingModel"]
-    return await execute_search(
+    print(f"🎯 [API] execute_search 호출 시작...")
+    
+    result = await execute_search(
         question=body.question,
         top_k=body.topK,  # 임베딩 후보 개수
         rerank_top_n=body.rerank_topN,  # 최종 반환 개수
@@ -265,6 +269,9 @@ async def rag_search_endpoint(body: ExecuteBody):
         model_key=model_key,
         search_type=body.searchMode,  # ← override
     )
+    
+    print(f"🎯 [API] execute_search 호출 완료, 결과 hits={len(result.get('hits', []))}")
+    return result
 
 
 @router.post(

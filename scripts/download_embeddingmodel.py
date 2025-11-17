@@ -1,5 +1,5 @@
 """
-python /home/wzxcv123/NIQ/backend/scripts/download_embeddingmodel.py
+python /home/wzxcv123/NIQ/jo/backend/scripts/download_embeddingmodel.py
 """
 
 
@@ -8,13 +8,14 @@ import os
 
 # 모델 저장 기본 경로
 # base_dir = "/home/work/CoreIQ/backend/storage/embedding-models"
-base_dir = "/home/wzxcv123/NIQ/backend/storage/embedding-models"
+base_dir = "/home/wzxcv123/NIQ/jo/backend/storage/embedding-models"
 
 # 다운로드 대상 모델과 저장 폴더명 매핑
 models = {
     "Qwen/Qwen3-Embedding-0.6B": "embedding_qwen3_0_6b",
     "BAAI/bge-m3": "embedding_bge_m3",
     "Qwen/Qwen3-Embedding-4B": "embedding_qwen3_4b",
+    "Qwen/Qwen3-Embedding-8B": "embedding_qwen3_8b"
 }
 
 def download_models():
