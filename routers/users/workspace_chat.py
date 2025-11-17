@@ -45,7 +45,7 @@ def stream_chat_qna_endpoint(
 ):
     user_id         = 3
     security_level  = 2 # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
-    logger.info(f"\n\n[stream_chat_qna_endpoint] \n\n{body}\n\n")
+    logger.info(f"\n\n[stream_chat_qna_endpoint] \n{body}\n")
 
     gen = stream_chat_for_qna(
         user_id         = user_id,   # 사용자 ID
@@ -68,6 +68,11 @@ def to_see(gen):
 
     for chunk in gen:
         if not chunk:
+            continue
+        # 🔥 소스 이벤트 감지 및 프런트로 전달
+        if chunk.startswith("__SOURCES__:"):
+            sources_json = chunk.split(":", 1)[1]
+            yield f'{json.dumps({"sources": json.loads(sources_json)})}\n\n'
             continue
         if chunk.startswith("__CHAT_ID__:"): 
             chat_id = chunk.split(":",1)[1] # 채팅 ID 추출
@@ -102,7 +107,7 @@ class SummaryRequest(BaseModel):
     provider    : Optional[str] = None # 공급자
     model       : Optional[str] = None # 모델
     systemPrompt: Optional[str] = None # 시스템 프롬프트
-    originalText: Optional[str] = "텍스트원문" # 원문
+    originalText: Optional[str] = "오리지널 텍스트" # 원문
     userPrompt  : Optional[str] = "요청사항" # 요청사항
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")

@@ -36,22 +36,19 @@ def _fetch_milvus_snippets(
         logger.info("[Milvus] 활성화된 임베딩 모델이 없어 글로벌 검색을 건너뜁니다.")
         return []
     search_type = ws.get("vector_search_mode") # workspace내에 미리 저장된 검색 타입 사용
-
-    logger.debug(f"###### 모델 키 model_key: {model_key}")
-    logger.debug(f"###### 검색 타입 search_type: {search_type}")
-    logger.debug(f"###### 보안 레벨 security_level: {security_level}")
-
+    logger.debug(f"모델 키 model_key: {model_key}\n검색 타입 search_type: {search_type}\n보안 레벨 security_level: {security_level}")
+    
     try:
         result = _run_execute_search(
-            question        =question,
+            question        = question,
             # top_k=max(top_k, 5),
-            rerank_top_n    =min(top_k, 2), # WORKSPACE TOP-K
-            security_level  =security_level, # USER
-            task_type       ="qna", # 작업 유형
-            model_key       =model_key, # 모델 키
-            search_type     =search_type, # 검색 타입
+            rerank_top_n    = min(top_k, 2), # WORKSPACE TOP-K
+            security_level  = security_level, # USER
+            task_type       = "qna", # 작업 유형
+            model_key       = model_key, # 모델 키
+            search_type     = search_type, # 검색 타입
         )
-        logger.debug(f"\n###########################\nresult: {result[200:]}...")
+        logger.debug(f"\n###########################\nresult: {result}\n")
     except Exception as exc:
         logger.exception(f"[Milvus] 검색 실패: {exc}")
         return []
@@ -64,10 +61,10 @@ def _fetch_milvus_snippets(
             continue
         snippets.append(
             {
-                "title": hit.get("doc_id") or hit.get("path") or "Milvus",
-                "score": float(hit.get("score", 0.0)),
+                "title" : hit.get("doc_id") or hit.get("path") or "Milvus",
+                "score" : float(hit.get("score", 0.0)),
                 "doc_id": hit.get("doc_id"),
-                "text": snippet_text,
+                "text"  : snippet_text,
                 "source": "milvus",
             }
         )
@@ -122,7 +119,7 @@ def _insert_rag_context(
             snippets = retrieve_contexts_local(body["message"], candidate_doc_ids, top_k=top_k, threshold=thr)
             logger.info(f"\n## Searched SNIPPETS from temporary documents: {len(snippets)}개\n")
         else:
-            logger.info(f"\n## No documents found - Skipping RAG\n")
+            logger.info(f"\n## No documents found in workspace and attachments - Skipping RAG\n")
         #  ---------------------------------- Milvus DB 검색 ----------------------------------
         top_k = int(ws.get("top_n") or 4)
         milvus_snippets = _fetch_milvus_snippets(body["message"], security_level, ws, top_k)
@@ -196,7 +193,7 @@ def stream_chat_for_qna(
 
     if rag_flag:
         snippets, temp_doc_ids = _insert_rag_context(security_level, ws, body) # 보안레벨, 워크스페이스, 정보 전달
-        logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets}\n")
+        logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets[100:]}...\n")
     else:
         logger.info("RAG disabled for this request; skipping context retrieval.")
 

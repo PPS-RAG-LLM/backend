@@ -38,16 +38,7 @@ def stream_and_persist(
     temperature = ws.get("temperature")
     acc_text: List[str] = []
     t0 = time.perf_counter()
-    
-    # 스트리밍 응답 생성
-    for chunk in runner.stream(messages, temperature=temperature):
-        if chunk:
-            acc_text.append(chunk)
-            yield chunk
-    
-    duration = max(time.perf_counter() - t0, 0.0)
 
-    # snippets를 sources 형식으로 변환
     sources = []
     for snippet in snippets:
         sources.append({
@@ -57,9 +48,20 @@ def stream_and_persist(
             "score": round(snippet.get("score", 0.0), 5),
             "page": snippet.get("page"),
             "chunk_index": snippet.get("chunk_index"),
+            "source": snippet.get("source"),  # "milvus" 또는 "local"
         })
+    # 🔥 스트리밍 시작 전에 소스 먼저 전송
+    if sources:
+        yield f"__SOURCES__:{json.dumps(sources, ensure_ascii=False)}"
     
-    # TODO : 응답 JSON 구성
+    # 스트리밍 응답 생성
+    for chunk in runner.stream(messages, temperature=temperature):
+        if chunk:
+            acc_text.append(chunk)
+            yield chunk
+    duration = max(time.perf_counter() - t0, 0.0)
+    
+    # TODO : 응답 JSON 구성 (TOKEN 카운트 추가)
     response_json = {
         "text": "".join(acc_text),
         "sources": sources,
@@ -89,6 +91,7 @@ def stream_and_persist(
             delete_document_vectors_by_doc_ids(temp_doc_ids)
     except Exception as exc:
         logger.error(f"vector cleanup failed: {exc}")
+        
     yield f"__CHAT_ID__: {chat_id}"
 
 
