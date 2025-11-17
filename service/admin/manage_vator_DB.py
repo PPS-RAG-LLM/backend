@@ -24,6 +24,9 @@ import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
 
+from repository.embedding_model import get_active_embedding_model_name, get_embedding_model_path_by_name
+from repository.rag_settings import get_vector_settings_row
+
 try:
     # Milvus 2.4+ Function/BM25 하이브리드
     from pymilvus import Function, FunctionType
@@ -674,7 +677,7 @@ def set_ingest_params(chunk_size: int | None = None, overlap: int | None = None)
 
 
 def get_ingest_params():
-    row = _get_vector_settings_row()
+    row = get_vector_settings_row()
     return {"chunkSize": row["chunk_size"], "overlap": row["overlap"]}
 
 
@@ -779,7 +782,7 @@ def warmup_active_embedder(logger_func=print):
     실패해도 서비스는 실제 사용 시 지연 로딩으로 복구됨.
     """
     try:
-        key = _get_active_embedding_model_name()
+        key = get_active_embedding_model_name()
         logger_func(f"[warmup] 활성 임베딩 모델: {key}. 로딩 시도...")
         _get_or_load_embedder(key, preload=True)
         logger_func(f"[warmup] 로딩 완료: {key}")
@@ -796,21 +799,6 @@ async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
     # blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
     return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
 
-
-def _get_active_embedding_model_name() -> str:
-    """활성화된 임베딩 모델 이름 반환 (없으면 예외)"""
-    with get_session() as session:
-        row = (
-            session.query(EmbeddingModel)
-            .filter(EmbeddingModel.is_active == 1)
-            .order_by(EmbeddingModel.activated_at.desc().nullslast())
-            .first()
-        )
-        if not row:
-            raise ValueError(
-                "활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요."
-            )
-        return str(row.name)
 
 
 def _set_active_embedding_model(name: str):
@@ -832,31 +820,7 @@ def _set_active_embedding_model(name: str):
         session.commit()
 
 
-def _get_vector_settings_row() -> dict:
-    """레거시 호환: rag_settings(싱글톤)에서 기본 청크 설정을 읽어온다."""
-    with get_session() as session:
-        row = session.query(RagSettings).filter(RagSettings.id == 1).first()
-        if not row:
-            return {"search_type": "hybrid", "chunk_size": 512, "overlap": 64}
-        return {
-            "search_type": str(row.search_type or "hybrid"),
-            "chunk_size": int(row.chunk_size or 512),
-            "overlap": int(row.overlap or 64),
-        }
 
-
-def _get_rag_settings_row() -> dict:
-    """RAG 전역 설정 로더. 없으면 빈 dict."""
-    with get_session() as session:
-        row = session.query(RagSettings).filter(RagSettings.id == 1).first()
-        if not row:
-            return {}
-        return {
-            "embedding_key": row.embedding_key,
-            "search_type": row.search_type,
-            "chunk_size": int(row.chunk_size or 512),
-            "overlap": int(row.overlap or 64),
-        }
 
 
 def _update_vector_settings(
@@ -865,7 +829,7 @@ def _update_vector_settings(
     overlap: Optional[int] = None,
 ):
     """레거시 API 호환: rag_settings(싱글톤) 업데이트"""
-    cur = _get_vector_settings_row()
+    cur = get_vector_settings_row()
     new_search = (search_type or cur["search_type"]).lower()
     if new_search == "vector":
         new_search = "semantic"
@@ -959,10 +923,10 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
 
 def get_vector_settings() -> Dict:
     # rag_settings 는 검색 타입/청크/오버랩만 신뢰
-    row = _get_vector_settings_row()  # {"search_type": "...", "chunk_size": 512, "overlap": 64}
+    row = get_vector_settings_row()  # {"search_type": "...", "chunk_size": 512, "overlap": 64}
     try:
         # ★활성 모델만 신뢰 (EmbeddingModel.is_active == 1)
-        model = _get_active_embedding_model_name()
+        model = get_active_embedding_model_name()
     except Exception:
         model = None
 
@@ -1182,7 +1146,7 @@ def _determine_level_for_task(text: str, task_rules: Dict) -> int:
 # 모델 로딩/임베딩
 # -------------------------------------------------
 # --- replace this function definition entirely ---
-def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
+def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
     """
     모델 키(=embedding_models.name)를 받아서 실제 로컬 디렉토리 Path를 결정한다.
     - DB(embedding_models)에서 is_active=1 AND name=model_key 인 행의 model_path가 유효하면 그것을 최우선 사용
@@ -1192,18 +1156,11 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
 
     # 1) DB에서 활성 모델의 model_path 우선 사용
     try:
-        with get_session() as session:
-            from storage.db_models import EmbeddingModel  # 안전 import
-            row = (
-                session.query(EmbeddingModel)
-                .filter(EmbeddingModel.is_active == 1, EmbeddingModel.name == model_key)
-                .order_by(EmbeddingModel.activated_at.desc().nullslast())
-                .first()
-            )
-            if row and row.model_path:
-                mp = Path(row.model_path).resolve()
-                if mp.exists() and mp.is_dir():
-                    return str(row.name), mp
+        db_path = get_embedding_model_path_by_name(model_key)
+        if db_path:
+            mp = Path(db_path).resolve()
+            if mp.exists() and mp.is_dir():
+                return str(model_key), mp
     except Exception:
         logger.exception("[Embedding Model] DB lookup for active model_path failed")
 
@@ -1220,6 +1177,7 @@ def _resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
         if nm.startswith("embedding_"):
             res.append(nm[len("embedding_") :])
         return res
+
     for p in cands:
         if key in aliases(p):
             return p.name, p
@@ -1322,7 +1280,7 @@ def _ensure_collection_and_index_for(
 
 def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, model_dir = _resolve_model_input(model_key)
+    _, model_dir = resolve_model_input(model_key)
     need_files = [
         model_dir / "tokenizer_config.json",
         model_dir / "tokenizer.json",
@@ -2697,7 +2655,7 @@ def _compute_rerank_scores(tokenizer, model, device, token_true_id, token_false_
 
 async def execute_search(
     question: str,
-    top_k: int = 50,   # 임베딩 후보 개수
+    top_k: int = 20,   # 임베딩 후보 개수
     rerank_top_n: int = 5,    # 최종 반환 개수  
     security_level: int = 1,
     source_filter: Optional[List[str]] = None,

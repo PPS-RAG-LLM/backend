@@ -1,6 +1,7 @@
 from typing import Dict, Any
 from config import config
 from repository.documents import delete_workspace_documents_by_doc_ids, list_doc_ids_by_workspace
+from repository.rag_settings import get_vector_settings_row
 from utils import generate_unique_slug, generate_thread_slug, logger
 from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
@@ -17,7 +18,6 @@ from repository.workspace import (
     get_workspace_id_by_slug_for_user,
     update_workspace_name_by_slug_for_user
 )
-from service.admin.manage_vator_DB import get_vector_settings 
 from repository.workspace_thread import (
     create_default_thread, 
     get_threads_by_workspace_id,
@@ -41,7 +41,8 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         raise BadRequestError("name is required")
     
     try: 
-        db_settings = get_vector_settings()
+        db_settings = get_vector_settings_row()
+        
     except Exception as exc :
         logger.warning(f"Milvus DB 설정 조회 실패 : {exc}")
         return []
