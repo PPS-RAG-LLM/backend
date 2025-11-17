@@ -13,6 +13,7 @@ from service.admin.manage_vator_DB import (
     # 설정
     set_vector_settings,
     get_vector_settings,
+    list_available_embedding_models,
     # 인제스트 파라미터(청크/오버랩)  ← 추가
     set_ingest_params,
     get_ingest_params,
@@ -170,6 +171,22 @@ async def update_vector_settings(body: VectorSettingsBody):
 )
 async def read_vector_settings():
     return get_vector_settings()
+
+
+@router.get(
+    "/admin/vector/embedding-models",
+    summary="사용 가능한 임베딩 모델 목록 조회",
+)
+async def list_embedding_models():
+    """
+    ./storage/embedding-models 폴더 내의 모델 폴더명들을 반환.
+    - embedding_ 접두사가 있으면 제거 (예: embedding_bge_m3 → bge_m3)
+    """
+    models = list_available_embedding_models()
+    return {
+        "models": models,
+        "count": len(models)
+    }
 
 
 # ============================
