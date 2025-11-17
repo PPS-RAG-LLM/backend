@@ -937,6 +937,27 @@ def get_vector_settings() -> Dict:
         "overlap": int(row.get("overlap", 64)),
     }
 
+
+def list_available_embedding_models() -> List[str]:
+    """
+    ./storage/embedding-models 폴더 내의 모델 폴더명들을 반환.
+    - embedding_ 접두사가 있으면 제거 (예: embedding_bge_m3 → bge_m3)
+    - 폴더만 반환 (파일 제외)
+    """
+    models = []
+    if not MODEL_ROOT_DIR.exists():
+        return models
+    
+    for item in MODEL_ROOT_DIR.iterdir():
+        if item.is_dir():
+            model_name = item.name
+            # embedding_ 접두사 제거
+            if model_name.startswith("embedding_"):
+                model_name = model_name[len("embedding_"):]
+            models.append(model_name)
+    
+    return sorted(models)
+
 # ------------- Security Level (per task) ---------
 def _parse_at_string_to_keywords(value: str) -> List[str]:
     if not value:
