@@ -51,7 +51,9 @@ def _fetch_milvus_snippets(question: str, ws: Dict[str, Any], top_k: int) -> Lis
     except Exception as exc:
         logger.exception(f"[Milvus] 검색 실패: {exc}")
         return []
+
     snippets: List[Dict[str, Any]] = []
+
     for hit in result.get("hits", []):
         snippet_text = str(hit.get("snippet") or "").strip()
         if not snippet_text:
@@ -121,6 +123,7 @@ def _insert_rag_context(ws: Dict[str, Any], body: Dict[str, Any]) -> tuple[List[
             snippets.extend(milvus_snippets)
         else:
             logger.info("\n## No snippets found from Milvus DB\n")
+
         return snippets, temp_doc_ids
     except Exception as e:
         logger.error(f"RAG context build failed: {e}")
@@ -178,9 +181,19 @@ def stream_chat_for_qna(
             messages.append({"role": "assistant", "content": assistant_text})
 
     # 5. RAG context 검색
-    if body.get("rag_enabled") == "true":
+    snippets = List[Dict[str, Any]] = []
+    temp_doc_ids: List[str] = []
+
+    rag_flag = body.get("rag_flag") 
+    if isinstance(rag_flag, str):               # 프런트에서 true/false 문자열이나 실제 bool을 보내도 문제 없이 처리되고,
+        rag_flag = rag_flag.lower() == "true"   # snippets 와 temp_doc_ids 는 항상 정의된 상태로 아래 로직에 전달
+    rag_flag = True if rag_flag is None else bool(rag_flag) # rag_flag 가 None 이면 True, 그 외는 bool 값으로 변환
+
+    if rag_flag:
         snippets, temp_doc_ids = _insert_rag_context(ws, body)
         logger.debug(f"\n## 검색된 SNIPPETS 목록: \n{snippets}\n")
+    else:
+        logger.info("RAG disabled for this request; skipping context retrieval.")
 
     # 6. User message에 context 포함
     user_message = build_user_message_with_context(

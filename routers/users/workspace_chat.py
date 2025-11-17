@@ -32,7 +32,7 @@ class StreamChatRequest(BaseModel):
     sessionId: Optional[str] = None
     attachments: List[Attachment] = Field(default_factory=list)
     reset: Optional[bool] = False
-    rag_enabled: Optional[bool] = True
+    rag_flag: Optional[bool] = True
 
 @chat_router.post(
     "/{slug}/thread/{thread_slug}/stream-chat", summary="QnA 스트리밍 채팅 실행"
