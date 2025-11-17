@@ -56,4 +56,4 @@ vector_defaults:
 user_documents:
   doc_info_dir: storage/documents/documents-info
   vector_cache_dir: storage/documents/vector-cache
-  embedding_model_dir: storage/embedding-models/embedding_qwen3_0_6b
+  embedding_model_dir: storage/embedding-models
