@@ -8,7 +8,7 @@ from service.users.chat import (
     stream_chat_for_doc_gen,
     stream_chat_for_summary,
 )
-from service.commons.doc_gen_templates import get_doc_gen_template
+from service.prompt_template.doc_gen_templates import get_doc_gen_template
 from utils import logger
 from errors import BadRequestError
 import time, json

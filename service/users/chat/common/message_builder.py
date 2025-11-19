@@ -2,8 +2,8 @@
 from typing import Dict, Any, List
 from errors import BadRequestError
 from utils.llms.registry import LLM, Streamer
-from service.commons.doc_gen_templates import get_doc_gen_template
-from service.commons.summary_templates import get_summary_template
+from service.prompt_template.doc_gen_templates import get_doc_gen_template
+from service.prompt_template.summary_templates import get_summary_template
 
 
 def render_template(category: str, body: Dict[str, Any]) -> str:
