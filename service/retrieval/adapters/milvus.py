@@ -54,7 +54,7 @@ class MilvusAdapter(BaseRetrievalAdapter):
         """
         response = _run_execute_search(
             question=query,
-            top_k=int(top_k),
+            top_k=10,
             rerank_top_n=rerank_top_n or top_k,
             security_level=int(security_level),
             source_filter=source_filter,

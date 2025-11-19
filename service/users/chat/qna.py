@@ -49,7 +49,7 @@ def _insert_rag_context(
         "workspace_id": ws.get("id"),
         "attachments": attachments,
         "security_level": security_level,
-        "top_k": top_k,
+        "top_k": top_k+10,
         "threshold": threshold,
         "sources": sources_config,
         "enable_rerank": bool(ws.get("enable_rerank", True)),
@@ -70,6 +70,7 @@ def _insert_rag_context(
 
 def _result_to_legacy_dict(result: RetrievalResult) -> Dict[str, Any]:
     """기존 dict 기반 컨텍스트 포맷으로 변환."""
+    logger.debug(f"\n\nRESULT: \n\n{result}\n\n")
     return {
         "title": result.title,
         "score": result.score,
@@ -163,7 +164,6 @@ def stream_chat_for_qna(
         temp_doc_ids, 
         thread_id
     )
-
 
 def _resolve_rag_sources(raw_sources: Any) -> tuple:
     """워크스페이스 설정에서 RAG 소스 배열을 안전하게 파싱."""

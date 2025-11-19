@@ -25,11 +25,12 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         query: 사용자 질문
         config: 검색 설정 (workspace_id, attachments, security_level 등)
     """
-    top_k = int(config.get("top_k") or 4)
+
+    top_k = int(config.get("top_k") or 13)
     threshold = float(config.get("threshold") or 0.0)
     sources = tuple(config.get("sources") or DEFAULT_SOURCES)
     enable_rerank = bool(config.get("enable_rerank", False))
-    rerank_top_n = int(config.get("rerank_top_n") or top_k)
+    rerank_top_n = int(config.get("rerank_top_n"))
     attachments = config.get("attachments") or []
 
     LOGGER.info(
