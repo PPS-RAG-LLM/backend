@@ -31,9 +31,9 @@ from utils import logger, init_db
 from contextlib import asynccontextmanager
 import asyncio
 
-from routers.commons.summary_templates import router as summary_router
-from routers.commons.doc_gen_templates import router as doc_gen_templates_router
-from routers.commons.qna_templates import router as qna_templates_router
+from routers.prompt_template.summary_templates import router as summary_router
+from routers.prompt_template.doc_gen_templates import router as doc_gen_templates_router
+from routers.prompt_template.qna_templates import router as qna_templates_router
 from routers.test_error.test_error import test_error_router as test_error_router
 logger = logger(__name__)
 
