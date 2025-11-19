@@ -90,7 +90,7 @@ class SecurityLevelsBody(BaseModel):
 
 
 class ExecuteBody(BaseModel):
-    question: str = Field(..., examples=["회사의 복리후생 제도에 대해 알려주세요"])
+    question: str = Field(..., examples=["회사의 부정청탁 제도에 대해 알려주세요"])
     topK: int = Field(50, gt=0, description="임베딩 후보 개수")
     rerank_topN: int = Field(5, gt=0, description="리랭크 후 최종 반환 개수")
     securityLevel: int = Field(1, ge=1)
@@ -101,10 +101,10 @@ class ExecuteBody(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "question": "회사의 복리후생 제도에 대해 알려주세요",
+                "question": "회사의 부정청탁 제도에 대해 알려주세요",
                 "topK": 50,
                 "rerank_topN": 5,
-                "securityLevel": 2,
+                "securityLevel": 3,
                 "sourceFilter": ["회사규정.pdf", "복리후생안내.pdf"],
                 "taskType": "qna",
                 "searchMode": "hybrid",

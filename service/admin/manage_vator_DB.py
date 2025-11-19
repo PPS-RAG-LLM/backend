@@ -294,103 +294,171 @@ def _markdown_repeat_header(md: str) -> str:
 def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
     """
     PDF에서 본문 텍스트는 PyMuPDF로 추출하고,
-    표는 tabula-py로 추출해 마크다운 테이블로 반환한다.
-    - tabula 가 없거나 Java 미설치 시: 기존 PyMuPDF 표검출(fitz.find_tables)로 폴백
-    - tabula 는 페이지/좌표를 기본 제공하지 않으므로 page=0, bbox=[]
+    표는 PyMuPDF find_tables()와 Tabula로 추출해 마크다운 테이블로 반환한다.
+    - 페이지별로 텍스트와 표를 분리 추출
+    - 페이지별 정보 포함 (페이지 마커: ## Page X)
+    - 이미지는 처리하지 않음
+    - Tabula가 없거나 실패 시: PyMuPDF find_tables()로 폴백
     """
-    # 1) 본문: PyMuPDF
     import fitz  # PyMuPDF
-    try:
-        doc = fitz.open(pdf_path)
-    except Exception:
-        return "", []  # 열리지 않는 PDF는 빈 결과 반환
-
+    
     page_texts: list[str] = []
-    for page in doc:
-        try:
-            blocks = page.get_text("blocks")
-            parts = []
-            for x0, y0, x1, y1, btxt, *_ in blocks:
-                if btxt and btxt.strip():
-                    parts.append(_clean_text(btxt))
-            page_texts.append("\n".join(p for p in parts if p))
-        except Exception:
-            # 페이지 단위 실패는 건너뛰고 계속
-            continue
+    all_tables: list[dict] = []
+    total_pages = 0
+    
+    # with 컨텍스트 매니저로 안전하게 문서 열기/닫기
+    try:
+        with fitz.open(pdf_path) as doc:
+            # 페이지 수를 먼저 저장 (doc이 닫히기 전에)
+            total_pages = doc.page_count
+            
+            for page_idx in range(total_pages):
+                page_num = page_idx + 1
+                page = doc[page_idx]
+                page_text = ""
+                page_tables: list[dict] = []
+                
+                # 1. 일반 텍스트 추출 (PyMuPDF)
+                try:
+                    raw_text = page.get_text()
+                    if raw_text and raw_text.strip():
+                        clean_text = _clean_text(raw_text)
+                        # 페이지 마커 추가
+                        page_text = f"## Page {page_num}\n\n{clean_text}"
+                        page_texts.append(page_text)
+                except Exception as e:
+                    logger.warning(f"[PyMuPDF] 텍스트 추출 실패 (p{page_num}): {e}")
+                
+                # 2. 표 추출 (PyMuPDF 내장 테이블 감지)
+                try:
+                    tables = page.find_tables()
+                    table_list = getattr(tables, "tables", tables) if tables else []
+                    
+                    if table_list:
+                        logger.info(f"[PyMuPDF] {page_num}페이지: 테이블 {len(table_list)}개 탐지")
+                    
+                    for i, table in enumerate(table_list):
+                        try:
+                            table_data = table.extract()
+                            if not table_data:
+                                logger.debug(f"[PyMuPDF] {page_num}페이지 테이블 {i+1}: 빈 데이터")
+                                continue
+                            
+                            # 마크다운 테이블 생성
+                            markdown_lines: list[str] = []
+                            
+                            # 헤더
+                            header_row = [_clean_text(str(cell or "")) for cell in table_data[0]]
+                            markdown_lines.append("| " + " | ".join(header_row) + " |")
+                            markdown_lines.append("|" + "---|" * len(header_row))
+                            
+                            # 데이터 행
+                            for row in table_data[1:]:
+                                clean_row = [_clean_text(str(cell or "")) for cell in row]
+                                markdown_lines.append("| " + " | ".join(clean_row) + " |")
+                            
+                            md = "\n".join(markdown_lines)
+                            md = _markdown_repeat_header(md)  # 헤더 반복 적용
+                            
+                            if md.strip():
+                                rect = fitz.Rect(*table.bbox) if hasattr(table, 'bbox') else None
+                                page_tables.append({
+                                    "page": page_num,
+                                    "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)] if rect else [],
+                                    "text": md,
+                                })
+                                logger.info(f"[PyMuPDF] {page_num}페이지 테이블 {i+1}: 마크다운 변환 성공, 길이={len(md)}")
+                        except Exception as e:
+                            logger.exception(f"[PyMuPDF] {page_num}페이지 테이블 {i+1} 처리 실패: {e}")
+                except Exception as e:
+                    logger.warning(f"[PyMuPDF] {page_num}페이지 표 감지 실패: {e}")
+                
+                # 3. Tabula로 추가 표 추출 (선택)
+                try:
+                    import tabula  # requires Java (JRE/JDK)
+                    TABULA_AVAILABLE = True
+                except ImportError:
+                    TABULA_AVAILABLE = False
+                
+                if TABULA_AVAILABLE:
+                    try:
+                        dfs = tabula.read_pdf(
+                            str(pdf_path),
+                            pages=page_num,
+                            multiple_tables=True,
+                            lattice=True,
+                            silent=True,
+                        )
+                        if not dfs:
+                            dfs = tabula.read_pdf(
+                                str(pdf_path),
+                                pages=page_num,
+                                multiple_tables=True,
+                                stream=True,
+                                silent=True,
+                            )
+                        
+                        if not dfs:
+                            logger.debug(f"[Tabula] {page_num}페이지: 탐지된 테이블 없음")
+                        else:
+                            logger.info(f"[Tabula] {page_num}페이지: 테이블 {len(dfs)}개 탐지, shapes={[df.shape for df in dfs]}")
+                        
+                        for j, df in enumerate(dfs or []):
+                            try:
+                                if df.empty:
+                                    logger.debug(f"[Tabula] {page_num}페이지 테이블 {j+1}: empty DataFrame - 건너뜀")
+                                    continue
+                                
+                                logger.info(f"[Tabula] {page_num}페이지 테이블 {j+1}: columns={list(df.columns)}, shape={df.shape}")
+                                
+                                md = _df_to_markdown_repeat_header(df)
+                                md = _clean_text(md)
+                                
+                                if md:
+                                    # PyMuPDF에서 이미 같은 페이지의 표를 찾았는지 확인 (중복 제거)
+                                    is_duplicate = False
+                                    for existing_table in page_tables:
+                                        if existing_table.get("page") == page_num:
+                                            # 간단한 중복 체크: 첫 줄이 비슷하면 중복으로 간주
+                                            existing_first_line = existing_table.get("text", "").split("\n")[0] if existing_table.get("text") else ""
+                                            new_first_line = md.split("\n")[0] if md else ""
+                                            if existing_first_line and new_first_line and existing_first_line[:50] == new_first_line[:50]:
+                                                is_duplicate = True
+                                                logger.debug(f"[Tabula] {page_num}페이지 테이블 {j+1}: PyMuPDF와 중복으로 판단, 건너뜀")
+                                                break
+                                    
+                                    if not is_duplicate:
+                                        page_tables.append({
+                                            "page": page_num,
+                                            "bbox": [],
+                                            "text": md,
+                                        })
+                                        logger.info(f"[Tabula] {page_num}페이지 테이블 {j+1}: 마크다운 변환 성공, 길이={len(md)}")
+                                else:
+                                    logger.debug(f"[Tabula] {page_num}페이지 테이블 {j+1}: 마크다운 변환 후 빈 문자열")
+                            except Exception as e:
+                                logger.exception(f"[Tabula] {page_num}페이지 테이블 {j+1} 처리 실패: {e}")
+                                continue
+                    except Exception as e:
+                        logger.debug(f"[Tabula] {page_num}페이지 표 추출 실패: {e}")
+                
+                # 페이지별 표를 전체 리스트에 추가
+                all_tables.extend(page_tables)
+    
+    except Exception:
+        logger.exception(f"Failed to open PDF: {pdf_path}")
+        return "", []  # 열리지 않는 PDF는 빈 결과 반환
+    
+    # 모든 페이지 텍스트 결합
     pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
 
-    # 2) 표: tabula-py 시도 (미설치/미지원이면 폴백)
-    tables_md: list[dict] = []
-    try:
-        import tabula  # requires Java (JRE/JDK)
-
-        # lattice 먼저 시도(선 그려진 표 강함), 실패/무결과면 stream로 재시도
-        dfs = tabula.read_pdf(str(pdf_path), pages="all", multiple_tables=True, lattice=True)
-        if not dfs:
-            dfs = tabula.read_pdf(str(pdf_path), pages="all", multiple_tables=True, stream=True)
-
-        for df in dfs or []:
-            try:
-                md = _df_to_markdown_repeat_header(df)  # 이미 갖고 있는 헬퍼
-                md = _clean_text(md)
-                if md:
-                    tables_md.append({"page": 0, "bbox": [], "text": md})
-            except Exception:
-                continue
-
-        # tabula 결과가 있으면 그걸 사용
-        if tables_md:
-            return pdf_text, tables_md
-
-    except Exception:
-        # tabula 사용 불가(Java 미설치/패키지 미존재/에러)면 아래 폴백으로
-        pass
-
-    # 3) 폴백: PyMuPDF의 간이 표 검출 (기존 방식, 놓치는 표가 있을 수 있음)
-    try:
-        tables_fallback: list[dict] = []
-        doc2 = fitz.open(pdf_path)
-        for page_idx, page in enumerate(doc2, start=1):
-            try:
-                tf = page.find_tables()
-                found = getattr(tf, "tables", []) if tf else []
-            except Exception:
-                found = []
-
-            for t in found:
-                rect = fitz.Rect(*t.bbox)
-                try:
-                    md = t.to_markdown()
-                    md = _markdown_repeat_header(md)
-                except Exception:
-                    # 아주 드문 경우: 셀 추출로 대체
-                    try:
-                        rows = t.extract()
-                        md_lines: list[str] = []
-                        if rows:
-                            header_cells = [_clean_text(str(c or "")) for c in rows[0]]
-                            header_line = "| " + " | ".join(header_cells) + " |"
-                            data_rows = rows[1:] if len(rows) > 1 else []
-                            if data_rows:
-                                for r in data_rows:
-                                    row_line = "| " + " | ".join(_clean_text(str(c or "")) for c in r) + " |"
-                                    md_lines.append(header_line)
-                                    md_lines.append(row_line)
-                            else:
-                                md_lines.append(header_line)
-                        md = "\n".join(md_lines)
-                    except Exception:
-                        md = ""
-                md = _clean_text(md)
-                if md:
-                    tables_fallback.append({
-                        "page": int(page_idx),
-                        "bbox": [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)],
-                        "text": md,
-                    })
-        return pdf_text, tables_fallback
-    except Exception:
-        return pdf_text, []
+    # 표 추출 결과 로깅
+    if all_tables:
+        logger.info(f"[Extract] {pdf_path.name}: 총 {len(all_tables)}개 표 추출 완료")
+    else:
+        logger.info(f"[Extract] {pdf_path.name}: 추출된 표 없음")
+    
+    return pdf_text, all_tables
 
 
 def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
@@ -1239,6 +1307,7 @@ def _ensure_collection_and_index_for(
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
+        schema.add_field("page", DataType.INT64)  # 페이지 번호
 
         # text / text_sparse (BM25)
         try:
@@ -1388,6 +1457,7 @@ def _ensure_collection_and_index(
         schema.add_field("security_level", DataType.INT64)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=255)
         schema.add_field("version", DataType.INT64)
+        schema.add_field("page", DataType.INT64)  # 페이지 번호
         # 하이브리드용 텍스트/스파스 필드
         try:
             schema.add_field("text", DataType.VARCHAR, max_length=32768, enable_analyzer=True)
@@ -1520,7 +1590,18 @@ async def extract_pdfs():
     new_meta: Dict[str, Dict] = {}
     for src in tqdm(kept, desc="문서 전처리"):
         try:
+            logger.info(f"[Extract] 파일 처리 시작: {src.name}")
             text, tables = _extract_any(src)
+            
+            # 표 추출 결과 로깅
+            if tables:
+                logger.info(f"[Extract] {src.name}: 표 {len(tables)}개 추출됨")
+                for t_idx, t in enumerate(tables):
+                    page = t.get("page", 0)
+                    text_preview = (t.get("text", "")[:100] + "...") if t.get("text") else ""
+                    logger.info(f"[Extract] {src.name} 표 {t_idx+1}: 페이지={page}, 텍스트 미리보기={text_preview}")
+            else:
+                logger.info(f"[Extract] {src.name}: 추출된 표 없음 (텍스트만 추출됨)")
             
             # 작업유형별 보안 레벨 (본문+표 모두 포함해서 판정)
             whole_for_level = text + "\n\n" + "\n\n".join(t.get("text","") for t in (tables or []))
@@ -1541,10 +1622,104 @@ async def extract_pdfs():
             except Exception:
                 logger.exception("Failed to copy file: %s", dest_abs)
 
-            # 추출 텍스트 저장 (확장자는 .txt로 통일)
+            # 통합 파일 저장 (.txt, 마크다운 형식) - 페이지 순서대로 텍스트와 표 배치
+            # 파일명은 원본 파일명 그대로 사용 (확장자만 .txt)
             txt_rel = dest_rel.with_suffix(".txt")
             (EXTRACTED_TEXT_DIR / txt_rel).parent.mkdir(parents=True, exist_ok=True)
-            (EXTRACTED_TEXT_DIR / txt_rel).write_text(text, encoding="utf-8")
+            saved_files: Dict[str, str] = {}
+            
+            # 통합 파일 저장
+            combined_txt_file = EXTRACTED_TEXT_DIR / txt_rel
+            try:
+                # 텍스트를 페이지별로 분리
+                def _parse_pages_from_text(text: str) -> Dict[int, str]:
+                    """텍스트에서 페이지별로 분리 (## Page X 마커 기준)"""
+                    pages_dict: Dict[int, str] = {}
+                    lines = text.split('\n')
+                    current_page = 1
+                    current_content: list[str] = []
+                    
+                    for line in lines:
+                        page_match = re.match(r'^##\s+Page\s+(\d+)', line)
+                        if page_match:
+                            # 이전 페이지 저장
+                            if current_content:
+                                pages_dict[current_page] = '\n'.join(current_content).strip()
+                            current_page = int(page_match.group(1))
+                            current_content = []
+                        else:
+                            current_content.append(line)
+                    
+                    # 마지막 페이지 저장
+                    if current_content:
+                        pages_dict[current_page] = '\n'.join(current_content).strip()
+                    
+                    # 페이지 마커가 없으면 전체를 1페이지로
+                    if not pages_dict:
+                        pages_dict[1] = text.strip()
+                    
+                    return pages_dict
+                
+                # 페이지별 텍스트 파싱
+                pages_text = _parse_pages_from_text(text)
+                
+                # 페이지별 표 그룹화
+                pages_tables: Dict[int, list[dict]] = defaultdict(list)
+                for t in (tables or []):
+                    page_num = t.get("page", 0)
+                    if page_num > 0:
+                        pages_tables[page_num].append(t)
+                
+                # 통합 파일 작성 (페이지 순서대로)
+                with open(combined_txt_file, "w", encoding="utf-8") as f:
+                    f.write(f"# {src.name} - 통합 추출 결과\n\n")
+                    f.write(f"📄 원본 파일: {src.name}\n")
+                    f.write(f"📝 텍스트 길이: {len(text)}자\n")
+                    f.write(f"📊 표 개수: {len(tables or [])}개\n\n")
+                    f.write("---\n\n")
+                    
+                    # 모든 페이지 번호 수집 (텍스트와 표 모두 고려)
+                    all_page_nums = set(pages_text.keys())
+                    all_page_nums.update(pages_tables.keys())
+                    
+                    if all_page_nums:
+                        for page_num in sorted(all_page_nums):
+                            f.write(f"## Page {page_num}\n\n")
+                            
+                            # 해당 페이지의 텍스트
+                            page_text_content = pages_text.get(page_num, "")
+                            if page_text_content:
+                                f.write(page_text_content)
+                                f.write("\n\n")
+                            
+                            # 해당 페이지의 표들 (텍스트 뒤에 삽입)
+                            page_tables_list = pages_tables.get(page_num, [])
+                            if page_tables_list:
+                                for t_idx, t in enumerate(page_tables_list):
+                                    table_text = t.get("text", "")
+                                    if table_text:
+                                        f.write(f"### 📊 표 {t_idx + 1}\n\n")
+                                        f.write(table_text)
+                                        f.write("\n\n")
+                            
+                            f.write("\n---\n\n")
+                    else:
+                        # 페이지 정보가 없으면 전체 텍스트만
+                        if text.strip():
+                            f.write(text)
+                            f.write("\n\n")
+                        if tables:
+                            for t_idx, t in enumerate(tables):
+                                table_text = t.get("text", "")
+                                if table_text:
+                                    f.write(f"### 📊 표 {t_idx + 1}\n\n")
+                                    f.write(table_text)
+                                    f.write("\n\n")
+                
+                saved_files["text"] = str(combined_txt_file)
+                logger.info(f"[Extract] 통합 파일 저장: {combined_txt_file}")
+            except Exception as e:
+                logger.exception(f"[Extract] 통합 파일 저장 실패: {e}")
 
             # doc_id/version 유추
             stem = rel_from_raw.stem
@@ -1559,8 +1734,10 @@ async def extract_pdfs():
                 "version": version,
                 "tables": tables or [],  # ★ 표 정보 추가
                 "sourceExt": _ext(src),  # 원본 확장자 기록
+                "saved_files": saved_files,  # 저장된 파일 경로 추가
             }
             new_meta[str(dest_rel)] = info
+            logger.info(f"[Extract] {src.name}: 메타데이터 저장 완료 (텍스트={len(text)}자, 표={len(tables or [])}개)")
 
         except Exception as e:
             logger.exception("Failed to process: %s", src)
@@ -1730,8 +1907,45 @@ async def ingest_embeddings(
         except Exception:
             # 혹시 모를 인코딩 문제 폴백
             text = txt_path.read_text(errors="ignore")
-        chunks = chunk_text(text)
-
+        
+        # 페이지별로 텍스트 분할 및 페이지 정보 추출
+        def _extract_page_info(text: str) -> list[tuple[int, str]]:
+            """텍스트를 페이지별로 분할하고 (페이지번호, 텍스트) 튜플 리스트 반환"""
+            page_blocks: list[tuple[int, str]] = []
+            current_page = 1  # 기본값
+            current_text = []
+            
+            lines = text.split('\n')
+            for line in lines:
+                # 페이지 마커 확인: "## Page X"
+                page_match = re.match(r'^##\s+Page\s+(\d+)', line)
+                if page_match:
+                    # 이전 페이지 저장
+                    if current_text:
+                        page_blocks.append((current_page, '\n'.join(current_text)))
+                    current_page = int(page_match.group(1))
+                    current_text = []
+                else:
+                    current_text.append(line)
+            
+            # 마지막 페이지 저장
+            if current_text:
+                page_blocks.append((current_page, '\n'.join(current_text)))
+            
+            # 페이지 마커가 없으면 전체를 1페이지로 처리
+            if not page_blocks:
+                page_blocks = [(1, text)]
+            
+            return page_blocks
+        
+        page_blocks = _extract_page_info(text)
+        chunks_with_page: list[tuple[int, int, str]] = []  # (page, chunk_idx, chunk_text)
+        
+        for page_num, page_text in page_blocks:
+            page_chunks = chunk_text(page_text)
+            for chunk_idx, chunk in enumerate(page_chunks):
+                chunks_with_page.append((page_num, chunk_idx, chunk))
+        
         # 표 블록(이미 META에 저장됨)
         tables = entry.get("tables", []) or []
 
@@ -1740,8 +1954,8 @@ async def ingest_embeddings(
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
 
-            # 1) 본문 조각
-            for idx, c in enumerate(chunks):
+            # 1) 본문 조각 (페이지 정보 포함)
+            for page_num, idx, c in chunks_with_page:
                 # VARCHAR 한도 안전 분할(바이트 기준)
                 for part in _split_for_varchar_bytes(c):
                     # 최종 방어(예외적으로 경계 잘림 실패 시)
@@ -1763,6 +1977,7 @@ async def ingest_embeddings(
                         "security_level": lvl,
                         "doc_id": str(doc_id),
                         "version": int(version),
+                        "page": int(page_num),  # 페이지 번호 추가
                         "text": part,
                     })
                     if len(batch) >= BATCH_SIZE:
@@ -1771,7 +1986,7 @@ async def ingest_embeddings(
                         batch = []
 
             # 2) 표 조각(페이지/좌표 헤더 포함)
-            base_idx = len(chunks)
+            base_idx = len(chunks_with_page)
             for t_i, t in enumerate(tables):
                 md = (t.get("text") or "").strip()
                 if not md:
@@ -1800,6 +2015,7 @@ async def ingest_embeddings(
                         "security_level": lvl,
                         "doc_id": str(doc_id),
                         "version": int(version),
+                        "page": int(page) if page > 0 else 1,  # 페이지 번호 추가 (표의 페이지 정보 사용)
                         "text": part,
                     })
                     if len(batch) >= BATCH_SIZE:
@@ -2234,7 +2450,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             anns_field="embedding",
             limit=int(limit),
             search_params={"metric_type": "IP", "params": {}},
-            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page"],
             filter=filter_expr,
         )
 
@@ -2251,7 +2467,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 anns_field="text_sparse",
                 limit=int(limit),
                 search_params={"params": {}},
-                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
+                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page"],
                 filter=filter_expr,
             )
         except Exception as e:
@@ -2319,6 +2535,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 ttype = ent.get("task_type")
                 lvl = int(ent.get("security_level", 1))
                 doc_id = ent.get("doc_id")
+                page = int(ent.get("page", 0))  # 페이지 정보 추출
                 score_vec = float(hit.get("distance", 0.0))
             else:
                 ent = hit.entity
@@ -2328,6 +2545,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 ttype = hit.entity.get("task_type")
                 lvl = int(hit.entity.get("security_level", 1))
                 doc_id = hit.entity.get("doc_id")
+                page = int(hit.entity.get("page", 0))  # 페이지 정보 추출
                 score_vec = float(hit.score)
             
             # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
@@ -2338,7 +2556,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
-                "security_level": lvl, "doc_id": doc_id,
+                "security_level": lvl, "doc_id": doc_id, "page": page,
                 "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet
             })
     else:
@@ -2357,6 +2575,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                     ttype = ent.get("task_type")
                     lvl = int(ent.get("security_level", 1))
                     doc_id = ent.get("doc_id")
+                    page = int(ent.get("page", 0))  # 페이지 정보 추출
                     score = float(hit.get("distance", 0.0))
                 else:
                     ent = hit.entity
@@ -2366,8 +2585,9 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                     ttype = hit.entity.get("task_type")
                     lvl = int(hit.entity.get("security_level", 1))
                     doc_id = hit.entity.get("doc_id")
+                    page = int(hit.entity.get("page", 0))  # 페이지 정보 추출
                     score = float(hit.score)
-                out.append(((path, cidx, ttype, lvl, doc_id, ent_text), score))  # ★ ent_text 추가
+                out.append(((path, cidx, ttype, lvl, doc_id, page, ent_text), score))  # ★ page, ent_text 추가
             return out
 
         dense_list = _collect(res_dense, True)
@@ -2376,32 +2596,38 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         # RRF 결합 폴백
         rrf: dict[tuple, float] = {}
         text_map: dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
+        page_map: dict[tuple, int] = {}  # ★ 페이지 매핑 추가
         K = 60.0
         for rank, (key, _s) in enumerate(dense_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 5:  # ent_text가 있으면 저장
-                text_map[key_short] = key[5]
+            if len(key) > 6:  # ent_text가 있으면 저장
+                text_map[key_short] = key[6]
+            if len(key) > 5:  # page가 있으면 저장
+                page_map[key_short] = key[5]
         for rank, (key, _s) in enumerate(sparse_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
+            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 5:  # ent_text가 있으면 저장
-                text_map[key_short] = key[5]
+            if len(key) > 6:  # ent_text가 있으면 저장
+                text_map[key_short] = key[6]
+            if len(key) > 5:  # page가 있으면 저장
+                page_map[key_short] = key[5]
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
-        for (path, cidx, ttype, lvl, doc_id), fused in merged:
+        for (path, cidx, ttype, lvl, doc_id, page), fused in merged:
             # 스니펫 결정 로직
-            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
+            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id, page))
             if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
                 snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
             else:
                 snippet = _load_snippet(path, cidx)
             
-            s_vec = next((s for (k, s) in dense_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
+            page_num = page_map.get((path, cidx, ttype, lvl, doc_id, page), page)
+            s_vec = next((s for (k, s) in dense_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
+            s_spa = next((s for (k, s) in sparse_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
-                "security_level": lvl, "doc_id": doc_id,
+                "security_level": lvl, "doc_id": doc_id, "page": int(page_num),
                 "score_vec": float(s_vec), "score_sparse": float(s_spa),
                 "score_fused": float(fused),
                 "snippet": snippet
@@ -2531,6 +2757,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 "task_type": h["task_type"],
                 "security_level": int(h["security_level"]),
                 "doc_id": h.get("doc_id"),
+                "page": int(h.get("page", 0)),  # 페이지 정보 추가
                 "snippet": h["snippet"],
             }
             for h in hits_sorted
