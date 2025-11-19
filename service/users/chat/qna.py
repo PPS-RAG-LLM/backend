@@ -1,6 +1,7 @@
 """QA 카테고리 스트리밍 로직"""
 from typing import Dict, Any, Generator, List
 from errors import BadRequestError
+from repository.embedding_model import get_active_embedding_model_name
 from utils import logger
 from repository.workspace_chat import get_chat_history_by_thread_id
 from .common import (
@@ -13,7 +14,7 @@ from .retrieval import (
     retrieve_contexts_local,
     extract_doc_ids_from_attachments,
 )
-from service.admin.manage_vator_DB import execute_search, get_vector_settings # milvusDB 검색 함수
+from service.admin.manage_vator_DB import execute_search
 from repository.documents import list_doc_ids_by_workspace
 import json
 import asyncio
@@ -27,11 +28,10 @@ def _fetch_milvus_snippets(
     top_k           : int, # 상위 K개
     ) -> List[Dict[str, Any]]:
     try:
-        settings = get_vector_settings() 
+        model_key = get_active_embedding_model_name() 
     except Exception as exc:
         logger.warning(f"[Milvus] 설정 조회 실패: {exc}")
         return []
-    model_key = settings.get("embeddingModel")
     if not model_key:
         logger.info("[Milvus] 활성화된 임베딩 모델이 없어 글로벌 검색을 건너뜁니다.")
         return []
