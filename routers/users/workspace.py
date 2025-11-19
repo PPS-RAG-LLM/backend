@@ -41,10 +41,6 @@ class Workspace(BaseModel):
     name: str
     slug: str
     createdAt: str
-    UpdatedAt: str
-    temperature: float
-    chatHistory: int
-    systemPrompt: str
 
 
 class NewWorkspaceResponse(BaseModel):
@@ -58,10 +54,7 @@ class WorkspaceListItem(BaseModel):
     name: str
     slug: str
     createdAt: str
-    UpdatedAt: str
-    temperature: float
-    chatHistory: int
-    systemPrompt: str
+    updatedAt: str
     threads: List[Any] = []
 
 

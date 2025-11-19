@@ -97,7 +97,6 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         logger.debug(f"No default thread for {category} workspace: name={name}")
         thread_id = None
 
-
     ws = get_workspace_by_id(ws_id)
     if not ws:
         raise InternalServerError("workspace retrieval failed")
@@ -108,12 +107,6 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         "name": ws["name"],
         "slug": ws["slug"],
         "createdAt": ws["created_at"],
-        "temperature": ws["temperature"],
-        "UpdatedAt": ws["updated_at"],
-        "chatHistory": ws["chat_history"] ,
-        "systemPrompt": ws["system_prompt"] or "",
-        "provider": ws["provider"] or "",
-        "vectorSearchMode": ws["vector_search_mode"] or "",
     }
     logger.info({"workspace_created": result})
     return result
@@ -134,17 +127,14 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
             "name": ws["name"],
             "slug": ws["slug"],
             "createdAt": ws["created_at"],
-            "temperature": ws["temperature"],
-            "UpdatedAt": ws["updated_at"],
-            "chatHistory": ws["chat_history"],
-            "systemPrompt": ws["system_prompt"] or "",
+            "updatedAt": ws["updated_at"],
             "threads": [
                 {
                     "id": thread["id"],
                     "name": thread["name"],
                     "thread_slug": thread["slug"],
                     "createdAt": thread["created_at"],
-                    "UpdatedAt": thread["updated_at"],
+                    "updatedAt": thread["updated_at"],
                 } for thread in threads
             ],
         })

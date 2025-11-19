@@ -196,7 +196,7 @@ if __name__ == "__main__":
             "**/unsloth_compiled_cache/**",
             "**/storage/models/**",
             "**/storage/train_data/**",
-            "service/users/chat/**",
+            # "service/users/chat/**",
         ],
         reload_dirs=["routers", "repository", "service", "utils"],                        
     )

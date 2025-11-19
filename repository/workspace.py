@@ -123,6 +123,8 @@ def get_workspace_by_id(workspace_id: int) -> Optional[Dict[str, Any]]:
             Workspace.temperature,
             Workspace.chat_history,
             Workspace.system_prompt,
+            Workspace.provider,
+            Workspace.vector_search_mode,
         ).where(Workspace.id == workspace_id)
 
         result = session.execute(stmt).first()

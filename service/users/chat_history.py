@@ -42,19 +42,22 @@ def list_thread_chats_for_workspace(
             sources = None
             attachments = None
             reasoning_duration = None
-            
             try:
                 response_json = json.loads(assistant_text)
                 assistant_text = response_json.get("text", assistant_text)
+
+                # sources 추출 (전체 document 정보 포함)
                 sources = response_json.get("sources")
+                # attachments 추출
                 attachments = response_json.get("attachments")
-                
                 # metrics에서 reasoning_duration 추출
                 metrics = response_json.get("metrics", {})
+
                 if metrics:
                     reasoning_duration = metrics.get("reasoning_duration")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to parse response JSON for chat_id={chat_id}: {e}")
+                # JSON 파싱 실패 시 sources와 attachments는 빈 리스트로 유지
             
             messages.append({
                 "chatId": chat_id,
@@ -62,11 +65,8 @@ def list_thread_chats_for_workspace(
                 "content": assistant_text, 
                 "sentAt": chat['created_at'],
                 "reasoningDuration": reasoning_duration,
-                "sources": sources,
+                "sources": sources, #  전체 document 정보 포함 (doc_id, title, text, score, page, chunk_index, source)
                 "feedback": chat["feedback"],
                 "attachments": attachments,
             })
-
-    # logger.info(f"messages: {messages}")
-
     return messages
