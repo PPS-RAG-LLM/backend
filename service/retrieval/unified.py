@@ -16,7 +16,7 @@ from utils import logger
 
 
 LOGGER = logger(__name__)
-DEFAULT_SOURCES = ("workspace", "local", "milvus")
+DEFAULT_SOURCES = ("workspace_documents", "thread_attachments", "milvus")
 
 def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     """
@@ -25,7 +25,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         query: 사용자 질문
         config: 검색 설정 (workspace_id, attachments, security_level 등)
     """
-    logger.info(f"🔍 [UnifiedSearch] config: {config}")
+    LOGGER.info(f"🔍 [UnifiedSearch] config: {config}")
 
     top_k = int(config.get("top_k"))
     threshold = float(config.get("threshold") or 0.0)
@@ -45,7 +45,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
 
     results: List[RetrievalResult] = []
 
-    if "workspace" in sources and config.get("workspace_id"):
+    if "workspace_documents" in sources and config.get("workspace_id"):
         adapter = WorkspaceAdapter()
         workspace_hits = adapter.search(
             query,
@@ -58,7 +58,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     elif "workspace" in sources:
         LOGGER.info("[UnifiedSearch] workspace source enabled but workspace_id missing")
 
-    if "local" in sources:
+    if "thread_attachments" in sources:
         attachment_doc_ids = extract_doc_ids_from_attachments(config.get("attachments"))
         if attachment_doc_ids:
             adapter = LocalVectorAdapter()
@@ -80,6 +80,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     if "milvus" in sources:
         sec_level = int(config.get("security_level") or 1)
         adapter = MilvusAdapter()
+
+        LOGGER.info("\n\nsearch_type: %s", config.get("search_type"))
         milvus_hits = adapter.search(
             query,
             top_k,
