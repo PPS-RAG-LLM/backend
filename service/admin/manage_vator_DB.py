@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 from collections import defaultdict, Counter
 
-import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
 
-from repository.embedding_model import get_active_embedding_model_name, get_embedding_model_path_by_name
+from config import config as app_config
+from repository.embedding_model import get_active_embedding_model_name
 from repository.rag_settings import get_vector_settings_row
 
 try:
@@ -34,7 +34,6 @@ except Exception:
     Function = None
     class FunctionType:
         BM25 = "BM25"
-from transformers import AutoModel, AutoTokenizer
 
 # ORM 추가 임포트
 from utils.database import get_session
@@ -173,7 +172,9 @@ def _split_for_varchar_bytes(
 # KST 시간 포맷 유틸
 from utils.time import now_kst, now_kst_string
 
+from service.retrieval.common import get_or_load_hf_embedder, hf_embed_text, chunk_text
 from service.retrieval.reranker import rerank_snippets
+from utils.model_load import resolve_model_input
 
 logger = logging.getLogger(__name__)
 
@@ -182,43 +183,46 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
 PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
-STORAGE_DIR = PROJECT_ROOT / "storage"
-USER_DATA_ROOT = STORAGE_DIR / "user_data"
-RAW_DATA_DIR = USER_DATA_ROOT / "row_data"
-LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"  # 유지(폴더 구조 호환)
-RESOURCE_DIR = (BASE_DIR / "resources").resolve()
-EXTRACTED_TEXT_DIR = (PROJECT_ROOT / "storage" / "extracted_texts").resolve()
-META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
-MODEL_ROOT_DIR = (PROJECT_ROOT / "storage" / "embedding-models").resolve()
-RERANK_MODEL_PATH = PROJECT_ROOT / "storage" / "rerank_model" / "Qwen3-Reranker-0.6B"
+_RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
+_RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
+_VECTOR_DEFAULTS: Dict[str, Any] = app_config.get("vector_defaults", {}) or {}
 
-SQLITE_DB_PATH = (PROJECT_ROOT / "storage" / "pps_rag.db").resolve()
 
-VAL_SESSION_ROOT = (STORAGE_DIR / "val_data").resolve()
-SESSIONS_INDEX_PATH = (VAL_SESSION_ROOT / "_sessions.json").resolve()
+def _cfg_path(key: str, fallback: str) -> Path:
+    value = _RETRIEVAL_PATHS.get(key, fallback)
+    return (PROJECT_ROOT / Path(value)).resolve()
 
-# Milvus Server 접속 정보 (환경변수로 오버라이드 가능)
-#MILVUS_URI = os.getenv("MILVUS_URI", "http://remote.biz.ppsystem.co.kr:3006")
-MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
-MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", None)  # 예: "root:Milvus" (인증 사용 시)
-COLLECTION_NAME = "pdf_chunks_pro"
 
-# 작업유형
-TASK_TYPES = ("doc_gen", "summary", "qna")
+STORAGE_DIR = _cfg_path("storage_dir", "storage")
+USER_DATA_ROOT = _cfg_path("user_data_root", "storage/user_data")
+RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/user_data/row_data")
+LOCAL_DATA_ROOT = _cfg_path("local_data_root", "storage/user_data/preprocessed_data")
+RESOURCE_DIR = _cfg_path("resources_dir", str(BASE_DIR / "resources"))
+EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
+META_JSON_PATH = _cfg_path("meta_json_path", "storage/extracted_texts/_extraction_meta.json")
+MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
+RERANK_MODEL_PATH = _cfg_path("rerank_model_path", "storage/rerank_model/Qwen3-Reranker-0.6B")
+VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
+SESSIONS_INDEX_PATH = _cfg_path("sessions_index_path", "storage/val_data/_sessions.json")
+DATABASE_CFG = app_config.get("database", {}) or {}
+SQLITE_DB_PATH = (PROJECT_ROOT / Path(DATABASE_CFG.get("path", "storage/pps_rag.db"))).resolve()
 
-# 지원 확장자
-SUPPORTED_EXTS = {".pdf", ".txt", ".text", ".md", ".docx", ".pptx", ".csv", ".xlsx", ".xls", ".doc", ".ppt", ".hwp"}
+_MILVUS_CFG = _RETRIEVAL_CFG.get("milvus", {}) or {}
+MILVUS_URI = os.getenv("MILVUS_URI", _MILVUS_CFG.get("uri", "http://localhost:19530"))
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", _MILVUS_CFG.get("token") or None)
+COLLECTION_NAME = _MILVUS_CFG.get("collection", "pdf_chunks_pro")
+TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
+SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 
-# 텍스트 정리용 정규식
-ZERO_WIDTH_RE = re.compile(r'[\u200B-\u200D\u2060\uFEFF]')
-CONTROL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')  # \t,\n은 유지
-MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
-NEWLINES_RE = re.compile(r'\n{3,}')
+ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\u2060\uFEFF]")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+MULTISPACE_LINE_END_RE = re.compile(r"[ \t]+\n")
+NEWLINES_RE = re.compile(r"\n{3,}")
 
-_CURRENT_EMBED_MODEL_KEY = "qwen3_0_6b"
-_CURRENT_SEARCH_TYPE = "hybrid"
-_CURRENT_CHUNK_SIZE = 512
-_CURRENT_OVERLAP = 64
+_CURRENT_EMBED_MODEL_KEY = str(_RETRIEVAL_CFG.get("default_embedding_key", "qwen3_0_6b"))
+_CURRENT_SEARCH_TYPE = str(_RETRIEVAL_CFG.get("search_type", "hybrid"))
+_CURRENT_CHUNK_SIZE = int(_VECTOR_DEFAULTS.get("chunk_size", 512))
+_CURRENT_OVERLAP = int(_VECTOR_DEFAULTS.get("overlap", 64))
 
 
 # -------------------------------------------------
@@ -293,14 +297,17 @@ def _markdown_repeat_header(md: str) -> str:
     return "\n".join(out)
 
 
-def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
+def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int, str], int]:
     """
     PDF에서 본문 텍스트는 PyMuPDF로 추출하고,
     표는 PyMuPDF find_tables()와 Tabula로 추출해 마크다운 테이블로 반환한다.
     - 페이지별로 텍스트와 표를 분리 추출
-    - 페이지별 정보 포함 (페이지 마커: ## Page X)
+    - 페이지 정보는 메타데이터에만 저장 (텍스트에는 페이지 마커 없음)
     - 이미지는 처리하지 않음
     - Tabula가 없거나 실패 시: PyMuPDF find_tables()로 폴백
+    
+    Returns:
+        tuple: (전체 텍스트, 표 리스트, 페이지별 텍스트 딕셔너리, 총 페이지 수)
     """
     import fitz  # PyMuPDF
     
@@ -325,9 +332,8 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
                     raw_text = page.get_text()
                     if raw_text and raw_text.strip():
                         clean_text = _clean_text(raw_text)
-                        # 페이지 마커 추가
-                        page_text = f"## Page {page_num}\n\n{clean_text}"
-                        page_texts.append(page_text)
+                        # 페이지 마커 없이 순수 텍스트만 저장 (페이지 정보는 메타데이터에 저장)
+                        page_texts.append((page_num, clean_text))  # (페이지번호, 텍스트) 튜플로 저장
                 except Exception as e:
                     logger.warning(f"[PyMuPDF] 텍스트 추출 실패 (p{page_num}): {e}")
                 
@@ -828,9 +834,9 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
     with _EMBED_LOCK:
         if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
             return _EMBED_CACHE[model_key]
-        # 키가 바뀌면 캐시 전체 무효화(동시 2개 방지)
         _EMBED_CACHE.clear()
-        tok, model, device = _load_embedder(model_key)
+        _, model_dir = resolve_model_input(model_key)
+        tok, model, device = get_or_load_hf_embedder(str(model_dir))
         _EMBED_CACHE[model_key] = (tok, model, device)
         _EMBED_ACTIVE_KEY = model_key
         return _EMBED_CACHE[model_key]
@@ -1220,56 +1226,6 @@ def _determine_level_for_task(text: str, task_rules: Dict) -> int:
     return sel
 
 
-# -------------------------------------------------
-# 모델 로딩/임베딩
-# -------------------------------------------------
-# --- replace this function definition entirely ---
-def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
-    """
-    모델 키(=embedding_models.name)를 받아서 실제 로컬 디렉토리 Path를 결정한다.
-    - DB(embedding_models)에서 is_active=1 AND name=model_key 인 행의 model_path가 유효하면 그것을 최우선 사용
-    - 아니면 기존 폴더 스캔 로직(./storage/embedding-models/*)으로 fallback
-    """
-    key = (model_key or "bge").lower()
-
-    # 1) DB에서 활성 모델의 model_path 우선 사용
-    try:
-        db_path = get_embedding_model_path_by_name(model_key)
-        if db_path:
-            mp = Path(db_path).resolve()
-            if mp.exists() and mp.is_dir():
-                return str(model_key), mp
-    except Exception:
-        logger.exception("[Embedding Model] DB lookup for active model_path failed")
-
-    # 2) 기존 폴더 스캔 fallback
-    cands: List[Path] = []
-    if MODEL_ROOT_DIR.exists():
-        for p in MODEL_ROOT_DIR.iterdir():
-            if p.is_dir():
-                cands.append(p.resolve())
-
-    def aliases(p: Path) -> List[str]:
-        nm = p.name.lower()
-        res = [nm]
-        if nm.startswith("embedding_"):
-            res.append(nm[len("embedding_") :])
-        return res
-
-    for p in cands:
-        if key in aliases(p):
-            return p.name, p
-    for p in cands:
-        if key in p.name.lower():
-            return p.name, p
-    # fallback: qwen3_0_6b
-    for p in cands:
-        if "qwen3_0_6b" in p.name.lower():
-            return p.name, p
-    fb = MODEL_ROOT_DIR / "qwen3_0_6b"
-    return fb.name, fb
-
-
 # --- add: test 컬렉션 전용 보조 함수 ---
 def _ensure_collection_and_index_for(
     client: MilvusClient,
@@ -1355,66 +1311,6 @@ def _ensure_collection_and_index_for(
         pass
     client.load_collection(collection_name=collection_name)
     logger.info(f"[Milvus] 로드 완료: {collection_name}")
-
-
-def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, model_dir = resolve_model_input(model_key)
-    need_files = [
-        model_dir / "tokenizer_config.json",
-        model_dir / "tokenizer.json",
-        model_dir / "config.json",
-    ]
-
-    # 모델 파일 누락 빠른 실패
-    missing_files = [f for f in need_files if not f.exists()]
-    if missing_files:
-        logger.error(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-        logger.error(
-            f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}"
-        )
-        raise FileNotFoundError(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-
-    logger.info(f"[Embedding Model] 모델 로딩 시작: {model_key} from {model_dir}")
-    tok = AutoTokenizer.from_pretrained(
-        str(model_dir), trust_remote_code=True, local_files_only=True
-    )
-    model = (
-        AutoModel.from_pretrained(
-            str(model_dir),
-            trust_remote_code=True,
-            local_files_only=True,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        )
-        .to(device)
-        .eval()
-    )
-    logger.info(f"[Embedding Model] 모델 로딩 완료: {model_key}")
-    return tok, model, device
-
-
-def _mean_pooling(outputs, mask):
-    token_embeddings = outputs.last_hidden_state
-    mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    summed = torch.sum(token_embeddings * mask_expanded, dim=1)
-    counts = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-    return summed / counts
-
-
-def _embed_text(tok, model, device, text: str, max_len: int = 512):
-    inputs = tok(
-        text,
-        truncation=True,
-        padding="longest",
-        max_length=max_len,
-        return_tensors="pt",
-    ).to(device)
-    with torch.no_grad():
-        outs = model(**inputs)
-    vec = (
-        _mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
-    )
-    return vec
 
 
 # -------------------------------------------------
@@ -1580,7 +1476,14 @@ async def extract_pdfs():
     for src in tqdm(kept, desc="문서 전처리"):
         try:
             logger.info(f"[Extract] 파일 처리 시작: {src.name}")
-            text, tables = _extract_any(src)
+            
+            # PDF인 경우 페이지별 정보를 포함하여 추출
+            pages_text_dict: Dict[int, str] = {}
+            total_pages = 0
+            if _ext(src) == ".pdf":
+                text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(src)
+            else:
+                text, tables = _extract_any(src)
             
             # 표 추출 결과 로깅
             if tables:
@@ -1620,37 +1523,6 @@ async def extract_pdfs():
             # 통합 파일 저장
             combined_txt_file = EXTRACTED_TEXT_DIR / txt_rel
             try:
-                # 텍스트를 페이지별로 분리
-                def _parse_pages_from_text(text: str) -> Dict[int, str]:
-                    """텍스트에서 페이지별로 분리 (## Page X 마커 기준)"""
-                    pages_dict: Dict[int, str] = {}
-                    lines = text.split('\n')
-                    current_page = 1
-                    current_content: list[str] = []
-                    
-                    for line in lines:
-                        page_match = re.match(r'^##\s+Page\s+(\d+)', line)
-                        if page_match:
-                            # 이전 페이지 저장
-                            if current_content:
-                                pages_dict[current_page] = '\n'.join(current_content).strip()
-                            current_page = int(page_match.group(1))
-                            current_content = []
-                        else:
-                            current_content.append(line)
-                    
-                    # 마지막 페이지 저장
-                    if current_content:
-                        pages_dict[current_page] = '\n'.join(current_content).strip()
-                    
-                    # 페이지 마커가 없으면 전체를 1페이지로
-                    if not pages_dict:
-                        pages_dict[1] = text.strip()
-                    
-                    return pages_dict
-                
-                # 페이지별 텍스트 파싱
-                pages_text = _parse_pages_from_text(text)
                 
                 # 페이지별 표 그룹화
                 pages_tables: Dict[int, list[dict]] = defaultdict(list)
@@ -1659,49 +1531,60 @@ async def extract_pdfs():
                     if page_num > 0:
                         pages_tables[page_num].append(t)
                 
-                # 통합 파일 작성 (페이지 순서대로)
+                # 통합 파일 작성 (페이지 순서대로) - 페이지 마커 없이 순수 텍스트+표만 저장
                 with open(combined_txt_file, "w", encoding="utf-8") as f:
-                    f.write(f"# {src.name} - 통합 추출 결과\n\n")
-                    f.write(f"📄 원본 파일: {src.name}\n")
-                    f.write(f"📝 텍스트 길이: {len(text)}자\n")
-                    f.write(f"📊 표 개수: {len(tables or [])}개\n\n")
-                    f.write("---\n\n")
-                    
-                    # 모든 페이지 번호 수집 (텍스트와 표 모두 고려)
-                    all_page_nums = set(pages_text.keys())
-                    all_page_nums.update(pages_tables.keys())
-                    
-                    if all_page_nums:
-                        for page_num in sorted(all_page_nums):
-                            f.write(f"## Page {page_num}\n\n")
-                            
-                            # 해당 페이지의 텍스트
-                            page_text_content = pages_text.get(page_num, "")
-                            if page_text_content:
-                                f.write(page_text_content)
+                    # PDF인 경우: 페이지별 텍스트 정보 사용
+                    if pages_text_dict:
+                        # 모든 페이지 번호 수집 (텍스트와 표 모두 고려)
+                        all_page_nums = set(pages_text_dict.keys())
+                        all_page_nums.update(pages_tables.keys())
+                        
+                        if all_page_nums:
+                            for page_num in sorted(all_page_nums):
+                                # 해당 페이지의 텍스트 (페이지 마커 없이)
+                                page_text_content = pages_text_dict.get(page_num, "")
+                                if page_text_content:
+                                    f.write(page_text_content)
+                                    f.write("\n\n")
+                                
+                                # 해당 페이지의 표들 (텍스트 뒤에 삽입)
+                                page_tables_list = pages_tables.get(page_num, [])
+                                if page_tables_list:
+                                    for t_idx, t in enumerate(page_tables_list):
+                                        table_text = t.get("text", "")
+                                        if table_text:
+                                            f.write(table_text)
+                                            f.write("\n\n")
+                                
+                                # 페이지 구분선 (마지막 페이지가 아니면)
+                                if page_num < max(all_page_nums):
+                                    f.write("\n---\n\n")
+                        else:
+                            # 페이지 정보가 없으면 전체 텍스트만
+                            if text.strip():
+                                f.write(text)
                                 f.write("\n\n")
-                            
-                            # 해당 페이지의 표들 (텍스트 뒤에 삽입)
-                            page_tables_list = pages_tables.get(page_num, [])
-                            if page_tables_list:
-                                for t_idx, t in enumerate(page_tables_list):
+                            if tables:
+                                for t in tables:
                                     table_text = t.get("text", "")
                                     if table_text:
-                                        f.write(f"### 📊 표 {t_idx + 1}\n\n")
                                         f.write(table_text)
                                         f.write("\n\n")
-                            
-                            f.write("\n---\n\n")
                     else:
-                        # 페이지 정보가 없으면 전체 텍스트만
+                        # PDF가 아닌 경우: 전체 텍스트와 표만 저장
                         if text.strip():
                             f.write(text)
                             f.write("\n\n")
                         if tables:
+                            for t in tables:
+                                table_text = t.get("text", "")
+                                if table_text:
+                                    f.write(text)
+                                    f.write("\n\n")
+                        if tables:
                             for t_idx, t in enumerate(tables):
                                 table_text = t.get("text", "")
                                 if table_text:
-                                    f.write(f"### 📊 표 {t_idx + 1}\n\n")
                                     f.write(table_text)
                                     f.write("\n\n")
                 
@@ -1787,7 +1670,7 @@ async def ingest_embeddings(
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
     
     # 벡터 차원 검증
-    probe_vec = _embed_text(tok, model, device, "probe")
+    probe_vec = hf_embed_text(tok, model, device, "probe")
     emb_dim = int(probe_vec.shape[0])
     logger.info(f"[Ingest] 임베딩 모델: {eff_model_key}, 벡터 차원: {emb_dim}")
     
@@ -1815,20 +1698,6 @@ async def ingest_embeddings(
                 pass
     
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
-
-    # ==== 유틸 ====
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP) -> list[str]:
-        words = text.split()
-        chunks: list[str] = []
-        start = 0
-        step = max(1, max_tokens - overlap)
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += step
-        return chunks
 
     # ==== META 로드 및 대상 필터 구성 ====
     meta: dict = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
@@ -1897,53 +1766,71 @@ async def ingest_embeddings(
             # 혹시 모를 인코딩 문제 폴백
             text = txt_path.read_text(errors="ignore")
         
-        # 페이지별로 텍스트 분할 및 페이지 정보 추출
-        def _extract_page_info(text: str) -> list[tuple[int, str]]:
-            """텍스트를 페이지별로 분할하고 (페이지번호, 텍스트) 튜플 리스트 반환"""
+        # 통합 파일을 직접 파싱하여 페이지별로 분할 (텍스트와 표가 함께 저장된 파일)
+        # 페이지 구분선 "---" 기준으로 페이지 분리
+        def _parse_integrated_file(text: str) -> list[tuple[int, str]]:
+            """통합 파일을 페이지별로 분할 (페이지 구분선 "---" 기준)"""
             page_blocks: list[tuple[int, str]] = []
-            current_page = 1  # 기본값
+            lines = text.split('\n')
+            current_page = 1  
             current_text = []
             
-            lines = text.split('\n')
             for line in lines:
-                # 페이지 마커 확인: "## Page X"
-                page_match = re.match(r'^##\s+Page\s+(\d+)', line)
-                if page_match:
+                if line.strip() == "---":
                     # 이전 페이지 저장
-                    if current_text:
-                        page_blocks.append((current_page, '\n'.join(current_text)))
-                    current_page = int(page_match.group(1))
-                    current_text = []
+                    if current_content:
+                        page_text = '\n'.join(current_content).strip()
+                        if page_text:
+                            page_blocks.append((current_page, page_text))
+                    current_page += 1
+                    current_content = []
                 else:
-                    current_text.append(line)
+                    current_content.append(line)
             
             # 마지막 페이지 저장
-            if current_text:
-                page_blocks.append((current_page, '\n'.join(current_text)))
+            if current_content:
+                page_text = '\n'.join(current_content).strip()
+                if page_text:
+                    page_blocks.append((current_page, page_text))
             
-            # 페이지 마커가 없으면 전체를 1페이지로 처리
+            # 페이지 구분선이 없으면 전체를 1페이지로 처리
             if not page_blocks:
-                page_blocks = [(1, text)]
+                if text.strip():
+                    page_blocks = [(1, text.strip())]
             
             return page_blocks
         
-        page_blocks = _extract_page_info(text)
+        # 통합 파일 파싱
+        page_blocks = _parse_integrated_file(text)
+        logger.info(f"[Ingest] 통합 파일 파싱: {len(page_blocks)}개 페이지 블록 발견")
+        
+        # 전체 문서에서 청크 인덱스 누적 (페이지별로 0부터 시작하지 않도록)
         chunks_with_page: list[tuple[int, int, str]] = []  # (page, chunk_idx, chunk_text)
+        global_chunk_idx = 0  # 전체 문서에서 누적되는 청크 인덱스
         
         for page_num, page_text in page_blocks:
+            if not page_text:
+                continue
             page_chunks = chunk_text(page_text)
-            for chunk_idx, chunk in enumerate(page_chunks):
-                chunks_with_page.append((page_num, chunk_idx, chunk))
+            for chunk in page_chunks:
+                if chunk.strip():  # 빈 청크 제외
+                    chunks_with_page.append((page_num, global_chunk_idx, chunk))
+                    global_chunk_idx += 1
         
-        # 표 블록(이미 META에 저장됨)
+        logger.info(f"[Ingest] 총 {global_chunk_idx}개 청크 생성 (페이지별 청크 인덱스 누적)")
+        
+        # 표 블록 처리
+        # 통합 파일에 이미 표가 포함되어 있으므로, 표를 별도로 인제스트하지 않음
+        # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
         tables = entry.get("tables", []) or []
+        logger.info(f"[Ingest] 표 정보: {len(tables)}개 (통합 파일에 이미 포함되어 있으므로 별도 인제스트 안 함)")
 
         batch: list[dict] = []
 
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
 
-            # 1) 본문 조각 (페이지 정보 포함)
+            # 1) 본문 조각 (페이지 정보 포함, 텍스트와 표 모두 포함)
             for page_num, idx, c in chunks_with_page:
                 # VARCHAR 한도 안전 분할(바이트 기준)
                 for part in _split_for_varchar_bytes(c):
@@ -1951,7 +1838,7 @@ async def ingest_embeddings(
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
 
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     
                     # 벡터 차원 검증
                     if len(vec) != emb_dim:
@@ -1974,43 +1861,8 @@ async def ingest_embeddings(
                         total_inserted += len(batch)
                         batch = []
 
-            # 2) 표 조각(페이지/좌표 헤더 포함)
-            base_idx = len(chunks_with_page)
-            for t_i, t in enumerate(tables):
-                md = (t.get("text") or "").strip()
-                if not md:
-                    continue
-                page = int(t.get("page", 0))
-                bbox = t.get("bbox") or []
-                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
-
-                for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
-                    if len(part.encode("utf-8")) > 32768:
-                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                    
-                    # 벡터 차원 검증
-                    if len(vec) != emb_dim:
-                        logger.error(f"[Ingest-Table] 벡터 차원 불일치: 예상={emb_dim}, 실제={len(vec)}, 텍스트='{part[:50]}...'")
-                        continue  # 이 벡터는 건너뛰기
-                    
-                    batch.append({
-                        "embedding": vec.tolist(),
-                        "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
-                        "task_type": task,
-                        "security_level": lvl,
-                        "doc_id": str(doc_id),
-                        "version": int(version),
-                        "page": int(page) if page > 0 else 1,  # 페이지 번호 추가 (표의 페이지 정보 사용)
-                        "text": part,
-                    })
-                    if len(batch) >= BATCH_SIZE:
-                        client.insert(collection_name, batch)
-                        total_inserted += len(batch)
-                        batch = []
+            # 2) 표 조각은 통합 파일에 이미 포함되어 있으므로 별도 인제스트하지 않음
+            # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
 
         if batch:
             client.insert(collection_name, batch)
@@ -2092,25 +1944,13 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
     # 인제스트
     settings = get_vector_settings()
-    tok, model, device = _load_embedder(settings["embeddingModel"])
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    tok, model, device = await _get_or_load_embedder_async(settings["embeddingModel"])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=COLLECTION_NAME)
 
     s = get_vector_settings()
     MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     # 기존 삭제
     try:
@@ -2119,7 +1959,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         pass
 
     tasks = req.task_types or list(TASK_TYPES)
-    chunks = chunk_text(text_all)
+    chunks = chunk_text(text_all, max_tokens=MAX_TOKENS, overlap=OVERLAP)
     batch, cnt = [], 0
 
     for task in tasks:
@@ -2130,7 +1970,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for part in _split_for_varchar_bytes(c):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -2160,7 +2000,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -2246,25 +2086,13 @@ async def ingest_specific_files_with_levels(
     settings = get_vector_settings()
     eff_model_key = settings["embeddingModel"]
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     coll = collection_name or COLLECTION_NAME
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=coll)
 
     MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     processed, total = [], 0
     for src in saved:
@@ -2299,7 +2127,7 @@ async def ingest_specific_files_with_levels(
                 pass
 
             # 본문
-            chunks = chunk_text(text)
+            chunks = chunk_text(text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
             batch, cnt = [], 0
             for t in tasks_eff:
                 lvl = int(sec_map.get(t, 1))
@@ -2308,7 +2136,7 @@ async def ingest_specific_files_with_levels(
                     for part in _split_for_varchar_bytes(c):
                         if len(part.encode("utf-8")) > 32768:
                             part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                         batch.append({
                             "embedding": vec.tolist(),
                             "path": str(rel_txt.as_posix()),
@@ -2334,7 +2162,7 @@ async def ingest_specific_files_with_levels(
                     for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                         if len(part.encode("utf-8")) > 32768:
                             part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                         batch.append({
                             "embedding": vec.tolist(),
                             "path": str(rel_txt.as_posix()),
@@ -2419,7 +2247,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = _embed_text(tok, model, device, req.query)
+    q_emb = hf_embed_text(tok, model, device, req.query)
     client = _client()
     _ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP")
 
@@ -2462,21 +2290,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         except Exception as e:
             logger.warning(f"[Milvus] sparse search unavailable: {e}")
             return [[]]
-
-    # def _load_snippet(
-    #     path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
-    # ) -> str:
-    #     try:
-    #         full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
-    #     except Exception:
-    #         return ""
-    #     words = full_txt.split()
-    #     if not words:
-    #         return ""
-    #     start = cidx * (max_tokens - overlap)
-    #     # 보존: 추출 시와 동일 슬라이딩 윈도우는 아니지만 근사 스니펫 제공
-    #     snippet = " ".join(words[start : start + max_tokens]).strip()
-    #     return snippet or " ".join(words[:max_tokens]).strip()
 
     def _load_snippet(
         path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
@@ -2583,37 +2396,53 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         sparse_list = _collect(res_sparse, False)
 
         # RRF 결합 폴백
+        # key_short는 (path, cidx, ttype, lvl, doc_id)로 설정하여 같은 청크는 하나만 나타나도록 함
+        # 페이지 정보는 별도로 저장하여 페이로드에 포함
         rrf: dict[tuple, float] = {}
         text_map: dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
         page_map: dict[tuple, int] = {}  # ★ 페이지 매핑 추가
+        score_map: dict[tuple, tuple[float, float]] = {}  # (score_vec, score_sparse) 저장
         K = 60.0
-        for rank, (key, _s) in enumerate(dense_list, start=1):
-            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
+        for rank, (key, score) in enumerate(dense_list, start=1):
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
             if len(key) > 6:  # ent_text가 있으면 저장
                 text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장
-                page_map[key_short] = key[5]
-        for rank, (key, _s) in enumerate(sparse_list, start=1):
-            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
+            if len(key) > 5:  # page가 있으면 저장 (첫 번째로 발견된 페이지 사용)
+                if key_short not in page_map:
+                    page_map[key_short] = key[5]
+            # 점수 저장 (dense) - 최대값 유지
+            if key_short not in score_map:
+                score_map[key_short] = (score, 0.0)
+            else:
+                score_map[key_short] = (max(score_map[key_short][0], score), score_map[key_short][1])
+        
+        for rank, (key, score) in enumerate(sparse_list, start=1):
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
             if len(key) > 6:  # ent_text가 있으면 저장
                 text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장
-                page_map[key_short] = key[5]
+            if len(key) > 5:  # page가 있으면 저장 (아직 없으면 저장)
+                if key_short not in page_map:
+                    page_map[key_short] = key[5]
+            # 점수 저장 (sparse) - 최대값 유지
+            if key_short not in score_map:
+                score_map[key_short] = (0.0, score)
+            else:
+                score_map[key_short] = (score_map[key_short][0], max(score_map[key_short][1], score))
+
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
-        for (path, cidx, ttype, lvl, doc_id, page), fused in merged:
+        for (path, cidx, ttype, lvl, doc_id), fused in merged:
             # 스니펫 결정 로직
-            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id, page))
+            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
             if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
                 snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
             else:
                 snippet = _load_snippet(path, cidx)
             
-            page_num = page_map.get((path, cidx, ttype, lvl, doc_id, page), page)
-            s_vec = next((s for (k, s) in dense_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
+            page_num = page_map.get((path, cidx, ttype, lvl, doc_id), 0)
+            s_vec, s_spa = score_map.get((path, cidx, ttype, lvl, doc_id), (0.0, 0.0))
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
                 "security_level": lvl, "doc_id": doc_id, "page": int(page_num),
@@ -3028,25 +2857,13 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     settings = get_vector_settings()
     eff_model_key = settings["embeddingModel"]
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     client = _client()
     coll = meta.get("collection") or _session_collection_name(sid)
     _ensure_collection_and_index_for(client, collection_name=coll, emb_dim=emb_dim, metric="IP")
 
     MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     all_rules = get_security_level_rules_all()
     sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
@@ -3085,7 +2902,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         except Exception:
             pass
 
-        chunks = chunk_text(file_text)
+        chunks = chunk_text(file_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
         batch: List[Dict] = []
 
         for t in tasks:
@@ -3096,7 +2913,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                 for part in _split_for_varchar_bytes(c):
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
@@ -3126,7 +2943,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                 for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
@@ -3174,7 +2991,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = _embed_text(tok, model, device, req.query)
+    q_emb = hf_embed_text(tok, model, device, req.query)
 
     client = _client()
     coll = meta.get("collection") or _session_collection_name(sid)
