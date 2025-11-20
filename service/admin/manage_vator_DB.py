@@ -291,14 +291,17 @@ def _markdown_repeat_header(md: str) -> str:
     return "\n".join(out)
 
 
-def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
+def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int, str], int]:
     """
     PDF에서 본문 텍스트는 PyMuPDF로 추출하고,
     표는 PyMuPDF find_tables()와 Tabula로 추출해 마크다운 테이블로 반환한다.
     - 페이지별로 텍스트와 표를 분리 추출
-    - 페이지별 정보 포함 (페이지 마커: ## Page X)
+    - 페이지 정보는 메타데이터에만 저장 (텍스트에는 페이지 마커 없음)
     - 이미지는 처리하지 않음
     - Tabula가 없거나 실패 시: PyMuPDF find_tables()로 폴백
+    
+    Returns:
+        tuple: (전체 텍스트, 표 리스트, 페이지별 텍스트 딕셔너리, 총 페이지 수)
     """
     import fitz  # PyMuPDF
     
@@ -323,9 +326,8 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
                     raw_text = page.get_text()
                     if raw_text and raw_text.strip():
                         clean_text = _clean_text(raw_text)
-                        # 페이지 마커 추가
-                        page_text = f"## Page {page_num}\n\n{clean_text}"
-                        page_texts.append(page_text)
+                        # 페이지 마커 없이 순수 텍스트만 저장 (페이지 정보는 메타데이터에 저장)
+                        page_texts.append((page_num, clean_text))  # (페이지번호, 텍스트) 튜플로 저장
                 except Exception as e:
                     logger.warning(f"[PyMuPDF] 텍스트 추출 실패 (p{page_num}): {e}")
                 
@@ -449,8 +451,14 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
         logger.exception(f"Failed to open PDF: {pdf_path}")
         return "", []  # 열리지 않는 PDF는 빈 결과 반환
     
-    # 모든 페이지 텍스트 결합
-    pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
+    # 모든 페이지 텍스트 결합 (페이지 마커 없이)
+    pdf_text = _clean_text("\n\n".join(text for _, text in page_texts if text))
+    
+    # 페이지별 텍스트 딕셔너리 생성 (메타데이터용)
+    pages_text_dict: Dict[int, str] = {}
+    for page_num, text_content in page_texts:
+        if text_content:
+            pages_text_dict[page_num] = text_content
 
     # 표 추출 결과 로깅
     if all_tables:
@@ -458,7 +466,7 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict]]:
     else:
         logger.info(f"[Extract] {pdf_path.name}: 추출된 표 없음")
     
-    return pdf_text, all_tables
+    return pdf_text, all_tables, pages_text_dict, total_pages
 
 
 def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
@@ -1591,7 +1599,14 @@ async def extract_pdfs():
     for src in tqdm(kept, desc="문서 전처리"):
         try:
             logger.info(f"[Extract] 파일 처리 시작: {src.name}")
-            text, tables = _extract_any(src)
+            
+            # PDF인 경우 페이지별 정보를 포함하여 추출
+            pages_text_dict: Dict[int, str] = {}
+            total_pages = 0
+            if _ext(src) == ".pdf":
+                text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(src)
+            else:
+                text, tables = _extract_any(src)
             
             # 표 추출 결과 로깅
             if tables:
@@ -1631,38 +1646,6 @@ async def extract_pdfs():
             # 통합 파일 저장
             combined_txt_file = EXTRACTED_TEXT_DIR / txt_rel
             try:
-                # 텍스트를 페이지별로 분리
-                def _parse_pages_from_text(text: str) -> Dict[int, str]:
-                    """텍스트에서 페이지별로 분리 (## Page X 마커 기준)"""
-                    pages_dict: Dict[int, str] = {}
-                    lines = text.split('\n')
-                    current_page = 1
-                    current_content: list[str] = []
-                    
-                    for line in lines:
-                        page_match = re.match(r'^##\s+Page\s+(\d+)', line)
-                        if page_match:
-                            # 이전 페이지 저장
-                            if current_content:
-                                pages_dict[current_page] = '\n'.join(current_content).strip()
-                            current_page = int(page_match.group(1))
-                            current_content = []
-                        else:
-                            current_content.append(line)
-                    
-                    # 마지막 페이지 저장
-                    if current_content:
-                        pages_dict[current_page] = '\n'.join(current_content).strip()
-                    
-                    # 페이지 마커가 없으면 전체를 1페이지로
-                    if not pages_dict:
-                        pages_dict[1] = text.strip()
-                    
-                    return pages_dict
-                
-                # 페이지별 텍스트 파싱
-                pages_text = _parse_pages_from_text(text)
-                
                 # 페이지별 표 그룹화
                 pages_tables: Dict[int, list[dict]] = defaultdict(list)
                 for t in (tables or []):
@@ -1670,49 +1653,54 @@ async def extract_pdfs():
                     if page_num > 0:
                         pages_tables[page_num].append(t)
                 
-                # 통합 파일 작성 (페이지 순서대로)
+                # 통합 파일 작성 (페이지 순서대로) - 페이지 마커 없이 순수 텍스트+표만 저장
                 with open(combined_txt_file, "w", encoding="utf-8") as f:
-                    f.write(f"# {src.name} - 통합 추출 결과\n\n")
-                    f.write(f"📄 원본 파일: {src.name}\n")
-                    f.write(f"📝 텍스트 길이: {len(text)}자\n")
-                    f.write(f"📊 표 개수: {len(tables or [])}개\n\n")
-                    f.write("---\n\n")
-                    
-                    # 모든 페이지 번호 수집 (텍스트와 표 모두 고려)
-                    all_page_nums = set(pages_text.keys())
-                    all_page_nums.update(pages_tables.keys())
-                    
-                    if all_page_nums:
-                        for page_num in sorted(all_page_nums):
-                            f.write(f"## Page {page_num}\n\n")
-                            
-                            # 해당 페이지의 텍스트
-                            page_text_content = pages_text.get(page_num, "")
-                            if page_text_content:
-                                f.write(page_text_content)
+                    # PDF인 경우: 페이지별 텍스트 정보 사용
+                    if pages_text_dict:
+                        # 모든 페이지 번호 수집 (텍스트와 표 모두 고려)
+                        all_page_nums = set(pages_text_dict.keys())
+                        all_page_nums.update(pages_tables.keys())
+                        
+                        if all_page_nums:
+                            for page_num in sorted(all_page_nums):
+                                # 해당 페이지의 텍스트 (페이지 마커 없이)
+                                page_text_content = pages_text_dict.get(page_num, "")
+                                if page_text_content:
+                                    f.write(page_text_content)
+                                    f.write("\n\n")
+                                
+                                # 해당 페이지의 표들 (텍스트 뒤에 삽입)
+                                page_tables_list = pages_tables.get(page_num, [])
+                                if page_tables_list:
+                                    for t_idx, t in enumerate(page_tables_list):
+                                        table_text = t.get("text", "")
+                                        if table_text:
+                                            f.write(table_text)
+                                            f.write("\n\n")
+                                
+                                # 페이지 구분선 (마지막 페이지가 아니면)
+                                if page_num < max(all_page_nums):
+                                    f.write("\n---\n\n")
+                        else:
+                            # 페이지 정보가 없으면 전체 텍스트만
+                            if text.strip():
+                                f.write(text)
                                 f.write("\n\n")
-                            
-                            # 해당 페이지의 표들 (텍스트 뒤에 삽입)
-                            page_tables_list = pages_tables.get(page_num, [])
-                            if page_tables_list:
-                                for t_idx, t in enumerate(page_tables_list):
+                            if tables:
+                                for t in tables:
                                     table_text = t.get("text", "")
                                     if table_text:
-                                        f.write(f"### 📊 표 {t_idx + 1}\n\n")
                                         f.write(table_text)
                                         f.write("\n\n")
-                            
-                            f.write("\n---\n\n")
                     else:
-                        # 페이지 정보가 없으면 전체 텍스트만
+                        # PDF가 아닌 경우: 전체 텍스트와 표만 저장
                         if text.strip():
                             f.write(text)
                             f.write("\n\n")
                         if tables:
-                            for t_idx, t in enumerate(tables):
+                            for t in tables:
                                 table_text = t.get("text", "")
                                 if table_text:
-                                    f.write(f"### 📊 표 {t_idx + 1}\n\n")
                                     f.write(table_text)
                                     f.write("\n\n")
                 
@@ -1733,8 +1721,17 @@ async def extract_pdfs():
                 "doc_id": doc_id,
                 "version": version,
                 "tables": tables or [],  # ★ 표 정보 추가
+                "pages": pages_text_dict if pages_text_dict else {},  # ★ 페이지별 텍스트 정보 (메타데이터용)
+                "total_pages": total_pages,  # ★ 총 페이지 수
                 "sourceExt": _ext(src),  # 원본 확장자 기록
                 "saved_files": saved_files,  # 저장된 파일 경로 추가
+                # 페이로드 정보 (LLM에 전달하지 않지만 메타데이터로 저장)
+                "extraction_info": {
+                    "original_file": src.name,
+                    "text_length": len(text),
+                    "table_count": len(tables or []),
+                    "extracted_at": now_kst_string(),
+                },
             }
             new_meta[str(dest_rel)] = info
             logger.info(f"[Extract] {src.name}: 메타데이터 저장 완료 (텍스트={len(text)}자, 표={len(tables or [])}개)")
@@ -1908,53 +1905,72 @@ async def ingest_embeddings(
             # 혹시 모를 인코딩 문제 폴백
             text = txt_path.read_text(errors="ignore")
         
-        # 페이지별로 텍스트 분할 및 페이지 정보 추출
-        def _extract_page_info(text: str) -> list[tuple[int, str]]:
-            """텍스트를 페이지별로 분할하고 (페이지번호, 텍스트) 튜플 리스트 반환"""
+        # 통합 파일을 직접 파싱하여 페이지별로 분할 (텍스트와 표가 함께 저장된 파일)
+        # 페이지 구분선 "---" 기준으로 페이지 분리
+        def _parse_integrated_file(text: str) -> list[tuple[int, str]]:
+            """통합 파일을 페이지별로 분할 (페이지 구분선 "---" 기준)"""
             page_blocks: list[tuple[int, str]] = []
-            current_page = 1  # 기본값
-            current_text = []
-            
             lines = text.split('\n')
+            current_page = 1
+            current_content = []
+            
             for line in lines:
-                # 페이지 마커 확인: "## Page X"
-                page_match = re.match(r'^##\s+Page\s+(\d+)', line)
-                if page_match:
+                # 페이지 구분선 확인: "---" (빈 줄로 둘러싸인 경우)
+                if line.strip() == "---":
                     # 이전 페이지 저장
-                    if current_text:
-                        page_blocks.append((current_page, '\n'.join(current_text)))
-                    current_page = int(page_match.group(1))
-                    current_text = []
+                    if current_content:
+                        page_text = '\n'.join(current_content).strip()
+                        if page_text:
+                            page_blocks.append((current_page, page_text))
+                    current_page += 1
+                    current_content = []
                 else:
-                    current_text.append(line)
+                    current_content.append(line)
             
             # 마지막 페이지 저장
-            if current_text:
-                page_blocks.append((current_page, '\n'.join(current_text)))
+            if current_content:
+                page_text = '\n'.join(current_content).strip()
+                if page_text:
+                    page_blocks.append((current_page, page_text))
             
-            # 페이지 마커가 없으면 전체를 1페이지로 처리
+            # 페이지 구분선이 없으면 전체를 1페이지로 처리
             if not page_blocks:
-                page_blocks = [(1, text)]
+                if text.strip():
+                    page_blocks = [(1, text.strip())]
             
             return page_blocks
         
-        page_blocks = _extract_page_info(text)
+        # 통합 파일 파싱
+        page_blocks = _parse_integrated_file(text)
+        logger.info(f"[Ingest] 통합 파일 파싱: {len(page_blocks)}개 페이지 블록 발견")
+        
+        # 전체 문서에서 청크 인덱스 누적 (페이지별로 0부터 시작하지 않도록)
         chunks_with_page: list[tuple[int, int, str]] = []  # (page, chunk_idx, chunk_text)
+        global_chunk_idx = 0  # 전체 문서에서 누적되는 청크 인덱스
         
         for page_num, page_text in page_blocks:
+            if not page_text:
+                continue
             page_chunks = chunk_text(page_text)
-            for chunk_idx, chunk in enumerate(page_chunks):
-                chunks_with_page.append((page_num, chunk_idx, chunk))
+            for chunk in page_chunks:
+                if chunk.strip():  # 빈 청크 제외
+                    chunks_with_page.append((page_num, global_chunk_idx, chunk))
+                    global_chunk_idx += 1
         
-        # 표 블록(이미 META에 저장됨)
+        logger.info(f"[Ingest] 총 {global_chunk_idx}개 청크 생성 (페이지별 청크 인덱스 누적)")
+        
+        # 표 블록 처리
+        # 통합 파일에 이미 표가 포함되어 있으므로, 표를 별도로 인제스트하지 않음
+        # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
         tables = entry.get("tables", []) or []
+        logger.info(f"[Ingest] 표 정보: {len(tables)}개 (통합 파일에 이미 포함되어 있으므로 별도 인제스트 안 함)")
 
         batch: list[dict] = []
 
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
 
-            # 1) 본문 조각 (페이지 정보 포함)
+            # 1) 본문 조각 (페이지 정보 포함, 텍스트와 표 모두 포함)
             for page_num, idx, c in chunks_with_page:
                 # VARCHAR 한도 안전 분할(바이트 기준)
                 for part in _split_for_varchar_bytes(c):
@@ -1985,43 +2001,8 @@ async def ingest_embeddings(
                         total_inserted += len(batch)
                         batch = []
 
-            # 2) 표 조각(페이지/좌표 헤더 포함)
-            base_idx = len(chunks_with_page)
-            for t_i, t in enumerate(tables):
-                md = (t.get("text") or "").strip()
-                if not md:
-                    continue
-                page = int(t.get("page", 0))
-                bbox = t.get("bbox") or []
-                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
-
-                for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
-                    if len(part.encode("utf-8")) > 32768:
-                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                    
-                    # 벡터 차원 검증
-                    if len(vec) != emb_dim:
-                        logger.error(f"[Ingest-Table] 벡터 차원 불일치: 예상={emb_dim}, 실제={len(vec)}, 텍스트='{part[:50]}...'")
-                        continue  # 이 벡터는 건너뛰기
-                    
-                    batch.append({
-                        "embedding": vec.tolist(),
-                        "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
-                        "task_type": task,
-                        "security_level": lvl,
-                        "doc_id": str(doc_id),
-                        "version": int(version),
-                        "page": int(page) if page > 0 else 1,  # 페이지 번호 추가 (표의 페이지 정보 사용)
-                        "text": part,
-                    })
-                    if len(batch) >= BATCH_SIZE:
-                        client.insert(collection_name, batch)
-                        total_inserted += len(batch)
-                        batch = []
+            # 2) 표 조각은 통합 파일에 이미 포함되어 있으므로 별도 인제스트하지 않음
+            # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
 
         if batch:
             client.insert(collection_name, batch)
@@ -2594,37 +2575,52 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         sparse_list = _collect(res_sparse, False)
 
         # RRF 결합 폴백
+        # key_short는 (path, cidx, ttype, lvl, doc_id)로 설정하여 같은 청크는 하나만 나타나도록 함
+        # 페이지 정보는 별도로 저장하여 페이로드에 포함
         rrf: dict[tuple, float] = {}
         text_map: dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
         page_map: dict[tuple, int] = {}  # ★ 페이지 매핑 추가
+        score_map: dict[tuple, tuple[float, float]] = {}  # (score_vec, score_sparse) 저장
         K = 60.0
-        for rank, (key, _s) in enumerate(dense_list, start=1):
-            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
+        for rank, (key, score) in enumerate(dense_list, start=1):
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
             if len(key) > 6:  # ent_text가 있으면 저장
                 text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장
-                page_map[key_short] = key[5]
-        for rank, (key, _s) in enumerate(sparse_list, start=1):
-            key_short = key[:6]  # (path, cidx, ttype, lvl, doc_id, page)
+            if len(key) > 5:  # page가 있으면 저장 (첫 번째로 발견된 페이지 사용)
+                if key_short not in page_map:
+                    page_map[key_short] = key[5]
+            # 점수 저장 (dense) - 최대값 유지
+            if key_short not in score_map:
+                score_map[key_short] = (score, 0.0)
+            else:
+                score_map[key_short] = (max(score_map[key_short][0], score), score_map[key_short][1])
+        
+        for rank, (key, score) in enumerate(sparse_list, start=1):
+            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
             rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
             if len(key) > 6:  # ent_text가 있으면 저장
                 text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장
-                page_map[key_short] = key[5]
+            if len(key) > 5:  # page가 있으면 저장 (아직 없으면 저장)
+                if key_short not in page_map:
+                    page_map[key_short] = key[5]
+            # 점수 저장 (sparse) - 최대값 유지
+            if key_short not in score_map:
+                score_map[key_short] = (0.0, score)
+            else:
+                score_map[key_short] = (score_map[key_short][0], max(score_map[key_short][1], score))
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
-        for (path, cidx, ttype, lvl, doc_id, page), fused in merged:
+        for (path, cidx, ttype, lvl, doc_id), fused in merged:
             # 스니펫 결정 로직
-            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id, page))
+            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
             if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
                 snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
             else:
                 snippet = _load_snippet(path, cidx)
             
-            page_num = page_map.get((path, cidx, ttype, lvl, doc_id, page), page)
-            s_vec = next((s for (k, s) in dense_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k[:6] == (path, cidx, ttype, lvl, doc_id, page)), 0.0)
+            page_num = page_map.get((path, cidx, ttype, lvl, doc_id), 0)
+            s_vec, s_spa = score_map.get((path, cidx, ttype, lvl, doc_id), (0.0, 0.0))
             hits_raw.append({
                 "path": path, "chunk_idx": cidx, "task_type": ttype,
                 "security_level": lvl, "doc_id": doc_id, "page": int(page_num),
