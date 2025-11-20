@@ -9,13 +9,16 @@ from typing import Any, Iterable, List, Sequence, Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
+from config import config as app_config
 from service.retrieval.adapters.base import RetrievalResult
 from utils import logger
 
 LOGGER = logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RERANK_MODEL_PATH = PROJECT_ROOT / "storage" / "rerank_model" / "Qwen3-Reranker-0.6B"
+_RETRIEVAL_CFG = app_config.get("retrieval", {}) or {}
+_RETRIEVAL_PATHS = _RETRIEVAL_CFG.get("paths", {}) or {}
+RERANK_MODEL_PATH = (PROJECT_ROOT / Path(_RETRIEVAL_PATHS.get("rerank_model_path", "storage/rerank_model/Qwen3-Reranker-0.6B"))).resolve()
 
 _RERANK_CACHE: dict[str, Tuple[Any, Any, torch.device, int, int]] = {}
 _ACTIVE_RERANK_KEY: str | None = None
@@ -87,51 +90,45 @@ def _normalize_snippet(snippet: Any) -> Tuple[str, float]:
         raise TypeError("Unsupported snippet type for rerank")
     return str(data.get("text", "")), float(data.get("score", 0.0))
 
-
-def _compute_scores(
-    tokenizer,
-    model,
-    device,
-    token_true_id: int,
-    token_false_id: int,
-    pairs: Sequence[str],
-) -> List[float]:
-    """허깅페이스 예제 기반으로 yes/no 확률 계산."""
+@torch.no_grad()
+def _compute_rerank_scores(tokenizer, model, device, token_true_id, token_false_id, pairs: List[str]) -> List[float]:
+    """리랭크 점수 계산 """
     if not pairs:
         return []
-
-    prefix = (
-        "<|im_start|>system\n"
-        "Judge whether the Document meets the requirements based on the Query and the "
-        "Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
-        "<|im_start|>user\n"
-    )
+        
+    print(f"🔄 [Rerank-Compute] 점수 계산 시작: {len(pairs)}개 쌍")
+        
+    max_length = 8192
+    prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
     suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-
+    
     prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
     suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
-
+    
+    # 입력 처리 (허깅페이스 예시와 동일)
     inputs = tokenizer(
-        list(pairs),
-        padding=False,
-        truncation="longest_first",
-        return_attention_mask=False,
-        max_length=8192 - len(prefix_tokens) - len(suffix_tokens),
+        pairs, padding=False, truncation='longest_first',
+        return_attention_mask=False, max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
     )
-
-    for i, seq in enumerate(inputs["input_ids"]):
-        inputs["input_ids"][i] = prefix_tokens + seq + suffix_tokens
-
-    inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        logits = model(**inputs).logits[:, -1, :]
-    true_vector = logits[:, token_true_id]
-    false_vector = logits[:, token_false_id]
-    stacked = torch.stack([false_vector, true_vector], dim=1)
-    stacked = torch.nn.functional.log_softmax(stacked, dim=1)
-    return stacked[:, 1].exp().tolist()
+    
+    for i, ele in enumerate(inputs['input_ids']):
+        inputs['input_ids'][i] = prefix_tokens + ele + suffix_tokens
+    
+    inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
+    for key in inputs:
+        inputs[key] = inputs[key].to(model.device)  # 허깅페이스 예시: model.device 사용
+    
+    # 점수 계산 (허깅페이스 예시와 동일)
+    batch_scores = model(**inputs).logits[:, -1, :]
+    true_vector = batch_scores[:, token_true_id]
+    false_vector = batch_scores[:, token_false_id]
+    batch_scores = torch.stack([false_vector, true_vector], dim=1)
+    batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+    scores = batch_scores[:, 1].exp().tolist()  # .cpu() 제거 (허깅페이스 예시에 없음)
+    
+    print(f"✅ [Rerank-Compute] 점수 계산 완료: 평균 점수={sum(scores)/len(scores):.4f}")
+    
+    return scores
 
 
 def rerank_snippets(
@@ -172,7 +169,7 @@ def rerank_snippets(
         chunk = pairs[i : i + batch_size]
         try:
             scores.extend(
-                _compute_scores(tokenizer, model, device, token_true_id, token_false_id, chunk)
+                _compute_rerank_scores(tokenizer, model, device, token_true_id, token_false_id, chunk)
             )
         except Exception as exc:  # pragma: no cover - 안전장치
             LOGGER.warning("리랭크 배치 실패: %s", exc)

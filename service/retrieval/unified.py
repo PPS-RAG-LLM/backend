@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from service.retrieval.adapters.base import RetrievalResult
 from service.retrieval.adapters.local import LocalVectorAdapter
@@ -14,9 +14,9 @@ from service.retrieval.common import get_document_dirs
 from service.retrieval.reranker import rerank_snippets
 from utils import logger
 
-DEFAULT_SOURCES = ("workspace", "local", "milvus")
-LOGGER = logger(__name__)
 
+LOGGER = logger(__name__)
+DEFAULT_SOURCES = ("workspace", "local", "milvus")
 
 def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     """
@@ -25,10 +25,11 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         query: 사용자 질문
         config: 검색 설정 (workspace_id, attachments, security_level 등)
     """
+    logger.info(f"🔍 [UnifiedSearch] config: {config}")
 
-    top_k = int(config.get("top_k") or 13)
+    top_k = int(config.get("top_k"))
     threshold = float(config.get("threshold") or 0.0)
-    sources = tuple(config.get("sources") or DEFAULT_SOURCES)
+    sources = tuple(config.get("sources"))
     enable_rerank = bool(config.get("enable_rerank", False))
     rerank_top_n = int(config.get("rerank_top_n"))
     attachments = config.get("attachments") or []
