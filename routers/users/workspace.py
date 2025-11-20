@@ -89,7 +89,7 @@ class WorkspaceUpdateBody(BaseModel):
     systemPrompt: Optional[str] = ""
     provider: Optional[str] =None # ['openai', 'huggingface']
     systemPrompt: Optional[str] = ""
-    vectorSearchMode: Optional[str] = None #['hybrid', 'keyword', 'semantic']
+    vectorSearchMode: Optional[str] = None #['hybrid', 'semantic']
     similarityThreshold: Optional[float] = 0.25
     topN: Optional[int] = 4
     queryRefusalResponse: Optional[str] 

@@ -2535,9 +2535,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         ],
         "prompt": prompt,
     }
-
-
-
+    
 
 async def execute_search(
     question: str,
