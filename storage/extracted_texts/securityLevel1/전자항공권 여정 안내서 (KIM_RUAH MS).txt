@@ -1,0 +1,598 @@
+# 전자항공권 여정 안내서 (KIM_RUAH MS).pdf - 통합 추출 결과
+
+📄 원본 파일: 전자항공권 여정 안내서 (KIM_RUAH MS).pdf
+📝 텍스트 길이: 26574자
+📊 표 개수: 0개
+
+---
+
+## Page 1
+
+전자 항공권 여정안내서
+Electronic Ticket Itinerary & Receipt
+예약번호
+Reservation No.
+97863313
+승객성명 Passenger Name
+KIM/RUAH MS
+항공권번호 Ticket Number
+9882488729982
+발행점소 Issuing Office
+STAR BONUS OFC INT
+
+예약번호 Reservation No.
+FHJA26(97863313)
+회원번호 Frequent Flyer No.
+781466128
+  출발
+  From
+ 도착
+   To
+편명
+Flight
+예약등급
+Class
+출발일
+Date(Day)
+출발시각
+Departure
+도착시각
+Arrival
+비행시간
+Flying Time
+예약상태
+Status
+좌석번호
+Seat
+SEOUL
+INCHEON
+터미널 Terminal 1
+SAN FRANCISCO
+터미널 Terminal I
+UA806
+X
+01APR26
+(WED)
+11:30
+06:10
+10H40M
+OK
+
+경유 Via
+
+경유지 체류시간 Layover Time
+
+운항항공편 Operated by
+UNITED AIRLINES UA806
+무료수하물 Free Baggage Allowance
+2PC
+판매항공편 Marketed by
+UNITED AIRLINES
+항공권 유효기간 Not Valid Before
+
+운임종류 Fare Basis
+XBP00
+항공권 유효기간 Not Valid After
+
+SAN FRANCISCO
+터미널 Terminal I
+CANCUN
+터미널 Terminal 3
+UA1679
+X
+01APR26
+(WED)
+08:50
+16:12
+05H22M
+OK
+
+경유 Via
+
+경유지 체류시간 Layover Time
+
+운항항공편 Operated by
+UNITED AIRLINES UA1679
+무료수하물 Free Baggage Allowance
+2PC
+판매항공편 Marketed by
+UNITED AIRLINES
+항공권 유효기간 Not Valid Before
+
+운임종류 Fare Basis
+XBP00
+항공권 유효기간 Not Valid After
+
+*상기의 모든 정보는 항공사 및 공항 사정에 의하여 변경될 수 있습니다. All conditions may vary according to circumstances of airlines and airports.
+*아시아나항공은 인천공항의 제1여객터미널에서 운항합니다. Asiana Airlines uses the terminal 1 of Inchecon International airport, please confirm your terminal again.
+지불수단 Form of Payment
+CC VI 489016XXXXXX9812/01 004561
+
+운임 Fare
+USD 0.00
+Equivalent Fare
+KRW 0
+세금 및 제반요금 Tax/Fee/Charge
+
+ *세금 Taxes
+KRW 24000 BP KRW 7600 AY KRW 5100 XA KRW 9500 XY KRW 9800 YC KRW 60100 UK
+*한국 출발 세금(BP)에는 국제여객공항이용료(인천/김포공항 17,000원, 기타공항 12,000원), 출국납부금 7,000원(유/소아 면제)
+이 포함되어 있습니다.
+*The BP Tax includes International PSC(Incheon/Gimpo Airport KRW 17,000, other airports KRW 12,000)
+and Departure Tax KRW 7,000(Infant/Toddler Tax Exemption).
+ *재발행 수수료 Reissue Fee
+
+ *유류할증료 Fuel Surcharge
+
+ *발권수수료 Ticketing Service Fee
+
+합계 Total Amount
+KRW 116100
+발행항공사/발행일 Issuing Airlines and Date
+ASIANA AIRLINES 29JUN25
+IATA: 17394473
+제한사항 Restriction(s)
+NON-ENDS / STAR AWARD 1 YR VALID FRM ORGN ISSUE
+운임계산 Fare Calculation
+SEL UA X/SFO UA CUN M0.00NUC0.00END ROE1.00
+*항공권에 기재된 날짜, 여정, 운항 항공사, 예약등급, 유효기간 등의 변경 또는 취소/환불시, 판매조건에 따라 제반 규정이 다르게 적용되어
+운임 차액 및 수수료가 발생할 수 있습니다.
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+1/6
+
+
+---
+
+## Page 2
+
+When cancelling/refunding tickets or making changes to the stated travel dates, routes, operating airlines, booking classes and ticket validity,
+such requests are subject to the overall rules that can apply within a varying scope in accordance with the fare and sales conditions resulting
+in potential fare differences and fees.
+*공동운항편의 경우 운항 항공사에서 구입 시와 운임이 다를 수 있으며, 사전좌석배정, 특별기내식, 무료수하물 등의 제반 서비스는
+운항 항공사 기준에 따라 다르게 운영될 수 있으니 자세한 사항은 사전에 확인하여 주시기 바랍니다.
+The fare of codeshare flights may differ when purchased through the operating carrier, and services such as advance seat reservation,
+special meals, free baggage allowance may differ according to the rules of operating carrier.
+Please be sure to contact the airline in advance.
+*취소 통보를 하지 않고 확약된 항공권을 탑승하지 않는 경우, 별도로 규정한 예약부도위약금(No-show Penalty)가 징수됩니다.
+If a passenger does not show for the departure without prior notification to the airline, No-show Penalty will be charged.
+*전자항공권 여정안내서는 입 출국 시 필요하므로 반드시 전 여행기간 동안 소지하시고, 본 안내서와 함께 제공된 법적 고지문 또한 참고하여 주시기 바랍니다.
+전자항공권 여정안내서상의 영문성명과 여권상의 영문성명은 반드시 일치하여야 하며, 명의변경은 불가합니다.
+탑승용 쿠폰 사용 순서 : 탑승용 쿠폰은 여객용 쿠폰에 명시된 출발지로부터 순서대로 사용되어야 합니다.
+무료로 운송 가능한 수하물 무게(개수)를 초과할 경우 초과 수하물 요금이 부과되며, 요금은 여행 구간에 따라 상이합니다.
+발권수수료는 환불되지 않습니다.
+This itinerary & receipt must be presented to immigration/customs officials upon request. Accordingly, passengers are requested to keep
+this itinerary & receipt on their person throughout their entire journey. Tickets are non-transferable and the passenger name listed on the ticket must be an exact match to th
+e name in the passport.
+Order of Coupon Use: Flight coupons must be redeemed in the proper order, starting from the place of departure as indicated on the passenger coupon.
+If baggage exceeds the free baggage allowance, an excess baggage charge may be assessed according to applicable route regulations.
+Ticketing service fees are non-refundable.
+*항공권 미사용 부분에 관한 세금은 발권처를 통해 환불 요청이 가능합니다. 단, 일부 세금의 경우 국제항공운송협회(IATA) 규정에 따라 항공권 미사용 여부와 관계없이 환급 대상에서 제외될 수 있
+습니다.
+Tax refund for the unused portion of the ticket needs to be requested through the issuing office. However, according to International Air Transport Association(IATA) regulat
+ions, some taxes may be excluded from refund regardless of whether tickets are used or not.
+*안전한 해외여행을 위하여 여행 목적지의 여행경보단계 및 안전여행공지를 해외안전여행 홈페이지에서 확인하시기 바랍니다.
+For the safe travel abroad, please check the travel warning step and the safety notice of the destination on the overseas travel safety homepage.
+*국제선 이용 시, 여유있는 탑승 수속을 위하여 출발 예정시각 최소 2시간 전에는 공항에 도착하시기 바랍니다.
+For the convenient international flight check-in, please arrive at the airport at least 2 hours prior to the departure time.
+*아시아나항공의 공항 탑승수속 마감시간은 국내선의 경우 출발 30분전, 국제선은 대부분의 공항이 출발 40분전이나 일부 공항은 마감시간이 공항사정에 따라
+출발 30분전에서 60분전까지 상이하므로 홈페이지 내 공항 카운터 체크인 이용 시간을 확인하여 주시기 바랍니다.
+(예, 인천공항 50분 전 마감, 미주 공항 1시간 전 마감 등)
+Asiana airlines' check-in close time varies among airports as follows, therefore please refer to our website before your journey. Domestic Flights -30min,
+Int’l Flights mostly -40mins or -30~60mins upon airport conditions. (i.e., Incheon check-in closes 50 min, U.S. airports closes 1 hour prior to departure)
+*공동운항편의 경우 운항 항공사 규정에 따라 탑승수속 마감시간이 운영되므로, 운항항공사의 마감 시간을 확인하시기 바랍니다.
+For codeshare flights, check-in closing time follows operating carriers' rule. Please check operating carriers' closing time.
+*대한민국 항공보안법에 따라 탑승 전 여권과 탑승권을 확인하고 있으니, 탑승 시 협조하여 주시기 바랍니다.
+According to the Korean Aviation Security Laws, passport and boarding pass check must be done at the gate prior to your boarding.
+*아시아나항공 구간별 무료수하물 허용량 Asiana Airlines Free baggage allowance by Routes
+미주 구간 U.S. Routes
+비즈니스 클래스
+Business Class
+(성인, 소인 Adult, Child)
+이코노미 클래스
+Economy Class
+(성인, 소인 Adult, Child)
+유아
+(Infant)
+허용규격
+(Permitted dimensions)
+무게 : 32kg(70lbs) 이내
+Weight: not exceeding 32 kg
+(70 lbs)
+무게 : 23kg(50lbs) 이내
+Weight: not exceeding 23 kg
+(50 lbs)
+무게 : 23kg(50lbs) 이내
+Weight: not exceeding 23 kg
+(50 lbs)
+크기(삼변의 길이의 합) : 가로+세로+높이= 158cm 이내
+(손잡이와 바퀴 포함)
+Size (sum of three dimensions):Not exceeding Width + Length
++ Height =158cm(62 inch)(including handles and wheels)
+허용 개수 : 2개
+Quantity allowed: 2
+허용 개수 : 2개
+Quantity allowed: 2
+허용 개수 : 1개
+Quantity allowed: 1
+이용하시는 클래스에 상관없이 한 개의 최대 사이즈는
+158cm입니다
+Regardless of your class, the maximum size per bag is 158cm
+(62 inch)
+*소아/유아의 경우, 휴대용 유모차, 보행기, 카시트, 운반용 요람 중 1개 추가 가능
+For children/infant, you may add one of the following: portable stroller, baby walker, car seat, or bassinet.
+*비즈니스 스위트 탑승 시 비즈니스 클래스 규정 적용
+Business Class regulations apply to Business Suite.
+*사이판 등 미국령은 미주 외 구간 규정 적용
+For the U.S. territories such as Saipan, regulations for non-U.S. segments apply.
+미주 외 구간 Non-U.S. Routes
+비즈니스 클래스
+Business Class
+(성인, 소인 Adult, Child)
+이코노미 클래스
+Economy Class
+(성인, 소인 Adult, Child)
+유아
+(Infant)
+허용규격
+(Permitted dimensions)
+무게 : 32kg(70lbs) 이내
+Weight: not exceeding 32 kg
+(70 lbs)
+무게 : 23kg(50lbs) 이내
+Weight: not exceeding 23 kg
+(50 lbs)
+무게 : 10kg(22lbs) 이내
+Weight: not exceeding 10 kg
+(22 lbs)
+크기(삼변의 길이의 합) : 가로+세로+높이= 158cm 이내
+(손잡이와 바퀴 포함)
+Size (sum of three dimensions):Not exceeding Width + Length
++ Height =158cm(62 inch)(including handles and wheels)
+허용 개수 : 2개
+Quantity allowed: 2
+허용 개수 : 1개
+Quantity allowed: 1
+허용 개수 : 1개
+Quantity allowed: 1
+이용하시는 클래스에 상관없이 한 개의 최대 사이즈는
+158cm입니다
+Regardless of your class, the maximum size per bag is 158cm
+(62 inch)
+*소아/유아의 경우, 휴대용 유모차, 보행기, 카시트, 운반용 요람 중 1개 추가 가능
+For children/infant, you may add one of the following: portable stroller, baby walker, car seat, or bassinet.
+*비즈니스 스위트 탑승 시 비즈니스 클래스 규정 적용
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+2/6
+
+
+---
+
+## Page 3
+
+Business Class regulations apply to Business Suite.
+*아시아나항공 이외의 타 항공사가 운항하는 여정의 경우, 운항 항공사에서 정한 수하물 허용량이 적용됩니다.
+When travelling to routes operated by other airlines, baggage allowance may vary depending on the regulations of the relevant airline.
+*승객의 안전을 위하여 위험물인 폭발물, 압축가스, 인화성 액체 및 고체, 산화제, 독극물, 부식성 물질 및 방사성 물질(페인트 라이터용 연료, 최루가스,
+폭죽,산소통,방사성 의약품 등) 과 총기, 실탄 등은 수하물로의 기내반입이나 탑재가 금지되어있습니다. (미국 출 도착편의 경우 위반 시 미국 연방법에 따라 징역 5년과 $250,000 이상의 벌금이 부과
+될 수 있습니다.)
+For the safety of customers, dangerous goods including explosives,gases, flammable liquids and solids, oxidizing, toxic, corrosive substances
+and radioactive material (i.e., paint, lighter oil, defensive tear gas, firecracker, oxygen tank,radiopharmaceuticals) and firearms,
+ammunitions are prohibited for both carry-on and checked baggage (according to the U.S. federal rules, flights departing and arriving the U.S.,
+5 years in prison or fine over $250,000 when violation)
+*리튬배터리가 장착된 전동보드류(원휠보드, 호버보드, 미니세그웨이 등)는 용량에 관계없이 운송 불가합니다
+Small vehicles powered by lithium batteries such as solowheel, hoverboard,mini-segway are prohibited in both carry-on and checked baggage
+regardless of the watt-hour power.
+*리튬배터리 및 휴대용 대용량 보조배터리는 휴대 및 위탁 시 제한사항이 있으니 당사 홈페이지의 안내사항을 참고하여 주십시오.
+(홈페이지 서비스안내-수하물-운송제한물품)
+Please check the restriction on transporting lithium batteries and portable power banks on Asiana webpage.
+*파손되기 쉬운 물품, 부패나 변질의 우려가 있는 물품, 화폐, 보석류, 귀금속류, 유가증권, 기타 귀중품 또는 중요한 견본이나 서류, 의약품 및 전자제품
+(노트북, 카메라, 핸드폰, MP3등)은 수하물로 위탁이 불가하오니 직접 휴대하시기 바랍니다.
+Fragile or perishable items, valuables such as cash, jewelry and valuable samples, electronics (Laptop, camera, mobile phone),
+business documents and medicine are restricted for check-in baggage. please carry these items with you.
+*책임 제한을 포함한 모든 수하물 관련사항은 당사 여객운송약관을 참고하시기 바랍니다
+Please refer to our General Conditions of Carriage to be informed of our general Baggage & Liability policy.
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+3/6
+
+
+---
+
+## Page 4
+
+*2014년 6월 5일부터 스타얼라이언스 마일리지 항공권은 최초 발급일로부터 1년간 유효합니다.
+유효기간 내 환급하는 경우에는 승객 1인당 3,000 마일 공제 또는 USD 30의 환급 수수료가 부과됩니다.
+발급일로부터 1년 이후 마일리지를 환급할 경우에는 승객 1인당 10,000 마일 공제 또는 USD 100의 환급 수수료가 부과됩니다.
+(Beginning June 5th, 2014) all Star Alliance award tickets will have a refund fee of $30 or 3,000 miles per passenger valid within 1 year of the ticket issued date.
+Tickets refunded past 1 year of the ticket issued date will have a refund fee of $100 or 10,000 miles per passenger.
+*개인정보 보호정책 공지: 고객의 개인정보는 각 항공사의 개인정보정책에 의거하여 처리되며, 항공편 예약이 예약시스템 서비스 제공업체 (GDS)를 통하는 경우 해당업체의 개인정보정책을 따릅니
+다.자세한 정보는http://www.iatatravelcenter.com/privacy 혹은 해당 항공사나 서비스 제공업체를 통해 확인할 수 있습니다.
+고객의 항공편 예약과 관련하여 개인정보가 어떻게 수집, 저장 및 이용되고,(공동운항의 경우) 제휴사에 제공 및 위탁되는지에 대한 안내문을 참조하시기 바랍니다.
+Data Protection Notice: Your personal data will be processed in accordance with the applicable carrier’s privacy policy and, if your booking is made via a reservation syste
+m provider(“GDS”), with its privacy policy. These are available at http://www.iatatravelcenter.com/privacy or from the carrier or GDS directly.
+You should read this documentation,which applies to your booking and specifies, for example, how your personal datais collected, stored, used, disclosed and transferred.
+(applicable for interline carriage)
+Reservation
+Korea
+1588-8000 82-2-2669-8000(For overseas calls) flyasiana.com
+U.S.A.
+1-800-227-4262 1-800-2ASIANA flyasiana.com
+China
+400-650-8000 86-10-8451-0101(For overseas calls) flyasiana.com
+Japan
+0570-082-555 81-3-5812-6600(For overseas calls) flyasiana.com
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+4/6
+
+
+---
+
+## Page 5
+
+- 알림
+여객의 최종 목적지 또는 도중 착륙지가 출발지국 이외의 타국 내의 1개 지점일 경우, 동 여객은
+여객의 사망 또는 상해 및 수하물의 분실 또는 손상에 대한 운송인의 책임을 통상적으로 제한하
+는 '바르샤바협약', '개정바르샤바협약' 또는 '몬트리올협약'을 적용 받을 수 있습니다. 본 항공권
+에 수록된 "국제선 여객에 대한 책임 제한에 관한 고지" 및 "수하물 배상 책임한도"를 참조하시기
+바랍니다.
+스프레이류, 폭죽, 인화성 액체 등의 규정된 위험 물품은 기내 반입이 금지되어 있습니다. 자세한
+사항은 항공사로 문의하시기 바랍니다.
+- 계약 조건
+1. 본 계약에서 사용되는 용어의 정의는 다음과 같습니다. "항공권"이란 본 "여객항공권 및 수하
+물표" 또는 "전자 항공권"의 경우 적용되는 본 여정/영수표를 말하는 것으로 본 계약 조건 및 상
+기 알림은 본 항공권의 일부를 구성합니다. "운송"이란 "수송"을 말하며, "운송인"이란 여객 또는
+그의 수하물을 본 계약조건에 따라 운송하거나 또는 당해 항공 운송에 수반되는 기타 서비스를
+행하는 모든 항공 운송인을 말합니다. "전자 항공권"이란 운송인 또는 운송인을 대리한 자에 의해
+발행된 전자 서식 및 탑승 증표를 말합니다. "바르샤바협약"이란 1929년 10월 12일 "바르샤바"에
+서 체결된 "국제항공 운송에 관한 일부 규칙의 통일을 위한 협약" 또는 1955년 9월 28일 "헤이
+그"에서 개정된 바르샤바협약 중 적용되는 협약을 말합니다. "몬트리올협약"이란 1999년 5월 28
+일 몬트리올에서 개정된 "국제항공운송에 있어서의 일부 규칙 통일에 관한 협약"을 말합니다.
+2. 본 계약상의 운송이 바르샤바협약 또는 몬트리올협약에 정의된 국제선 운송일 경우, 그 운송
+은 해당 협약에서 정하고 있는 책임에 관한 규정 및 제한의 적용을 받습니다.
+3. 각 운송인이 행하는 운송 및 기타 서비스는 상기한 바에 저촉되지 않는 범위 내에서 (I) 본 항
+공권에 기재된 규정, (II) 유효한 태리프, (III) 본 계약 조건의 일부로 되어 있는 운송인의 운송약
+관 및 관련 규정 (여객이 요청할 시 운송인의 사무실에서 열람할 수 있습니다.)의 적용을 받습니
+다. 단, 미국 또는 캐나다 내의 1개 지점과 미국 및 캐나다 이외의 타국 내의 1개 지점 간의 운송에
+관하여는 미국 및 캐나다에서 유효한 태리프가 적용됩니다.
+4. 운송인의 명칭은 항공권상에 약호로 표기될 수 있으며, 정식 명칭 및 약호 명칭은 유효한 태리
+프에 기재되어 있습니다. 운송인의 주소는 항공권상에 운송인의 약호 명칭과 동일한 행에 표시된
+출발지 공항을 말합니다. 여객과 운송인 간의 합의된 도중 착륙지는 본 항공권상에 명시된 도중
+착륙지 또는 여객의 여정상에 계획된 도중 체류지로서 운송인의 운항시간표에 표시된 지점을 말
+합니다. 본 계약 조건 하에서 2개 이상의 운송인에 의하여 연속적으로 행하여지는 운송은 단일
+운송으로 간주합니다.
+5. 타 항공 운송인의 노선상의 운송을 위하여 항공권을 발행하는 항공 운송인은 단지 당해 타 항
+공 운송인의 대리인으로서 항공권을 발행하는 것입니다.
+6. 운송인의 면책 또는 책임 제한에 관한 제반 규정은 운송인의 대리인, 종업원 및 대표자, 그리고
+운송을 위해 운송인이 사용하는 항공기의 소유자, 그의 대리인, 종업원 및 대표자 모두에게 적용
+됩니다.
+7. 위탁 수하물은 수하물표 소지자에게 인도합니다. 국제선으로 운송되는 수하물에 손상이 발생
+하였을 경우에는 당해 손상 발견 즉시 또는 늦어도 수하물을 수취한 날로부터 7일 이내에 운송인
+에게 서면 또는 전자문서로 이의를 제기해야 하며, 지연 또는 분실의 경우에는 수하물을 처분할
+수 있게 된 날(지연의 경우) 또는 수하물을 처분할 수 있게 되었어야 할 날(분실의 경우)로부터 2
+1일 이내에 이의를 제기해야 합니다. 국제선 운송이 아닌 경우에는 국내선 태리프 또는 운송약관
+을 참조하시기 바랍니다.
+8. 본 항공권, 운송인의 태리프, 운송약관 또는 관련 규정에 별도로 정한 경우를 제외하고는, 본
+항공권은 발행일로부터 1년간 유효합니다. 계약 조건상의 운송을 위한 운임은 운송개시 전에 변
+경될 수 있습니다. 유효한 운임이 지불되지 않았을 경우, 운송인은 운송을 거절할 수 있습니다.
+9. 운항시간표 또는 기타에 표시된 시각은 보증된 것은 아니며, 본 계약의 일부를 구성하지 않습
+니다. 운송인은 통고 없이 운송인 또는 항공기를 타 운송인 또는 타 항공기로 대체할 수 있으며,
+또한 필요한 경우에는 항공권상에 표시된 도중 착륙지를 변경하거나 생략할 수 있습니다. 스케줄
+도 통고 없이 변경될 수 있으며 운송인은 접속운항에 대하여 책임을 지지 않습니다.
+10. 여객은 정부가 규정하고 있는 여행에 필요한 사항을 준수하여야 하며, 현행의 출입국 서류 및
+기타 필요 서류를 정확히 준비하여 운송인이 지정한 시각까지 또는 시각이 지정되지 않을 경우에
+는 출국수속을 완료할 수 있는 충분한 시간적 여유를 갖고 공항에 도착하여야 합니다.
+11. 운송인의 여하한 대리인, 종업원 또는 대표자도 본 계약의 어떠한 규정을 변경하거나 수정하
+거나 또는 포기할 권한을 가지지 않습니다.
+- 국제선 여객에 대한 책임제한에 관한 고지
+여객이 출발지국 이외의 국가 내에 최종 목적지 또는 도중 착륙지를 둔 여행을 할 경우에는 출발
+지국 또는 목적지국 내의 구간을 포함한 전체 여정에 대하여 소위 바르샤바협약 또는 개정바르샤
+바협약 또는 몬트리올협약의 규정이 적용될 수 있습니다. 이러한 여객들을 위하여, 유효한 태리
+프에 명시된 특별 운송 계약을 포함한 해당 협약은 운송인의 책임을 규정하고 제한하기도 합니
+다.
+- 수하물 배상 책임한도
+사전에 보다 높은 가격이 신고되고 그에 대한 추가요금이 지불되지 않는 한, 수하물의 분실, 지연
+또는 손상에 대한 책임한도액은 아래와 같이 제한됩니다. 국제선 여행(국제선 여행을 구성하는
+국내선 여행구간 포함) 시, 아시아나항공의 위탁 수하물에 대한 책임은 킬로그램 당 250 프랑스
+골드프랑 또는 그 상당액(미화 20불)을 한도로 하고, 기내 휴대 수하물 또는 기타 소유물의 경우
+는 여객 1인당 5,000 프랑스 골드프랑 또는 그 상당액(미화 400불)을 한도로 합니다. 다만, 몬트
+리올협약이 적용되는 운송인 경우 책임한도는 위탁 수하물과 기내 휴대 수하물에 대해 1인당 SD
+R 1,519입니다. 미국 내 지점간 여행 시에는 항공사의 수하물 배상 책임한도액은 여객 1인당 최대
+미화 3,400불입니다. 어떤 종류의 물품에 대하여는 상기 한도액을 초과하는 가격을 신고할 수도
+있습니다. 항공사는 파손 또는 부패되기 쉬운 물품이나 귀중품에 대하여 운송약관 또는 몬트리올
+협약이 정하는 범위 외의 책임을 부담하지 않습니다. 자세한 사항은 해당 항공사로 문의하시기
+바랍니다.
+- 아시아나항공의 책임한도액에 관한 특별 고지
+아시아나항공은 협약에서 정하고 있는 여객의 사망, 부상 또는 기타 신체상해에 대한 일체의 손
+해배상 청구에 대하여 SDR 100,000 이하의 부분에 대해서는 바르샤바협약 제20조 및 개정바
+르샤바협약 제22조 (1)항의 규정을 적용하지 않습니다. 또한, 몬트리올협약이 적용되는 운송의
+경우, 제17조에서 정하고 있는 여객의 사망, 부상 또는 기타 신체상해와 관련된 손해배상 청구에
+대하여 SDR 151,880 이하의 부분에 대해서 아시아나항공은 책임을 배제하거나 제한하지 못합니
+다. SDR 151,880을 초과하는 부분에 대해서는 (I) 아시아나항공의 과실, 기타 불법적 작위 또는
+부작위에 기인하지 아니하였거나, (II) 오직 제3자의 과실, 기타 불법적인 작위 또는 부작위에 기
+인하였을 경우 책임을 지지 않습니다.
+- EU 출발 비행편의 탑승불가, 취소 및 지연
+EU 국가에서 출발하는 비행 편에서 발생하는 탑승불가, 취소 및 지연에 대한 지원 및 보상금은 E
+U 법률 261/2004에 따라 제공됩니다.
+- 초과예약으로 인한 탑승불가
+항공사는 사전 예고 없이 확약된 항공편에 탑승하지 않은 여객으로 인한 영향을 최소화하고, 해
+당 항공편 탑승을 원하는 여객이 좌석을 이용할 수 있도록 하기 위하여 초과 예약을 접수할 수 있
+습니다. 항공사는 예약이 확약된 항공편의 좌석을 제공하기 위하여 최선을 다하지만, 좌석 제공
+이 절대적으로 보장되는 것은 아닙니다. 항공사의 초과 예약으로 인한 좌석 부족으로 예약이 확
+약된 항공편에 탑승하지 못한 여객에 대한 보상 규정이 일부 국가에서 시행됩니다. 미국 출발 여
+행을 위한 미국 내 판매된 항공권에 대해서는 미 연방법에서 정하고 있는 규정 및 제한의 적용을
+받습니다. 자세한 사항은 항공사에서 확인하실 수 있습니다.
+- 정부가 부과하는 세금, 수수료, 각종 비용에 대한 고지
+이 항공권의 가격에는 각국 정부가 항공운송에 부과하는 세금, 수수료 및 각종 비용이 포함되어
+있을 수 있습니다. 항공여행 경비의 상당 부분을 차지할 수 있는 이러한 세금, 수수료 및 각종 비
+용은 운임에 포함되어 있거나, 이 항공권의 "TAX/FEE/CHARGE(세금 및 제반요금)"란에 별도로
+기재되어 있습니다. 또한 여객에게 아직 부과되지 않은 세금, 수수료 및 각종 비용의 지불이 요구
+될 수도 있습니다.
+- 예약 등급에 대한 고지
+예약 등급은 항공운임에 따라 여러 종류로 구분되어 있으며, 이는 항공권상의 "예약 등급 Bookin
+g Class"란에 표기되어 있습니다. 항공권상의 예약 등급과 승객의 예약기록상의 예약등급은 일치
+하여야 합니다. 상기 예약 등급이 상이한 경우, 해당 승객의 탑승이 거절될 수도 있으며, 정해진
+차액을 징수 시에 한해 탑승이 허용될 수 있습니다.
+- NOTICE
+If the passenger's journey involves an ultimate destination or stop in a count
+ry other than the country of departure the Warsaw Convention, or the Warsa
+w Convention as amended at the Hague, 1955, or the Montreal Convention
+may be applicable and these Conventions govern and in most cases limit th
+e liability of carriers for death or personal injury and in respect of loss of or d
+amage to baggage. See also notices headed "Advice to International Passe
+ngers on Limitation of Liability" and "Notice of Baggage Liability Limitations."
+The carriage of certain hazardous materials, like aerosols, fireworks, and fla
+mmable liquids, aboard the aircraft is forbidden. If you do not understand th
+ese restrictions, further information may be obtained from your airline.
+- CONDITIONS OF CONTRACT
+1.As used in this contract "ticket" means this passenger ticket and baggage
+check, or this itinerary/receipt if applicable, in the case of an electronic ticke
+t, of which these conditions and the notices form part, "carriage" is equivale
+nt to "transportation", "carrier" means all air carriers that carry or undertake t
+o carry the passenger or his baggage hereunder or perform any other servic
+e incidental to such air carriage, "electronic ticket" means the itinerary/recei
+pt issued by or on behalf of Carrier, the Electronic Coupons and, if applicabl
+e, a boarding document. "Warsaw Convention" means the Convention for th
+e Unification of Certain Rules Relating to International Carriage by Air signe
+d at Warsaw, 12th October 1929 or that Convention as amended at The Ha
+gue, 28th September 1955, whichever may be applicable. "Montreal Conve
+- ADVICE TO INTERNATIONAL PASSENGERS ON LIMITATION OF LIAB
+ILITY
+Passengers on a journey involving an ultimate destination or a stop in a cou
+ntry other than the country of departure are advised that international treatie
+s known as the Montreal Convention, or its predecessor, the Warsaw Conve
+ntion, including its amendments (The Warsaw Convention system), may ap
+ply to the entire journey, including any portion thereof within a country. For s
+uch passengers, the applicable treaty, including special contracts of carriag
+e embodied in any applicable tariffs, governs and may limit the liability of the
+carrier.
+- NOTICE OF BAGGAGE LIABILITY LIMITATIONS
+Liability for loss, delay, or damage to baggage is limited unless a higher valu
+e is declared in advance and additional charges are paid. For international t
+ravel (including domestic portions of international journeys) the liability limit i
+s approximately US$20.00 per kilogram for checked baggage and US$400.
+00 per passenger for unchecked baggage or other property. The liability of A
+AR is limited to 1,519 SDRs for checked and unchecked baggage where th
+e Montreal Convention applies to your journey. For travel wholly between U.
+S. points, the airline's liability for loss, delay, or damage to baggage is limite
+d to a maximum of US$3,400 per ticketed passenger. Excess valuation may
+be declared on certain types of articles. Carriers' liability for fragile, perishab
+le or valuable articles is governed by the Montreal Convention or the Gener
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+5/6
+
+
+---
+
+## Page 6
+
+ntion" means the Convention for the Unification of Certain Rules for Internati
+onal Carriage by Air signed at Montreal, 28 May 1999.
+2. Carriage hereunder is subject to the rules and limitations relating to liabilit
+y established by the Warsaw Convention or the Montreal Convention unless
+such carriage is not "International carriage" as defined by that Convention.
+3. To the extent not in conflict with the foregoing carriage and other services
+performed by each carrier are subject to: (I) provisions contained in the tic
+ket; (II) applicable tariffs; (III) carrier's conditions of carriage and related reg
+ulations which are made part hereof (and are available on application at the
+offices of carrier), except in transportation between a place in the United Sta
+tes or Canada and any place outside thereof to which tariffs in force in those
+countries apply.
+4. Carrier's name may be abbreviated in the ticket, the full name and its abb
+reviation being set forth in carrier's applicable tariffs; carrier's address shall
+be the airport of departure shown opposite the first abbreviation of carrier's
+name in the ticket; the agreed stopping places are those places set forth in t
+his ticket or as shown in carrier's timetables as scheduled stopping places o
+n the passenger's route; carriage to be performed hereunder by several suc
+cessive carrier is regarded as a single operation.
+5. An air carrier issuing a ticket for carriage over the lines of another air carri
+er does so only as its agent.
+6. Any exclusion or limitation of liability of carrier shall apply to and be for th
+e benefit of agents, servants and representatives of carrier and any person
+whose aircraft is used by carrier for carriage and its agents, servants and re
+presentatives.
+7. Checked baggage will be delivered to bearer of the baggage tag. In the c
+ase of damage to baggage moving in international transportation complaint
+must be made in writing or by electronic document to carrier forthwith after t
+he discovery of the damage and, at the latest, within seven days from the d
+ate of receipt; in the case of delay or loss, complaint must be made within t
+wenty-one days from the date on which the baggage has been placed at hi
+s/her disposal (in the case of delay) or should have been placed at his/her d
+isposal (in the case of loss.) See tariffs or conditions of carriage regarding n
+on-international transportation.
+8. This ticket is good for carriage for one year from date of issue, except as
+otherwise provided in this ticket, in carrier's tariffs, conditions of carriage, or
+related regulations. The fare for carriage hereunder is subject to change pri
+or to commencement of carriage. Carrier may refuse transportation if the ap
+plicable fare has not been paid.
+9. Times shown in timetables or elsewhere are not guaranteed and form no
+part of this contract. Carrier may without notice substitute alternate carriers
+or aircraft, and may alter or omit stopping places shown on the ticket in case
+of necessity. Schedules are subject to change without notice. Carrier assum
+es no responsibility for making connections.
+10. Passenger shall comply with Government travel requirements, present e
+xit, entry and other required documents and arrive at airport by time fixed by
+carrier or, if no time is fixed, early enough to complete departure procedure
+s.
+11. No agent, servant or representative of carrier has authority to alter, modi
+fy or waive any provision of this contract.
+al Conditions of Carriage. Further information may be obtained from the carr
+ier.
+- SPECIAL NOTICE ON LIMIT OF LIABILITY
+As to any claim arising out of death of or, wounding or other bodily injury to,
+a passenger within the meaning of the Convention, AAR shall not avail itself
+of any defense under Article 20 of the Warsaw Convention, nor invoke the li
+mitation of liability in Article 22 (1) of the Warsaw Convention as amended a
+t the Hague, 1955 with respect to that portion of such claim which does not
+exceed 100,000 SDRs. In the case of carriage subject to the Montreal Conv
+ention, as to any claim arising under Article 17 of the Convention which doe
+s not exceed 151,880 SDRs, the carrier shall not be able to exclude or limit i
+ts liability. Above the 151,880 SDRs, the carrier shall not be liable if the carri
+er proves (I) it was not due to the negligence or other wrongful act or omis
+sion of the carrier, or (II) it was solely due to the negligence or other wrongf
+ul act or omission of a third party.
+- DENIDED BOARDING, CANCELLATION AND DELAY IN EU
+In case of a denied boarding, flight cancellation or flight delay departing fro
+m EU member state, we offer assistance and compensation to the concerne
+d passengers according to the Regulation EC 261/2004.
+- DENIED BOARDING BY OVERBOOKING
+In order to minimize the effect of "no shows" and to permit seats to be used
+by passengers who otherwise would not be able to travel on a chosen flight,
+carriers may overbook flights. Whilst carriers make every effort to provide se
+ats for which confirmed reservations exist, seat availability is not absolutely
+guaranteed. In those countries where Denied Boarding Compensation regul
+ations are in force, carriers operate compensation plans for passengers wh
+o are denied boarding because of non-availability of seats caused by overb
+ooking. The ticket sold in the United States for transportation originating in t
+he United States, we offer assistance and compensation to the concerned p
+assengers according to the U.S.Federal Regulation. Details of these plans a
+re available at the airlines' offices.
+- NOTICE OF GOVERNMENT IMPOSED TAXES, FEES AND CHARGES
+The price of this ticket may include taxes, fees and charges which are impo
+sed on air transportation by government authorities. These taxes, fees and
+charges, which may represent a significant portion of the cost of air travel, a
+re either included in the fare, or shown separately in the "TAX/FEE/CHARG
+E" box(es) of this ticket. You may also be required to pay taxes, fees and ch
+arges not already collected.
+- BOOKING CLASS
+There are various booking classes categorized by airfares. The booking cla
+ss printed on the ticket must be identical with the class indicated by the resp
+ective PNR(Passenger Name Record). Passenger holding ticket which fails
+to meet the above condition may be denied boarding or may board only afte
+r paying additional predetermined charge(s).
+25. 6. 29. 오후 6:32
+전자항공권 여정 안내서 (KIM/RUAH MS)
+https://flyasiana.com/I/KR/KO/ViewItineraryReceipt.do?infoData=VTqyxGybisaf21LoOCxs9VEiyx669b9E8E50I7Xhc1DJ6GqPgogBwzjvOtclI/c8tCOu2sAdmetm/...
+6/6
+
+
+---
+
