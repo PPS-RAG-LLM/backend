@@ -457,8 +457,14 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int,
         logger.exception(f"Failed to open PDF: {pdf_path}")
         return "", []  # 열리지 않는 PDF는 빈 결과 반환
     
-    # 모든 페이지 텍스트 결합
-    pdf_text = _clean_text("\n\n".join(p for p in page_texts if p))
+    # 모든 페이지 텍스트 결합 (페이지 마커 없이)
+    pdf_text = _clean_text("\n\n".join(text for _, text in page_texts if text))
+    
+    # 페이지별 텍스트 딕셔너리 생성 (메타데이터용)
+    pages_text_dict: Dict[int, str] = {}
+    for page_num, text_content in page_texts:
+        if text_content:
+            pages_text_dict[page_num] = text_content
 
     # 표 추출 결과 로깅
     if all_tables:
@@ -466,7 +472,7 @@ def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int,
     else:
         logger.info(f"[Extract] {pdf_path.name}: 추출된 표 없음")
     
-    return pdf_text, all_tables
+    return pdf_text, all_tables, pages_text_dict, total_pages
 
 
 def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
@@ -1523,7 +1529,6 @@ async def extract_pdfs():
             # 통합 파일 저장
             combined_txt_file = EXTRACTED_TEXT_DIR / txt_rel
             try:
-                
                 # 페이지별 표 그룹화
                 pages_tables: Dict[int, list[dict]] = defaultdict(list)
                 for t in (tables or []):
@@ -1579,12 +1584,6 @@ async def extract_pdfs():
                             for t in tables:
                                 table_text = t.get("text", "")
                                 if table_text:
-                                    f.write(text)
-                                    f.write("\n\n")
-                        if tables:
-                            for t_idx, t in enumerate(tables):
-                                table_text = t.get("text", "")
-                                if table_text:
                                     f.write(table_text)
                                     f.write("\n\n")
                 
@@ -1605,8 +1604,17 @@ async def extract_pdfs():
                 "doc_id": doc_id,
                 "version": version,
                 "tables": tables or [],  # ★ 표 정보 추가
+                "pages": pages_text_dict if pages_text_dict else {},  # ★ 페이지별 텍스트 정보 (메타데이터용)
+                "total_pages": total_pages,  # ★ 총 페이지 수
                 "sourceExt": _ext(src),  # 원본 확장자 기록
                 "saved_files": saved_files,  # 저장된 파일 경로 추가
+                # 페이로드 정보 (LLM에 전달하지 않지만 메타데이터로 저장)
+                "extraction_info": {
+                    "original_file": src.name,
+                    "text_length": len(text),
+                    "table_count": len(tables or []),
+                    "extracted_at": now_kst_string(),
+                },
             }
             new_meta[str(dest_rel)] = info
             logger.info(f"[Extract] {src.name}: 메타데이터 저장 완료 (텍스트={len(text)}자, 표={len(tables or [])}개)")
@@ -1772,10 +1780,11 @@ async def ingest_embeddings(
             """통합 파일을 페이지별로 분할 (페이지 구분선 "---" 기준)"""
             page_blocks: list[tuple[int, str]] = []
             lines = text.split('\n')
-            current_page = 1  
-            current_text = []
+            current_page = 1
+            current_content = []
             
             for line in lines:
+                # 페이지 구분선 확인: "---" (빈 줄로 둘러싸인 경우)
                 if line.strip() == "---":
                     # 이전 페이지 저장
                     if current_content:
@@ -2430,7 +2439,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 score_map[key_short] = (0.0, score)
             else:
                 score_map[key_short] = (score_map[key_short][0], max(score_map[key_short][1], score))
-
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
         for (path, cidx, ttype, lvl, doc_id), fused in merged:
