@@ -1,12 +1,74 @@
 from functools import lru_cache
 from pathlib import Path
-from repository.embedding_model import get_active_embedding_model_name
-from service.admin.manage_vator_DB import resolve_model_input
-from utils import logger
+from typing import List, Optional, Tuple
+
+from config import config as app_config
+from repository.embedding_model import (
+    get_active_embedding_model_name,
+    get_embedding_model_path_by_name,
+)
 from sentence_transformers import SentenceTransformer
-from config import config as _cfg
+from utils import logger
 
 logger = logger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_RETRIEVAL_PATHS = app_config.get("retrieval", {}).get("paths", {}) or {}
+_USER_DOCS_CFG = app_config.get("user_documents", {}) or {}
+
+
+def _resolve_model_root() -> Path:
+    path_value = _RETRIEVAL_PATHS.get(
+        "model_root_dir", _USER_DOCS_CFG.get("embedding_model_dir", "storage/embedding-models")
+    )
+    rel = Path(path_value)
+    base = rel if rel.is_absolute() else (PROJECT_ROOT / rel)
+    return base.resolve()
+
+
+MODEL_ROOT_DIR = _resolve_model_root()
+
+def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
+    """
+    주어진 모델 키(embedding_models.name)를 실제 로컬 디렉토리에 매핑.
+    1) DB의 model_path가 우선이며, 없을 경우 storage/embedding-models 폴더를 탐색.
+    """
+    key = (model_key or "bge").lower()
+
+    try:
+        db_path = get_embedding_model_path_by_name(model_key)
+        if db_path:
+            mp = Path(db_path).resolve()
+            if mp.exists() and mp.is_dir():
+                return str(model_key), mp
+    except Exception:
+        logger.exception("[Embedding Model] DB lookup for active model_path failed")
+
+    candidates: List[Path] = []
+    if MODEL_ROOT_DIR.exists():
+        for item in MODEL_ROOT_DIR.iterdir():
+            if item.is_dir():
+                candidates.append(item.resolve())
+
+    def aliases(path: Path) -> List[str]:
+        name = path.name.lower()
+        res = [name]
+        if name.startswith("embedding_"):
+            res.append(name[len("embedding_") :])
+        return res
+
+    for path in candidates:
+        if key in aliases(path):
+            return path.name, path
+    for path in candidates:
+        if key in path.name.lower():
+            return path.name, path
+    for path in candidates:
+        if "qwen3_0_6b" in path.name.lower():
+            return path.name, path
+
+    fallback = MODEL_ROOT_DIR / "qwen3_0_6b"
+    return fallback.name, fallback
 
 
 @lru_cache(maxsize=2)

@@ -52,8 +52,11 @@ def stream_and_persist(
         })
     # 🔥 스트리밍 시작 전에 소스 먼저 전송
     if sources:
-        yield f"__SOURCES__:{json.dumps(sources, ensure_ascii=False)}"
-    logger.debug(f"__SOURCES__: {sources}")
+        payload = json.dumps(sources, ensure_ascii=False)
+        yield f"__SOURCES__:{payload}"
+        logger.debug("__SOURCES__ (first 100 chars): %s", payload[:100])
+    else:
+        logger.debug("__SOURCES__: []")
 
     # 스트리밍 응답 생성
     for chunk in runner.stream(messages, temperature=temperature):

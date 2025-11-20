@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 from collections import defaultdict, Counter
 
-import torch
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
 
-from repository.embedding_model import get_active_embedding_model_name, get_embedding_model_path_by_name
+from config import config as app_config
+from repository.embedding_model import get_active_embedding_model_name
 from repository.rag_settings import get_vector_settings_row
 
 try:
@@ -34,7 +34,6 @@ except Exception:
     Function = None
     class FunctionType:
         BM25 = "BM25"
-from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
 
 # ORM 추가 임포트
 from utils.database import get_session
@@ -173,6 +172,10 @@ def _split_for_varchar_bytes(
 # KST 시간 포맷 유틸
 from utils.time import now_kst, now_kst_string
 
+from service.retrieval.common import get_or_load_hf_embedder, hf_embed_text, chunk_text
+from service.retrieval.reranker import rerank_snippets
+from utils.model_load import resolve_model_input
+
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------
@@ -180,43 +183,46 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
 PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
-STORAGE_DIR = PROJECT_ROOT / "storage"
-USER_DATA_ROOT = STORAGE_DIR / "user_data"
-RAW_DATA_DIR = USER_DATA_ROOT / "row_data"
-LOCAL_DATA_ROOT = USER_DATA_ROOT / "preprocessed_data"  # 유지(폴더 구조 호환)
-RESOURCE_DIR = (BASE_DIR / "resources").resolve()
-EXTRACTED_TEXT_DIR = (PROJECT_ROOT / "storage" / "extracted_texts").resolve()
-META_JSON_PATH = EXTRACTED_TEXT_DIR / "_extraction_meta.json"
-MODEL_ROOT_DIR = (PROJECT_ROOT / "storage" / "embedding-models").resolve()
-RERANK_MODEL_PATH = PROJECT_ROOT / "storage" / "rerank_model" / "Qwen3-Reranker-0.6B"
+_RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
+_RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
+_VECTOR_DEFAULTS: Dict[str, Any] = app_config.get("vector_defaults", {}) or {}
 
-SQLITE_DB_PATH = (PROJECT_ROOT / "storage" / "pps_rag.db").resolve()
 
-VAL_SESSION_ROOT = (STORAGE_DIR / "val_data").resolve()
-SESSIONS_INDEX_PATH = (VAL_SESSION_ROOT / "_sessions.json").resolve()
+def _cfg_path(key: str, fallback: str) -> Path:
+    value = _RETRIEVAL_PATHS.get(key, fallback)
+    return (PROJECT_ROOT / Path(value)).resolve()
 
-# Milvus Server 접속 정보 (환경변수로 오버라이드 가능)
-#MILVUS_URI = os.getenv("MILVUS_URI", "http://remote.biz.ppsystem.co.kr:3006")
-MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
-MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", None)  # 예: "root:Milvus" (인증 사용 시)
-COLLECTION_NAME = "pdf_chunks_pro"
 
-# 작업유형
-TASK_TYPES = ("doc_gen", "summary", "qna")
+STORAGE_DIR = _cfg_path("storage_dir", "storage")
+USER_DATA_ROOT = _cfg_path("user_data_root", "storage/user_data")
+RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/user_data/row_data")
+LOCAL_DATA_ROOT = _cfg_path("local_data_root", "storage/user_data/preprocessed_data")
+RESOURCE_DIR = _cfg_path("resources_dir", str(BASE_DIR / "resources"))
+EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
+META_JSON_PATH = _cfg_path("meta_json_path", "storage/extracted_texts/_extraction_meta.json")
+MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
+RERANK_MODEL_PATH = _cfg_path("rerank_model_path", "storage/rerank_model/Qwen3-Reranker-0.6B")
+VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
+SESSIONS_INDEX_PATH = _cfg_path("sessions_index_path", "storage/val_data/_sessions.json")
+DATABASE_CFG = app_config.get("database", {}) or {}
+SQLITE_DB_PATH = (PROJECT_ROOT / Path(DATABASE_CFG.get("path", "storage/pps_rag.db"))).resolve()
 
-# 지원 확장자
-SUPPORTED_EXTS = {".pdf", ".txt", ".text", ".md", ".docx", ".pptx", ".csv", ".xlsx", ".xls", ".doc", ".ppt", ".hwp"}
+_MILVUS_CFG = _RETRIEVAL_CFG.get("milvus", {}) or {}
+MILVUS_URI = os.getenv("MILVUS_URI", _MILVUS_CFG.get("uri", "http://localhost:19530"))
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", _MILVUS_CFG.get("token") or None)
+COLLECTION_NAME = _MILVUS_CFG.get("collection", "pdf_chunks_pro")
+TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
+SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 
-# 텍스트 정리용 정규식
-ZERO_WIDTH_RE = re.compile(r'[\u200B-\u200D\u2060\uFEFF]')
-CONTROL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')  # \t,\n은 유지
-MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
-NEWLINES_RE = re.compile(r'\n{3,}')
+ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\u2060\uFEFF]")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+MULTISPACE_LINE_END_RE = re.compile(r"[ \t]+\n")
+NEWLINES_RE = re.compile(r"\n{3,}")
 
-_CURRENT_EMBED_MODEL_KEY = "qwen3_0_6b"
-_CURRENT_SEARCH_TYPE = "hybrid"
-_CURRENT_CHUNK_SIZE = 512
-_CURRENT_OVERLAP = 64
+_CURRENT_EMBED_MODEL_KEY = str(_RETRIEVAL_CFG.get("default_embedding_key", "qwen3_0_6b"))
+_CURRENT_SEARCH_TYPE = str(_RETRIEVAL_CFG.get("search_type", "hybrid"))
+_CURRENT_CHUNK_SIZE = int(_VECTOR_DEFAULTS.get("chunk_size", 512))
+_CURRENT_OVERLAP = int(_VECTOR_DEFAULTS.get("overlap", 64))
 
 
 # -------------------------------------------------
@@ -314,9 +320,6 @@ _EMBED_ACTIVE_KEY: Optional[str] = None
 _EMBED_LOCK = threading.Lock()
 
 # === Reranker cache(singleton) ===
-_RERANK_CACHE: dict[str, tuple[any, any, any, int, int]] = {}  # key -> (tok, model, device, true_token, false_token)
-_RERANK_ACTIVE_KEY: Optional[str] = None
-_RERANK_LOCK = threading.Lock()
 
 
 def _invalidate_embedder_cache():
@@ -324,13 +327,6 @@ def _invalidate_embedder_cache():
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
         _EMBED_ACTIVE_KEY = None
-
-
-def _invalidate_reranker_cache():
-    global _RERANK_CACHE, _RERANK_ACTIVE_KEY
-    with _RERANK_LOCK:
-        _RERANK_CACHE.clear()
-        _RERANK_ACTIVE_KEY = None
 
 
 def _get_or_load_embedder(model_key: str, preload: bool = False):
@@ -347,9 +343,9 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
     with _EMBED_LOCK:
         if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
             return _EMBED_CACHE[model_key]
-        # 키가 바뀌면 캐시 전체 무효화(동시 2개 방지)
         _EMBED_CACHE.clear()
-        tok, model, device = _load_embedder(model_key)
+        _, model_dir = resolve_model_input(model_key)
+        tok, model, device = get_or_load_hf_embedder(str(model_dir))
         _EMBED_CACHE[model_key] = (tok, model, device)
         _EMBED_ACTIVE_KEY = model_key
         return _EMBED_CACHE[model_key]
@@ -397,9 +393,6 @@ def _set_active_embedding_model(name: str):
         model.is_active = 1
         model.activated_at = now_kst()
         session.commit()
-
-
-
 
 
 def _update_vector_settings(
@@ -742,56 +735,6 @@ def _determine_level_for_task(text: str, task_rules: Dict) -> int:
     return sel
 
 
-# -------------------------------------------------
-# 모델 로딩/임베딩
-# -------------------------------------------------
-# --- replace this function definition entirely ---
-def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
-    """
-    모델 키(=embedding_models.name)를 받아서 실제 로컬 디렉토리 Path를 결정한다.
-    - DB(embedding_models)에서 is_active=1 AND name=model_key 인 행의 model_path가 유효하면 그것을 최우선 사용
-    - 아니면 기존 폴더 스캔 로직(./storage/embedding-models/*)으로 fallback
-    """
-    key = (model_key or "bge").lower()
-
-    # 1) DB에서 활성 모델의 model_path 우선 사용
-    try:
-        db_path = get_embedding_model_path_by_name(model_key)
-        if db_path:
-            mp = Path(db_path).resolve()
-            if mp.exists() and mp.is_dir():
-                return str(model_key), mp
-    except Exception:
-        logger.exception("[Embedding Model] DB lookup for active model_path failed")
-
-    # 2) 기존 폴더 스캔 fallback
-    cands: List[Path] = []
-    if MODEL_ROOT_DIR.exists():
-        for p in MODEL_ROOT_DIR.iterdir():
-            if p.is_dir():
-                cands.append(p.resolve())
-
-    def aliases(p: Path) -> List[str]:
-        nm = p.name.lower()
-        res = [nm]
-        if nm.startswith("embedding_"):
-            res.append(nm[len("embedding_") :])
-        return res
-
-    for p in cands:
-        if key in aliases(p):
-            return p.name, p
-    for p in cands:
-        if key in p.name.lower():
-            return p.name, p
-    # fallback: qwen3_0_6b
-    for p in cands:
-        if "qwen3_0_6b" in p.name.lower():
-            return p.name, p
-    fb = MODEL_ROOT_DIR / "qwen3_0_6b"
-    return fb.name, fb
-
-
 # --- add: test 컬렉션 전용 보조 함수 ---
 def _ensure_collection_and_index_for(
     client: MilvusClient,
@@ -877,66 +820,6 @@ def _ensure_collection_and_index_for(
         pass
     client.load_collection(collection_name=collection_name)
     logger.info(f"[Milvus] 로드 완료: {collection_name}")
-
-
-def _load_embedder(model_key: Optional[str]) -> Tuple[any, any, any]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _, model_dir = resolve_model_input(model_key)
-    need_files = [
-        model_dir / "tokenizer_config.json",
-        model_dir / "tokenizer.json",
-        model_dir / "config.json",
-    ]
-
-    # 모델 파일 누락 빠른 실패
-    missing_files = [f for f in need_files if not f.exists()]
-    if missing_files:
-        logger.error(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-        logger.error(
-            f"[Embedding Model] 누락된 파일들: {[str(f) for f in missing_files]}"
-        )
-        raise FileNotFoundError(f"[Embedding Model] 필수 파일 누락: {model_dir}")
-
-    logger.info(f"[Embedding Model] 모델 로딩 시작: {model_key} from {model_dir}")
-    tok = AutoTokenizer.from_pretrained(
-        str(model_dir), trust_remote_code=True, local_files_only=True
-    )
-    model = (
-        AutoModel.from_pretrained(
-            str(model_dir),
-            trust_remote_code=True,
-            local_files_only=True,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        )
-        .to(device)
-        .eval()
-    )
-    logger.info(f"[Embedding Model] 모델 로딩 완료: {model_key}")
-    return tok, model, device
-
-
-def _mean_pooling(outputs, mask):
-    token_embeddings = outputs.last_hidden_state
-    mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    summed = torch.sum(token_embeddings * mask_expanded, dim=1)
-    counts = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-    return summed / counts
-
-
-def _embed_text(tok, model, device, text: str, max_len: int = 512):
-    inputs = tok(
-        text,
-        truncation=True,
-        padding="longest",
-        max_length=max_len,
-        return_tensors="pt",
-    ).to(device)
-    with torch.no_grad():
-        outs = model(**inputs)
-    vec = (
-        _mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
-    )
-    return vec
 
 
 # -------------------------------------------------
@@ -1075,7 +958,7 @@ async def ingest_embeddings(
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
     
     # 벡터 차원 검증
-    probe_vec = _embed_text(tok, model, device, "probe")
+    probe_vec = hf_embed_text(tok, model, device, "probe")
     emb_dim = int(probe_vec.shape[0])
     logger.info(f"[Ingest] 임베딩 모델: {eff_model_key}, 벡터 차원: {emb_dim}")
     
@@ -1103,20 +986,6 @@ async def ingest_embeddings(
                 pass
     
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=collection_name)
-
-    # ==== 유틸 ====
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP) -> list[str]:
-        words = text.split()
-        chunks: list[str] = []
-        start = 0
-        step = max(1, max_tokens - overlap)
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += step
-        return chunks
 
     # ==== META 로드 및 대상 필터 구성 ====
     meta: dict = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
@@ -1258,7 +1127,7 @@ async def ingest_embeddings(
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
 
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     
                     # 벡터 차원 검증
                     if len(vec) != emb_dim:
@@ -1364,25 +1233,13 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
     # 인제스트
     settings = get_vector_settings()
-    tok, model, device = _load_embedder(settings["embeddingModel"])
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    tok, model, device = await _get_or_load_embedder_async(settings["embeddingModel"])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=COLLECTION_NAME)
 
     s = get_vector_settings()
     MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     # 기존 삭제
     try:
@@ -1391,7 +1248,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         pass
 
     tasks = req.task_types or list(TASK_TYPES)
-    chunks = chunk_text(text_all)
+    chunks = chunk_text(text_all, max_tokens=MAX_TOKENS, overlap=OVERLAP)
     batch, cnt = [], 0
 
     for task in tasks:
@@ -1402,7 +1259,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for part in _split_for_varchar_bytes(c):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -1432,7 +1289,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -1518,25 +1375,13 @@ async def ingest_specific_files_with_levels(
     settings = get_vector_settings()
     eff_model_key = settings["embeddingModel"]
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     coll = collection_name or COLLECTION_NAME
     client = _client()
     _ensure_collection_and_index(client, emb_dim, metric="IP", collection_name=coll)
 
     MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     processed, total = [], 0
     for src in saved:
@@ -1571,7 +1416,7 @@ async def ingest_specific_files_with_levels(
                 pass
 
             # 본문
-            chunks = chunk_text(text)
+            chunks = chunk_text(text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
             batch, cnt = [], 0
             for t in tasks_eff:
                 lvl = int(sec_map.get(t, 1))
@@ -1580,7 +1425,7 @@ async def ingest_specific_files_with_levels(
                     for part in _split_for_varchar_bytes(c):
                         if len(part.encode("utf-8")) > 32768:
                             part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                         batch.append({
                             "embedding": vec.tolist(),
                             "path": str(rel_txt.as_posix()),
@@ -1606,7 +1451,7 @@ async def ingest_specific_files_with_levels(
                     for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                         if len(part.encode("utf-8")) > 32768:
                             part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                         batch.append({
                             "embedding": vec.tolist(),
                             "path": str(rel_txt.as_posix()),
@@ -1691,7 +1536,7 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = _embed_text(tok, model, device, req.query)
+    q_emb = hf_embed_text(tok, model, device, req.query)
     client = _client()
     _ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP")
 
@@ -1734,21 +1579,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
         except Exception as e:
             logger.warning(f"[Milvus] sparse search unavailable: {e}")
             return [[]]
-
-    # def _load_snippet(
-    #     path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
-    # ) -> str:
-    #     try:
-    #         full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
-    #     except Exception:
-    #         return ""
-    #     words = full_txt.split()
-    #     if not words:
-    #         return ""
-    #     start = cidx * (max_tokens - overlap)
-    #     # 보존: 추출 시와 동일 슬라이딩 윈도우는 아니지만 근사 스니펫 제공
-    #     snippet = " ".join(words[start : start + max_tokens]).strip()
-    #     return snippet or " ".join(words[:max_tokens]).strip()
 
     def _load_snippet(
         path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
@@ -1914,100 +1744,45 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     if hits_raw:
         logger.info(f"📊 [Search] 첫 번째 후보: doc_id={hits_raw[0].get('doc_id')}, path={hits_raw[0].get('path')}")
 
-    # 리랭크 적용
-    logger.info(f"🔍 [Rerank] 리랭크 적용 체크: hits_raw 길이={len(hits_raw)}, search_type={search_type}")
-    if hits_raw:
-        logger.info(f"🎯 [Rerank] 리랭크 시작! 검색된 후보: {len(hits_raw)}개")
-        logger.info(f"🎯 [Rerank] 첫 번째 후보 점수: vec={hits_raw[0].get('score_vec', 0):.4f}, sparse={hits_raw[0].get('score_sparse', 0):.4f}, fused={hits_raw[0].get('score_fused', 0):.4f}")
-        try:
-            # 리랭크 모델 로딩
-            logger.info(f"🚀 [Rerank] 리랭크 모델 로딩 요청...")
-            rerank_result = await _get_or_load_reranker_async()
-            logger.info(f"📋 [Rerank] 리랭크 모델 로딩 결과: {rerank_result is not None}")
-            
-            # 리랭크 모델이 없거나 로딩 실패 시 기존 점수 사용
-            if rerank_result is None:
-                logger.info("[Rerank] 리랭크 모델이 없으므로 기존 점수를 사용합니다.")
-                # 폴백: 기존 점수 계산 로직
-                if search_type == "bm25":
-                    for h in hits_raw:
-                        h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-                elif search_type == "hybrid":
-                    if any("score_fused" in h for h in hits_raw):
-                        for h in hits_raw:
-                            h["score"] = h.get("score_fused", 0.0)
-                    else:
-                        for h in hits_raw:
-                            h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
-                else:  # vector
-                    for h in hits_raw:
-                        h["score"] = h.get("score_vec", 0.0)
-            else:
-                rerank_tokenizer, rerank_model, rerank_device, token_true_id, token_false_id = rerank_result
-                logger.info(f"🔄 [Rerank] 리랭크 모델 활성화! 후보 {len(hits_raw)}개를 재평가합니다.")
-                
-                # 리랭크용 입력 준비
-                instruction = 'Given a web search query, retrieve relevant passages that answer the query'
-                pairs = []
-                for h in hits_raw:
-                    snippet = h.get("snippet", "")
-                    formatted_input = _format_instruction_for_rerank(instruction, req.query, snippet)
-                    pairs.append(formatted_input)
-            
-                # 배치 단위로 리랭크 점수 계산 (메모리 효율성)
-                batch_size = 16
-                rerank_scores = []
-                
-                for i in range(0, len(pairs), batch_size):
-                    batch_pairs = pairs[i:i + batch_size]
-                    try:
-                        batch_scores = _compute_rerank_scores(
-                            rerank_tokenizer, rerank_model, rerank_device, 
-                            token_true_id, token_false_id, batch_pairs
-                        )
-                        rerank_scores.extend(batch_scores)
-                    except Exception as e:
-                        logger.warning(f"[Rerank] 배치 처리 실패: {e}")
-                        # 폴백: 기존 점수 사용
-                        fallback_scores = []
-                        for j in range(len(batch_pairs)):
-                            h_idx = i + j
-                            if h_idx < len(hits_raw):
-                                h = hits_raw[h_idx]
-                                fallback_score = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
-                                fallback_scores.append(float(fallback_score) * 0.5)  # 낮은 점수로 패널티
-                        rerank_scores.extend(fallback_scores)
-                
-                # 리랭크 점수 적용
-                for i, h in enumerate(hits_raw):
-                    if i < len(rerank_scores):
-                        h["score"] = float(rerank_scores[i])
-                    else:
-                        # 예외적인 경우: 기존 점수 사용
-                        h["score"] = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
-            
-        except Exception as e:
-            logger.exception(f"[Rerank] 리랭크 처리 실패, 기존 점수 사용: {e}")
-            # 폴백: 기존 점수 계산 로직
-            if search_type == "bm25":
-                for h in hits_raw:
-                    h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-            elif search_type == "hybrid":
-                if any("score_fused" in h for h in hits_raw):
-                    for h in hits_raw:
-                        h["score"] = h.get("score_fused", 0.0)
-                else:
-                    for h in hits_raw:
-                        h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
-            else:  # vector
-                for h in hits_raw:
-                    h["score"] = h.get("score_vec", 0.0)
+    rerank_candidates = []
+    for hit in hits_raw:
+        snippet = hit.get("snippet", "")
+        if not snippet:
+            continue
+        rerank_candidates.append(
+            {
+                "text": snippet,
+                "score": float(hit.get("score_fused", hit.get("score_vec", hit.get("score_sparse", 0.0)) or 0.0)),
+                "doc_id": hit.get("doc_id"),
+                "title": hit.get("doc_id") or hit.get("path") or "snippet",
+                "source": "milvus",
+                "metadata": hit,
+            }
+        )
+
+    if rerank_candidates:
+        reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
+        hits_sorted = []
+        for res in reranked:
+            original = res.metadata or {}
+            hits_sorted.append(
+                {
+                    "score": float(res.score),
+                    "path": original.get("path"),
+                    "chunk_idx": int(original.get("chunk_idx", 0)),
+                    "task_type": original.get("task_type"),
+                    "security_level": int(original.get("security_level", 1)),
+                    "doc_id": original.get("doc_id"),
+                    "page": int(original.get("page", 0)),
+                    "snippet": res.text,
+                }
+            )
     else:
-        # hits_raw가 비어있는 경우
-        pass
-    
-    # 리랭크 점수 기준 정렬 및 상위 결과 선택
-    hits_sorted = sorted(hits_raw, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
+        hits_sorted = sorted(
+            hits_raw,
+            key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
+            reverse=True,
+        )[:final_results]
 
     # 리랭크 결과 로그 출력
     if hits_sorted:
@@ -2042,139 +1817,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     }
 
 
-def _load_reranker() -> Tuple[any, any, any, int, int]:
-    """리랭크 모델 로딩"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_path = RERANK_MODEL_PATH
-    
-    # 모델 파일 존재 확인 (실제 Qwen3-Reranker에 존재하는 파일들)
-    need_files = [
-        model_path / "config.json",
-        model_path / "tokenizer.json",  # tokenizer_config.json 대신 tokenizer.json
-    ]
-    missing_files = [f for f in need_files if not f.exists()]
-    if missing_files:
-        logger.error(f"[Reranker Model] 필수 파일 누락: {model_path}")
-        logger.error(f"[Reranker Model] 누락된 파일들: {[str(f) for f in missing_files]}")
-        raise FileNotFoundError(f"[Reranker Model] 필수 파일 누락: {model_path}")
-
-    logger.info(f"[Reranker Model] 모델 로딩 시작: {model_path}")
-    
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(model_path), 
-            trust_remote_code=True, 
-            local_files_only=True,
-            padding_side='left'
-        )
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            str(model_path),
-            trust_remote_code=True,
-            local_files_only=True,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        ).to(device).eval()
-        
-        # yes/no 토큰 ID 확보
-        token_false_id = tokenizer.convert_tokens_to_ids("no")
-        token_true_id = tokenizer.convert_tokens_to_ids("yes")
-        
-        logger.info(f"[Reranker Model] 모델 로딩 완료: {model_path}")
-        return tokenizer, model, device, token_true_id, token_false_id
-        
-    except Exception as e:
-        logger.exception(f"[Reranker Model] 로딩 실패: {e}")
-        raise
-
-
-def _get_or_load_reranker():
-    """전역 캐시에서 리랭크 모델 반환"""
-    global _RERANK_CACHE, _RERANK_ACTIVE_KEY
-    
-    rerank_key = "qwen3_reranker_0.6b"
-    
-    with _RERANK_LOCK:
-        if _RERANK_ACTIVE_KEY == rerank_key and rerank_key in _RERANK_CACHE:
-            logger.info(f"🔄 [Reranker] 캐시에서 리랭크 모델 로드: {rerank_key}")
-            return _RERANK_CACHE[rerank_key]
-        
-        # 리랭크 모델 경로 확인
-        logger.info(f"🔍 [Reranker] 모델 경로 확인: {RERANK_MODEL_PATH}")
-        if not RERANK_MODEL_PATH.exists():
-            logger.warning(f"❌ [Reranker] 모델 경로가 없습니다: {RERANK_MODEL_PATH}")
-            logger.info(f"[Reranker] 리랭크를 건너뛰고 기존 점수를 사용합니다. 리랭크를 원한다면 스크립트를 실행하세요: scripts/download_qwen3_reranker.py")
-            return None
-            
-        try:
-            logger.info(f"📥 [Reranker] 리랭크 모델 로딩 시작...")
-            # 캐시 전체 무효화
-            _RERANK_CACHE.clear()
-            tokenizer, model, device, token_true_id, token_false_id = _load_reranker()
-            _RERANK_CACHE[rerank_key] = (tokenizer, model, device, token_true_id, token_false_id)
-            _RERANK_ACTIVE_KEY = rerank_key
-            logger.info(f"✅ [Reranker] 리랭크 모델 로딩 완료: {rerank_key}")
-            return _RERANK_CACHE[rerank_key]
-        except Exception as e:
-            logger.exception(f"❌ [Reranker] 모델 로딩 실패: {e}")
-            logger.info(f"[Reranker] 리랭크를 건너뛰고 기존 점수를 사용합니다.")
-            return None
-
-
-async def _get_or_load_reranker_async():
-    """비동기 래퍼: blocking 함수(_get_or_load_reranker)를 스레드풀에서 실행"""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _get_or_load_reranker)
-
-
-def _format_instruction_for_rerank(instruction: str, query: str, doc: str) -> str:
-    """리랭크 모델용 입력 포맷팅"""
-    if instruction is None:
-        instruction = 'Given a web search query, retrieve relevant passages that answer the query'
-    output = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
-        instruction=instruction, query=query, doc=doc
-    )
-    return output
-
-
-@torch.no_grad()
-def _compute_rerank_scores(tokenizer, model, device, token_true_id, token_false_id, pairs: List[str]) -> List[float]:
-    """리랭크 점수 계산 """
-    if not pairs:
-        return []
-        
-    print(f"🔄 [Rerank-Compute] 점수 계산 시작: {len(pairs)}개 쌍")
-        
-    max_length = 8192
-    prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
-    suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    
-    prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
-    suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
-    
-    # 입력 처리 (허깅페이스 예시와 동일)
-    inputs = tokenizer(
-        pairs, padding=False, truncation='longest_first',
-        return_attention_mask=False, max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
-    )
-    
-    for i, ele in enumerate(inputs['input_ids']):
-        inputs['input_ids'][i] = prefix_tokens + ele + suffix_tokens
-    
-    inputs = tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
-    for key in inputs:
-        inputs[key] = inputs[key].to(model.device)  # 허깅페이스 예시: model.device 사용
-    
-    # 점수 계산 (허깅페이스 예시와 동일)
-    batch_scores = model(**inputs).logits[:, -1, :]
-    true_vector = batch_scores[:, token_true_id]
-    false_vector = batch_scores[:, token_false_id]
-    batch_scores = torch.stack([false_vector, true_vector], dim=1)
-    batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
-    scores = batch_scores[:, 1].exp().tolist()  # .cpu() 제거 (허깅페이스 예시에 없음)
-    
-    print(f"✅ [Rerank-Compute] 점수 계산 완료: 평균 점수={sum(scores)/len(scores):.4f}")
-    
-    return scores
 
 
 async def execute_search(
@@ -2227,7 +1869,6 @@ async def execute_search(
 async def delete_db():
     # 모델 캐시 클리어
     _invalidate_embedder_cache()
-    _invalidate_reranker_cache()
 
     client = _client()
     cols = client.list_collections()
@@ -2504,25 +2145,13 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     settings = get_vector_settings()
     eff_model_key = settings["embeddingModel"]
     tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    emb_dim = int(_embed_text(tok, model, device, "probe").shape[0])
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     client = _client()
     coll = meta.get("collection") or _session_collection_name(sid)
     _ensure_collection_and_index_for(client, collection_name=coll, emb_dim=emb_dim, metric="IP")
 
     MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
-    def chunk_text(text: str, max_tokens: int = MAX_TOKENS, overlap: int = OVERLAP):
-        words = text.split()
-        chunks: List[str] = []
-        start = 0
-        while start < len(words):
-            end = min(start + max_tokens, len(words))
-            chunk = " ".join(words[start:end]).strip()
-            if chunk:
-                chunks.append(chunk)
-            start += max_tokens - overlap
-        return chunks
 
     all_rules = get_security_level_rules_all()
     sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
@@ -2561,7 +2190,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         except Exception:
             pass
 
-        chunks = chunk_text(file_text)
+        chunks = chunk_text(file_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
         batch: List[Dict] = []
 
         for t in tasks:
@@ -2572,7 +2201,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                 for part in _split_for_varchar_bytes(c):
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
@@ -2602,7 +2231,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                 for sub_j, part in enumerate(_split_for_varchar_bytes(table_text)):
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = _embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
@@ -2650,7 +2279,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = _embed_text(tok, model, device, req.query)
+    q_emb = hf_embed_text(tok, model, device, req.query)
 
     client = _client()
     coll = meta.get("collection") or _session_collection_name(sid)
@@ -2796,95 +2425,44 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
                 "score_vec": float(s_vec), "score_sparse": float(s_spa), "score_fused": float(fused), "snippet": snippet
             })
 
-    # 리랭크 적용 (테스트 세션)
-    if hits_raw:
-        try:
-            # 리랭크 모델 로딩
-            rerank_result = await _get_or_load_reranker_async()
-            
-            # 리랭크 모델이 없거나 로딩 실패 시 기존 점수 사용
-            if rerank_result is None:
-                logger.info("[Rerank-Test] 리랭크 모델이 없으므로 기존 점수를 사용합니다.")
-                # 폴백: 기존 점수 계산 로직
-                if search_type == "bm25":
-                    for h in hits_raw:
-                        h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-                elif search_type == "hybrid":
-                    if any("score_fused" in h for h in hits_raw):
-                        for h in hits_raw:
-                            h["score"] = h.get("score_fused", 0.0)
-                    else:
-                        for h in hits_raw:
-                            h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
-                else:  # vector
-                    for h in hits_raw:
-                        h["score"] = h.get("score_vec", 0.0)
-            else:
-                rerank_tokenizer, rerank_model, rerank_device, token_true_id, token_false_id = rerank_result
-                logger.info(f"🔄 [Rerank-Test] 리랭크 모델 활성화! 후보 {len(hits_raw)}개를 재평가합니다.")
-                
-                # 리랭크용 입력 준비
-                instruction = 'Given a web search query, retrieve relevant passages that answer the query'
-                pairs = []
-                for h in hits_raw:
-                    snippet = h.get("snippet", "")
-                    formatted_input = _format_instruction_for_rerank(instruction, req.query, snippet)
-                    pairs.append(formatted_input)
-            
-                # 배치 단위로 리랭크 점수 계산 (메모리 효율성)
-                batch_size = 16
-                rerank_scores = []
-                
-                for i in range(0, len(pairs), batch_size):
-                    batch_pairs = pairs[i:i + batch_size]
-                    try:
-                        batch_scores = _compute_rerank_scores(
-                            rerank_tokenizer, rerank_model, rerank_device, 
-                            token_true_id, token_false_id, batch_pairs
-                        )
-                        rerank_scores.extend(batch_scores)
-                    except Exception as e:
-                        logger.warning(f"[Rerank-Test] 배치 처리 실패: {e}")
-                        # 폴백: 기존 점수 사용
-                        fallback_scores = []
-                        for j in range(len(batch_pairs)):
-                            h_idx = i + j
-                            if h_idx < len(hits_raw):
-                                h = hits_raw[h_idx]
-                                fallback_score = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
-                                fallback_scores.append(float(fallback_score) * 0.5)  # 낮은 점수로 패널티
-                        rerank_scores.extend(fallback_scores)
-                
-                # 리랭크 점수 적용
-                for i, h in enumerate(hits_raw):
-                    if i < len(rerank_scores):
-                        h["score"] = float(rerank_scores[i])
-                    else:
-                        # 예외적인 경우: 기존 점수 사용
-                        h["score"] = h.get("score_fused", h.get("score_vec", h.get("score_sparse", 0.0)))
-            
-        except Exception as e:
-            logger.exception(f"[Rerank-Test] 리랭크 처리 실패, 기존 점수 사용: {e}")
-            # 폴백: 기존 점수 계산 로직
-            if search_type == "bm25":
-                for h in hits_raw:
-                    h["score"] = h.get("score_sparse", 0.0) or h.get("score_vec", 0.0)
-            elif search_type == "hybrid":
-                if any("score_fused" in h for h in hits_raw):
-                    for h in hits_raw:
-                        h["score"] = h.get("score_fused", 0.0)
-                else:
-                    for h in hits_raw:
-                        h["score"] = 0.5 * h.get("score_vec", 0.0) + 0.5 * h.get("score_sparse", 0.0)
-            else:  # vector
-                for h in hits_raw:
-                    h["score"] = h.get("score_vec", 0.0)
-    else:
-        # hits_raw가 비어있는 경우
-        pass
+    rerank_candidates = []
+    for hit in hits_raw:
+        snippet = hit.get("snippet", "")
+        if not snippet:
+            continue
+        rerank_candidates.append(
+            {
+                "text": snippet,
+                "score": float(hit.get("score_fused", hit.get("score_vec", hit.get("score_sparse", 0.0)) or 0.0)),
+                "doc_id": hit.get("doc_id"),
+                "title": hit.get("doc_id") or hit.get("path") or "snippet",
+                "source": "milvus",
+                "metadata": hit,
+            }
+        )
 
-    # 리랭크 점수 기준 정렬 및 상위 결과 선택
-    hits_sorted = sorted(hits_raw, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
+    if rerank_candidates:
+        reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
+        hits_sorted = []
+        for res in reranked:
+            original = res.metadata or {}
+            hits_sorted.append(
+                {
+                    "score": float(res.score),
+                    "path": original.get("path"),
+                    "chunk_idx": int(original.get("chunk_idx", 0)),
+                    "task_type": original.get("task_type"),
+                    "security_level": int(original.get("security_level", 1)),
+                    "doc_id": original.get("doc_id"),
+                    "snippet": res.text,
+                }
+            )
+    else:
+        hits_sorted = sorted(
+            hits_raw,
+            key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
+            reverse=True,
+        )[:final_results]
 
     # 리랭크 결과 로그 출력 (테스트 세션)
     if hits_sorted:

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Body, Path, Query
 from pydantic import BaseModel
 from typing import List, Optional
-from service.commons.doc_gen_templates import (
+from service.prompt_template.doc_gen_templates import (
     list_doc_gen_templates,
     get_doc_gen_template,
     list_doc_gen_templates_all,

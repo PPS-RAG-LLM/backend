@@ -57,3 +57,40 @@ user_documents:
   doc_info_dir: storage/documents/documents-info
   vector_cache_dir: storage/documents/vector-cache
   embedding_model_dir: storage/embedding-models
+
+retrieval:
+  default_embedding_key: "qwen3_0_6b"
+  search_type: "hybrid"
+  paths:
+    storage_dir: storage
+    user_data_root: storage/user_data
+    raw_data_dir: storage/user_data/row_data
+    local_data_root: storage/user_data/preprocessed_data
+    resources_dir: service/admin/resources
+    extracted_text_dir: storage/extracted_texts
+    meta_json_path: storage/extracted_texts/_extraction_meta.json
+    model_root_dir: storage/embedding-models
+    rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
+    val_session_root: storage/val_data
+    sessions_index_path: storage/val_data/_sessions.json
+  milvus:
+    uri: "http://localhost:19530"
+    token: ""
+    collection: "pdf_chunks_pro"
+  task_types:
+    - doc_gen
+    - summary
+    - qna
+  supported_extensions:
+    - ".pdf"
+    - ".txt"
+    - ".text"
+    - ".md"
+    - ".docx"
+    - ".pptx"
+    - ".csv"
+    - ".xlsx"
+    - ".xls"
+    - ".doc"
+    - ".ppt"
+    - ".hwp"

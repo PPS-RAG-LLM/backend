@@ -441,43 +441,6 @@ class EventLog(Base):
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
 
-
-class DocumentSyncQueue(Base):
-    __tablename__ = "document_sync_queues"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_doc_id = Column(
-        Integer,
-        ForeignKey("workspace_documents.id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    stale_after_ms = Column(Integer, nullable=False, server_default=text("604800000"))
-    next_synced_at = Column(DateTime, nullable=False)
-    created_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-    last_synced_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-
-
-class DocumentSyncExecution(Base):
-    __tablename__ = "document_sync_executions"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    queue_id = Column(
-        Integer,
-        ForeignKey("document_sync_queues.id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=False,
-    )
-    status = Column(Text, nullable=False, server_default=text("'unknown'"))
-    result = Column(Text)
-    created_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-
-
 class PromptHistory(Base):
     __tablename__ = "prompt_history"
 
