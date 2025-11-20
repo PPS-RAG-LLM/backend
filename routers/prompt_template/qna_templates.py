@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Path, Body
 from pydantic import BaseModel
 from typing import List, Optional
-from service.commons.qna_templates import (
+from service.prompt_template.qna_templates import (
     list_qna_templates_all, generate_new_qna_prompt, update_qna_template, delete_qna_template
 )
 router = APIRouter(tags=["QA"], prefix="/v1/qna")

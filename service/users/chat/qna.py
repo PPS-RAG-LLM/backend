@@ -1,87 +1,25 @@
 """QA 카테고리 스트리밍 로직"""
-from typing import Dict, Any, Generator, List
+from typing import Any, Dict, Generator, List
+
 from errors import BadRequestError
-from utils import logger
+from repository.embedding_model import get_active_embedding_model_name
 from repository.workspace_chat import get_chat_history_by_thread_id
+from utils import logger
+from service.retrieval.unified import (
+    DEFAULT_SOURCES,
+    extract_doc_ids_from_attachments,
+    unified_search,
+)
+from service.retrieval.adapters.base import RetrievalResult
 from .common import (
-    preflight_stream_chat_for_workspace,
     build_user_message_with_context,
+    preflight_stream_chat_for_workspace,
     resolve_runner,
     stream_and_persist,
 )
-from .retrieval import (
-    retrieve_contexts_local,
-    extract_doc_ids_from_attachments,
-)
-from service.admin.manage_vator_DB import execute_search, get_vector_settings # milvusDB 검색 함수
-from repository.documents import list_doc_ids_by_workspace
 import json
-import asyncio
 
 logger = logger(__name__)
-
-def _fetch_milvus_snippets(
-    question        : str, # 질문
-    security_level  : int, # 보안레벨
-    ws              : Dict[str, Any], # 워크스페이스
-    top_k           : int, # 상위 K개
-    ) -> List[Dict[str, Any]]:
-    try:
-        settings = get_vector_settings() 
-    except Exception as exc:
-        logger.warning(f"[Milvus] 설정 조회 실패: {exc}")
-        return []
-    model_key = settings.get("embeddingModel")
-    if not model_key:
-        logger.info("[Milvus] 활성화된 임베딩 모델이 없어 글로벌 검색을 건너뜁니다.")
-        return []
-    search_type = ws.get("vector_search_mode") # workspace내에 미리 저장된 검색 타입 사용
-    logger.debug(f"모델 키 model_key: {model_key}\n검색 타입 search_type: {search_type}\n보안 레벨 security_level: {security_level}")
-    
-    try:
-        result = _run_execute_search(
-            question        = question,
-            # top_k=max(top_k, 5),
-            rerank_top_n    = min(top_k, 2), # WORKSPACE TOP-K
-            security_level  = security_level, # USER
-            task_type       = "qna", # 작업 유형
-            model_key       = model_key, # 모델 키
-            search_type     = search_type, # 검색 타입
-        )
-        logger.debug(f"\n###########################\nresult: {result}\n")
-    except Exception as exc:
-        logger.exception(f"[Milvus] 검색 실패: {exc}")
-        return []
-
-    snippets: List[Dict[str, Any]] = []
-
-    for hit in result.get("hits", []):
-        snippet_text = str(hit.get("snippet") or "").strip()
-        if not snippet_text:
-            continue
-        snippets.append(
-            {
-                "title" : hit.get("doc_id") or hit.get("path") or "Milvus",
-                "score" : float(hit.get("score", 0.0)),
-                "doc_id": hit.get("doc_id"),
-                "text"  : snippet_text,
-                "source": "milvus",
-            }
-        )
-        if len(snippets) >= top_k:
-            break
-    return snippets
-
-
-def _run_execute_search(**kwargs):
-    try:
-        return asyncio.run(execute_search(**kwargs))
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(execute_search(**kwargs))
-        finally:
-            loop.close()
 
 def _insert_rag_context(
     security_level: int, # 보안레벨
@@ -93,46 +31,54 @@ def _insert_rag_context(
     Returns:
         (snippets, temp_doc_ids)
     """
+    top_k = int(ws.get("top_n") or 4)
+    threshold = float(ws.get("similarity_threshold") or 0.0)
+    attachments = body.get("attachments")
+    temp_doc_ids = extract_doc_ids_from_attachments(attachments)
+
     try:
-        candidate_doc_ids = []
-        # 후보 문서: 워크스페이스 전역 + 첨부 임시 문서 + Milvus DB 검색
-        # ---------------------------------- 워크스페이스 전역 문서 ----------------------------------
-        try:
-            if ws.get("id"):
-                ws_docs = list_doc_ids_by_workspace(ws["id"]) or []
-                logger.info(f"\n## 워크스페이스 문서 목록: \n{ws_docs}\n")
-                candidate_doc_ids.extend([str(d["doc_id"]) if isinstance(d, dict) else str(d) for d in ws_docs])
-        except Exception:
-            pass
-        # ---------------------------------- 첨부 임시 문서 ----------------------------------
-        temp_doc_ids = extract_doc_ids_from_attachments(body.get("attachments"))
-        logger.info(f"\n## Temporary document list from attachments: \n{temp_doc_ids}\n")
+        model_key = get_active_embedding_model_name()
+    except Exception as exc:  # pragma: no cover - 안전장치
+        logger.warning("활성 임베딩 모델 조회 실패: %s", exc)
+        model_key = None
 
-        candidate_doc_ids.extend(temp_doc_ids)      # 첨부에서 온 임시 문서를 Retrieval 추가
-        candidate_doc_ids = list(dict.fromkeys(candidate_doc_ids)) # 중복 제거
-        logger.info(f"\n## Candidate document list: \n{candidate_doc_ids}\n")
+    sources_config = _resolve_rag_sources(ws.get("rag_sources"))
+    logger.info("[RAG] resolved sources=%s", sources_config)
 
-        snippets = []
-        if candidate_doc_ids:
-            top_k = int(ws.get("top_n") or 4)
-            thr = float(ws.get("similarity_threshold") or 0.0)
-            snippets = retrieve_contexts_local(body["message"], candidate_doc_ids, top_k=top_k, threshold=thr)
-            logger.info(f"\n## Searched SNIPPETS from temporary documents: {len(snippets)}개\n")
-        else:
-            logger.info(f"\n## No documents found in workspace and attachments - Skipping RAG\n")
-        #  ---------------------------------- Milvus DB 검색 ----------------------------------
-        top_k = int(ws.get("top_n") or 4)
-        milvus_snippets = _fetch_milvus_snippets(body["message"], security_level, ws, top_k)
-        if milvus_snippets:
-            logger.debug(f"\n## Milvus 글로벌 스니펫: {len(milvus_snippets)}개\n## Searched SNIPPETS from Milvus DB: \n{milvus_snippets[100:]}...\n")
-            snippets.extend(milvus_snippets)
-        else:
-            logger.info("\n## No snippets found from Milvus DB\n")
+    config = {
+        "workspace_id": ws.get("id"),
+        "attachments": attachments,
+        "security_level": security_level,
+        "top_k": top_k+10,
+        "threshold": threshold,
+        "sources": sources_config,
+        "enable_rerank": bool(ws.get("enable_rerank", True)),
+        "rerank_top_n": top_k,
+        "task_type": "qna",
+        "search_type": ws.get("vector_search_mode"),
+        "model_key": model_key,
+    }
 
+    try:
+        results = unified_search(body["message"], config)
+        snippets = [_result_to_legacy_dict(res) for res in results]
         return snippets, temp_doc_ids
-    except Exception as e:
-        logger.error(f"RAG context build failed: {e}")
-        return [], []
+    except Exception as exc:  # pragma: no cover - 로깅
+        logger.error("RAG context build failed: %s", exc)
+        return [], temp_doc_ids
+
+
+def _result_to_legacy_dict(result: RetrievalResult) -> Dict[str, Any]:
+    """기존 dict 기반 컨텍스트 포맷으로 변환."""
+    logger.debug(f"\n\nRESULT: \n\n{result}\n\n")
+    return {
+        "title": result.title,
+        "score": result.score,
+        "doc_id": result.doc_id,
+        "text": result.text,
+        "source": result.source,
+        "page": result.page,
+    }
 
 
 def stream_chat_for_qna(
@@ -193,7 +139,7 @@ def stream_chat_for_qna(
 
     if rag_flag:
         snippets, temp_doc_ids = _insert_rag_context(security_level, ws, body) # 보안레벨, 워크스페이스, 정보 전달
-        logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets[100:]}...\n")
+        # logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets[:100]}...\n")
     else:
         logger.info("RAG disabled for this request; skipping context retrieval.")
 
@@ -218,4 +164,31 @@ def stream_chat_for_qna(
         temp_doc_ids, 
         thread_id
     )
+
+def _resolve_rag_sources(raw_sources: Any) -> tuple:
+    """워크스페이스 설정에서 RAG 소스 배열을 안전하게 파싱."""
+    if not raw_sources:
+        return DEFAULT_SOURCES
+
+    parsed: List[str] = []
+
+    if isinstance(raw_sources, str):
+        try:
+            loaded = json.loads(raw_sources)
+        except json.JSONDecodeError:
+            loaded = raw_sources
+        if isinstance(loaded, (list, tuple, set)):
+            parsed = [str(s).strip().lower() for s in loaded if str(s).strip()]
+        elif isinstance(loaded, str):
+            parsed = [loaded.strip().lower()]
+    elif isinstance(raw_sources, (list, tuple, set)):
+        parsed = [str(s).strip().lower() for s in raw_sources if str(s).strip()]
+    else:
+        return DEFAULT_SOURCES
+
+    normalized = []
+    for src in parsed:
+        if src in DEFAULT_SOURCES and src not in normalized:
+            normalized.append(src)
+    return tuple(normalized or DEFAULT_SOURCES)
 

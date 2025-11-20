@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, HTTPException, Path
 from pydantic import BaseModel
 from typing import List
-from service.commons.summary_templates import (
+from service.prompt_template.summary_templates import (
     generate_summary_template,
     list_summary_templates,
     list_summary_templates_all,
