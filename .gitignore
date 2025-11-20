@@ -225,7 +225,9 @@ cython_debug/
 *.msg
 *.pages
 *.rtf
-*.txt
+# *.txt
+*.hwp
+*.pptx
 *.wpd
 *.wps
 
