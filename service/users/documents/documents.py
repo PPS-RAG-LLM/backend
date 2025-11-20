@@ -277,7 +277,7 @@ async def upload_document(
                 },
             }
         )
-    logger.debug(f"vec_items: {vec_items}")
+    # logger.debug(f"vec_items: {vec_items}")
     vec_cache_name = make_safe_filename(filename, doc_id, "json")
     vec_cache_path = VEC_CACHE_DIR / vec_cache_name
     vec_cache_path.parent.mkdir(parents=True, exist_ok=True)  # 안전하게 보장
