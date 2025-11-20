@@ -23,7 +23,6 @@ from service.admin.manage_vator_DB import (
     upsert_security_level_for_task,
     get_security_level_rules_for_task,
     # 파이프라인
-    extract_pdfs,
     ingest_embeddings,
     ingest_single_pdf,
     execute_search,
@@ -37,6 +36,7 @@ from service.admin.manage_vator_DB import (
     # 파일 저장
     save_raw_file,
 )
+from service.preprocessing.rag_preprocessing import extract_documents
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -246,7 +246,7 @@ async def upload_raw_file(files: List[UploadFile] = File(...)):
 @router.post("/admin/vector/extract",summary="3. [전처리 부분] row_data의 다양한 문서를 텍스트/표로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
 async def rag_extract_endpoint(request: Request):
     request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
-    return await extract_pdfs()
+    return await extract_documents()
 
 
 @router.post("/admin/vector/upload-all",summary="4. (설정된 청크/오버랩으로) 모든 작업유형 인제스트")
@@ -451,7 +451,7 @@ async def override_levels_upload_form(
         saved_names.append(f.filename)
 
     # 2) 새 파일만 포함되도록 추출(전체 재추출이긴 하지만 META에 신규 포함)
-    await extract_pdfs()
+    await extract_documents()
 
     # 3) task 목록
     tlist = None

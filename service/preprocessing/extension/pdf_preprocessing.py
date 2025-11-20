@@ -27,7 +27,7 @@ from service.admin.manage_vator_DB import (
     _determine_level_for_task,
     _parse_doc_version,
     get_security_level_rules_all,
-    _extract_any,  # PDF가 아닌 파일 처리용
+    # _extract_any는 rag_preprocessing에서 import
 )
 
 logger = logging.getLogger(__name__)
@@ -368,6 +368,8 @@ async def extract_pdfs():
             if _ext(src) == ".pdf":
                 text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(src)
             else:
+                # PDF가 아닌 파일은 rag_preprocessing의 _extract_any 사용
+                from service.preprocessing.rag_preprocessing import _extract_any
                 text, tables = _extract_any(src)
             
             # 표 추출 결과 로깅
