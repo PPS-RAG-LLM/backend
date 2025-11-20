@@ -43,8 +43,8 @@ def _doc_dirs() -> Tuple[Path, Path]:
     if _DOC_INFO_DIR is not None and _VECTOR_CACHE_DIR is not None:
         return _DOC_INFO_DIR, _VECTOR_CACHE_DIR
     doc_cfg = app_config.get("user_documents", {}) or {}
-    _DOC_INFO_DIR = _resolve_path(doc_cfg.get("doc_info_dir"))
-    _VECTOR_CACHE_DIR = _resolve_path(doc_cfg.get("vector_cache_dir"))
+    _DOC_INFO_DIR = _resolve_path(doc_cfg.get("doc_info_dir"), "storage/documents/documents-info")
+    _VECTOR_CACHE_DIR = _resolve_path(doc_cfg.get("vector_cache_dir"), "storage/documents/vector-cache")
     return _DOC_INFO_DIR, _VECTOR_CACHE_DIR
 
 

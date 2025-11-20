@@ -25,7 +25,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         query: 사용자 질문
         config: 검색 설정 (workspace_id, attachments, security_level 등)
     """
-    logger.info(f"🔍 [UnifiedSearch] config: {config}")
+    LOGGER.info(f"🔍 [UnifiedSearch] config: {config}")
 
     top_k = int(config.get("top_k"))
     threshold = float(config.get("threshold") or 0.0)
