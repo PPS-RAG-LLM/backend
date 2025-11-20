@@ -55,8 +55,8 @@ class MilvusAdapter(BaseRetrievalAdapter):
         response = _run_execute_search(
             question=query,
             top_k=10,
-            rerank_top_n=rerank_top_n or top_k,
-            security_level=int(security_level),
+            rerank_top_n=rerank_top_n or top_k, # TODO : 사용자 부분 리랭킹 중복사용 제거 (속도최적화)
+            security_level=int(security_level), 
             source_filter=source_filter,
             task_type=task_type,
             model_key=model_key,

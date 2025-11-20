@@ -51,6 +51,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
             query,
             top_k,
             workspace_id=int(config["workspace_id"]),
+            # search_type=config.get("search_type"),
+            # model_key=config.get("model_key"),
             threshold=threshold,
         )
         LOGGER.info("[UnifiedSearch] workspace hits=%s", len(workspace_hits))
@@ -66,6 +68,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
                 query,
                 top_k,
                 doc_ids=attachment_doc_ids,
+                # search_type=config.get("search_type"),
+                # model_key=config.get("model_key"),
                 threshold=threshold,
             )
             LOGGER.info(

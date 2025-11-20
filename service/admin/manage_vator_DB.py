@@ -4,21 +4,21 @@
 # - 벡터/하이브리드 검색 지원, 실행 로그 적재
 
 from __future__ import annotations
-import uuid
-import json
-import os
-import time
-import logging
-import re
-import unicodedata
 
-# sqlite3 제거
+import asyncio
+import json
+import logging
+import os
+import re
 import shutil
 import threading
-import asyncio
+import time
+import unicodedata
+import uuid
+from collections import defaultdict
+from functools import partial
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Any
-from collections import defaultdict, Counter
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient, DataType
@@ -173,6 +173,15 @@ def _split_for_varchar_bytes(
 from utils.time import now_kst, now_kst_string
 
 from service.retrieval.common import get_or_load_hf_embedder, hf_embed_text, chunk_text
+from service.retrieval.pipeline import (
+    DEFAULT_OUTPUT_FIELDS,
+    build_dense_hits,
+    # build_rrf_hits,
+    build_rerank_payload,
+    load_snippet_from_store,
+    run_dense_search,
+    run_hybrid_search,
+)
 from service.retrieval.reranker import rerank_snippets
 from utils.model_load import resolve_model_input
 
@@ -2211,34 +2220,6 @@ async def ingest_specific_files_with_levels(
         "inserted_chunks": int(total),
     }
 
-# -------------------------------------------------
-# 3) 검색 (vector / hybrid)
-#   - task_type 필터 + security_level 제한
-#   - hybrid: 벡터 topK*α 후보에 대해 간이 BM25 후처리 리랭크
-# -------------------------------------------------
-def _bm25_like_score(query: str, doc: str, k1: float = 1.2, b: float = 0.75) -> float:
-    # 후보군 소규모 리랭크용 간단 BM25 대용(문서 집합이 작을 때만)
-    # 토크나이징 매우 단순화(공백 기준)
-    q_terms = [w for w in query.lower().split() if w]
-    d_terms = [w for w in doc.lower().split() if w]
-    if not q_terms or not d_terms:
-        return 0.0
-    d_len = len(d_terms)
-    tf = Counter(d_terms)
-    # IDF는 후보 집합 크기를 사용하기 어려워 고정치에 완화 가중
-    score = 0.0
-    avgdl = max(1.0, d_len)  # 후보 단일 문서 기준
-    for t in set(q_terms):
-        f = tf.get(t, 0)
-        if f == 0:
-            continue
-        # 완화 IDF(상수): log(1 + 1/freq) 대신 상수 1.5 사용(경험적)
-        idf = 1.5
-        denom = f + k1 * (1 - b + b * (d_len / avgdl))
-        score += idf * ((f * (k1 + 1)) / (denom if denom != 0 else 1))
-    return float(score)
-
-
 async def search_documents(req: RAGSearchRequest, search_type_override: Optional[str] = None,
                            collection_name: str = COLLECTION_NAME, rerank_top_n: Optional[int] = None) -> Dict:
     t0 = time.perf_counter()
@@ -2268,217 +2249,48 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
     final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
     candidate = max(embedding_candidates, final_results * 2)  # 충분한 후보 확보
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-
-    def _dense_search(limit=candidate):
-        return client.search(
-            collection_name=COLLECTION_NAME,
-            data=[q_emb.tolist()],
-            anns_field="embedding",
-            limit=int(limit),
-            search_params={"metric_type": "IP", "params": {}},
-            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page"],
-            filter=filter_expr,
-        )
-
-    def _sparse_search(query_text: str, limit=candidate):
-        """
-        BM25 Function(text->text_sparse)이 붙어 있으면 서버가 스파스 점수를 계산한다.
-        최신 pymilvus에서는 anns_field='text_sparse', data=['쿼리 문자열'] 형태를 지원.
-        일부 버전에서 미지원이면 예외 발생 → 폴백으로 빈 결과 반환.
-        """
-        try:
-            return client.search(
-                collection_name=COLLECTION_NAME,
-                data=[query_text],
-                anns_field="text_sparse",
-                limit=int(limit),
-                search_params={"params": {}},
-                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page"],
-                filter=filter_expr,
-            )
-        except Exception as e:
-            logger.warning(f"[Milvus] sparse search unavailable: {e}")
-            return [[]]
-
-    def _load_snippet(
-        path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
-    ) -> str:
-        file_path = EXTRACTED_TEXT_DIR / path
-
-        logger.debug(f"\n###########################\nfile_path: {file_path}")
-        try:
-            full_txt = file_path.read_text(encoding="utf-8")
-        except Exception as exc:
-            logger.warning(f"[Milvus] snippet 파일 로드 실패: {file_path} ({exc})")
-            full_txt = ""
-        if not full_txt:
-            # 필요하면 ent_text로부터 넘어온 값이나 최소 안내 문구 반환
-            return ""
-
-        words = full_txt.split()
-        if not words:
-            return ""
-
-        window = max_tokens - overlap
-        if window <= 0:
-            window = max_tokens
-
-        start = max(0, cidx * window)
-        snippet = " ".join(words[start:start + max_tokens]).strip()
-        if snippet:
-            return snippet
-
-        # fallback: 청크 범위가 벗어나면 처음 구간이라도 리턴
-        return " ".join(words[:max_tokens]).strip()
+    snippet_loader = partial(
+        load_snippet_from_store,
+        EXTRACTED_TEXT_DIR,
+        max_tokens=512,
+        overlap=64,
+    )
 
     # === 분기: 검색 방식 ===
-    hits_raw = []
-    TABLE_MARK = "[[TABLE"
-    
     if search_type == "vector":
-        results = _dense_search(limit=candidate)
-        for hit in results[0]:
-            if isinstance(hit, dict):
-                ent = hit.get("entity", {})
-                ent_text = ent.get("text")  # ★ 추가
-                path = ent.get("path")
-                cidx = int(ent.get("chunk_idx", 0))
-                ttype = ent.get("task_type")
-                lvl = int(ent.get("security_level", 1))
-                doc_id = ent.get("doc_id")
-                page = int(ent.get("page", 0))  # 페이지 정보 추출
-                score_vec = float(hit.get("distance", 0.0))
-            else:
-                ent = hit.entity
-                ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
-                path = hit.entity.get("path")
-                cidx = int(hit.entity.get("chunk_idx", 0))
-                ttype = hit.entity.get("task_type")
-                lvl = int(hit.entity.get("security_level", 1))
-                doc_id = hit.entity.get("doc_id")
-                page = int(hit.entity.get("page", 0))  # 페이지 정보 추출
-                score_vec = float(hit.score)
-            
-            # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
-            else:
-                snippet = _load_snippet(path, cidx)
-                
-            hits_raw.append({
-                "path": path, "chunk_idx": cidx, "task_type": ttype,
-                "security_level": lvl, "doc_id": doc_id, "page": page,
-                "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet
-            })
+        res_dense = run_dense_search(
+            client,
+            collection_name=COLLECTION_NAME,
+            query_vector=q_emb.tolist(),
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+        hits_raw = build_dense_hits(res_dense, snippet_loader=snippet_loader)
     else:
-        # hybrid / bm25: 덴스 + 스파스 각각 검색
-        res_dense = _dense_search(limit=candidate)
-        res_sparse = _sparse_search(req.query, limit=candidate)
-
-        def _collect(res, is_dense: bool):
-            out = []
-            for hit in (res[0] if res and len(res) > 0 else []):
-                if isinstance(hit, dict):
-                    ent = hit.get("entity", {})
-                    ent_text = ent.get("text")  # ★ 추가
-                    path = ent.get("path")
-                    cidx = int(ent.get("chunk_idx", 0))
-                    ttype = ent.get("task_type")
-                    lvl = int(ent.get("security_level", 1))
-                    doc_id = ent.get("doc_id")
-                    page = int(ent.get("page", 0))  # 페이지 정보 추출
-                    score = float(hit.get("distance", 0.0))
-                else:
-                    ent = hit.entity
-                    ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
-                    path = hit.entity.get("path")
-                    cidx = int(hit.entity.get("chunk_idx", 0))
-                    ttype = hit.entity.get("task_type")
-                    lvl = int(hit.entity.get("security_level", 1))
-                    doc_id = hit.entity.get("doc_id")
-                    page = int(hit.entity.get("page", 0))  # 페이지 정보 추출
-                    score = float(hit.score)
-                out.append(((path, cidx, ttype, lvl, doc_id, page, ent_text), score))  # ★ page, ent_text 추가
-            return out
-
-        dense_list = _collect(res_dense, True)
-        sparse_list = _collect(res_sparse, False)
-
-        # RRF 결합 폴백
-        # key_short는 (path, cidx, ttype, lvl, doc_id)로 설정하여 같은 청크는 하나만 나타나도록 함
-        # 페이지 정보는 별도로 저장하여 페이로드에 포함
-        rrf: dict[tuple, float] = {}
-        text_map: dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
-        page_map: dict[tuple, int] = {}  # ★ 페이지 매핑 추가
-        score_map: dict[tuple, tuple[float, float]] = {}  # (score_vec, score_sparse) 저장
-        K = 60.0
-        for rank, (key, score) in enumerate(dense_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
-            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 6:  # ent_text가 있으면 저장
-                text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장 (첫 번째로 발견된 페이지 사용)
-                if key_short not in page_map:
-                    page_map[key_short] = key[5]
-            # 점수 저장 (dense) - 최대값 유지
-            if key_short not in score_map:
-                score_map[key_short] = (score, 0.0)
-            else:
-                score_map[key_short] = (max(score_map[key_short][0], score), score_map[key_short][1])
-        
-        for rank, (key, score) in enumerate(sparse_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id) - page 제외
-            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 6:  # ent_text가 있으면 저장
-                text_map[key_short] = key[6]
-            if len(key) > 5:  # page가 있으면 저장 (아직 없으면 저장)
-                if key_short not in page_map:
-                    page_map[key_short] = key[5]
-            # 점수 저장 (sparse) - 최대값 유지
-            if key_short not in score_map:
-                score_map[key_short] = (0.0, score)
-            else:
-                score_map[key_short] = (score_map[key_short][0], max(score_map[key_short][1], score))
-
-        merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
-        for (path, cidx, ttype, lvl, doc_id), fused in merged:
-            # 스니펫 결정 로직
-            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
-            else:
-                snippet = _load_snippet(path, cidx)
-            
-            page_num = page_map.get((path, cidx, ttype, lvl, doc_id), 0)
-            s_vec, s_spa = score_map.get((path, cidx, ttype, lvl, doc_id), (0.0, 0.0))
-            hits_raw.append({
-                "path": path, "chunk_idx": cidx, "task_type": ttype,
-                "security_level": lvl, "doc_id": doc_id, "page": int(page_num),
-                "score_vec": float(s_vec), "score_sparse": float(s_spa),
-                "score_fused": float(fused),
-                "snippet": snippet
-            })
+        res_hybrid = run_hybrid_search(
+            client,
+            collection_name=COLLECTION_NAME,
+            query_vector=q_emb.tolist(),
+            query_text=req.query,
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+        hits_raw = build_dense_hits(res_hybrid, snippet_loader=snippet_loader)
+        # hits_raw = build_rrf_hits(
+        #     res_dense,
+        #     res_sparse,
+        #     snippet_loader=snippet_loader,
+        #     limit=candidate,
+        # )
 
     # 검색 결과 상태 로그
     logger.info(f"📊 [Search] 벡터/BM25 검색 완료: 후보 {len(hits_raw)}개 발견")
     if hits_raw:
         logger.info(f"📊 [Search] 첫 번째 후보: doc_id={hits_raw[0].get('doc_id')}, path={hits_raw[0].get('path')}")
 
-    rerank_candidates = []
-    for hit in hits_raw:
-        snippet = hit.get("snippet", "")
-        if not snippet:
-            continue
-        rerank_candidates.append(
-            {
-                "text": snippet,
-                "score": float(hit.get("score_fused", hit.get("score_vec", hit.get("score_sparse", 0.0)) or 0.0)),
-                "doc_id": hit.get("doc_id"),
-                "title": hit.get("doc_id") or hit.get("path") or "snippet",
-                "source": "milvus",
-                "metadata": hit,
-            }
-        )
+    rerank_candidates = build_rerank_payload(hits_raw)
 
     if rerank_candidates:
         reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
@@ -3007,157 +2819,45 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
 
     embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
     final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
-    candidate = max(embedding_candidates, final_results * 2)  # 충분한 후보 확보
+    candidate = max(embedding_candidates, final_results * 2)
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
+    snippet_loader = partial(
+        load_snippet_from_store,
+        EXTRACTED_TEXT_DIR,
+        max_tokens=int(settings["chunkSize"]),
+        overlap=int(settings["overlap"]),
+    )
+    output_fields = ("path", "chunk_idx", "task_type", "security_level", "doc_id", "text")
 
-    def _dense_search(limit=candidate):
-        return client.search(
-            collection_name=coll,
-            data=[q_emb.tolist()],
-            anns_field="embedding",
-            limit=int(limit),
-            search_params={"metric_type": "IP", "params": {}},
-            output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
-            filter=filter_expr,
-        )
-
-    def _sparse_search(query_text: str, limit=candidate):
-        try:
-            return client.search(
-                collection_name=coll,
-                data=[query_text],
-                anns_field="text_sparse",
-                limit=int(limit),
-                search_params={"params": {}},
-                output_fields=["path", "chunk_idx", "task_type", "security_level", "doc_id", "text"],
-                filter=filter_expr,
-            )
-        except Exception as e:
-            logger.warning(f"[Milvus] sparse search unavailable(test): {e}")
-            return [[]]
-
-    def _load_snippet_for_session(path: str, cidx: int, max_tokens: int = settings["chunkSize"], overlap: int = settings["overlap"]) -> str:
-        # path는 EXTRACTED_TEXT_DIR 기준 상대경로("__sessions__/sid/...")로 저장되어 있음
-        try:
-            full_txt = (EXTRACTED_TEXT_DIR / path).read_text(encoding="utf-8")
-        except Exception:
-            return ""
-        words = full_txt.split()
-        if not words:
-            return ""
-        start = cidx * (max_tokens - overlap)
-        snippet = " ".join(words[start : start + max_tokens]).strip()
-        return snippet or " ".join(words[:max_tokens]).strip()
-
-    hits_raw = []
-    TABLE_MARK = "[[TABLE"
-    
     if search_type == "vector":
-        res = _dense_search(limit=candidate)
-        for hit in res[0]:
-            if isinstance(hit, dict):
-                ent = hit.get("entity", {})
-                ent_text = ent.get("text")  # ★ 추가
-                path = ent.get("path")
-                cidx = int(ent.get("chunk_idx", 0))
-                ttype = ent.get("task_type")
-                lvl = int(ent.get("security_level", 1))
-                doc_id = ent.get("doc_id")
-                score_vec = float(hit.get("distance", 0.0))
-            else:
-                ent = hit.entity
-                ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
-                path = hit.entity.get("path")
-                cidx = int(hit.entity.get("chunk_idx", 0))
-                ttype = hit.entity.get("task_type")
-                lvl = int(hit.entity.get("security_level", 1))
-                doc_id = hit.entity.get("doc_id")
-                score_vec = float(hit.score)
-            
-            # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
-            else:
-                snippet = _load_snippet_for_session(path, cidx)
-                
-            hits_raw.append({
-                "path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl,
-                "doc_id": doc_id, "score_vec": score_vec, "score_sparse": 0.0, "snippet": snippet
-            })
-    else:
-        res_dense = _dense_search(limit=candidate)
-        res_sparse = _sparse_search(req.query, limit=candidate)
-
-        def _collect(res):
-            out = []
-            for hit in (res[0] if res and len(res) > 0 else []):
-                if isinstance(hit, dict):
-                    ent = hit.get("entity", {})
-                    ent_text = ent.get("text")  # ★ 추가
-                    path = ent.get("path")
-                    cidx = int(ent.get("chunk_idx", 0))
-                    ttype = ent.get("task_type")
-                    lvl = int(ent.get("security_level", 1))
-                    doc_id = ent.get("doc_id")
-                    score = float(hit.get("distance", 0.0))
-                else:
-                    ent = hit.entity
-                    ent_text = getattr(ent, "get", lambda _k: None)("text") if hasattr(ent, "get") else None
-                    path = hit.entity.get("path")
-                    cidx = int(hit.entity.get("chunk_idx", 0))
-                    ttype = hit.entity.get("task_type")
-                    lvl = int(hit.entity.get("security_level", 1))
-                    doc_id = hit.entity.get("doc_id")
-                    score = float(hit.score)
-                out.append(((path, cidx, ttype, lvl, doc_id, ent_text), score))  # ★ ent_text 추가
-            return out
-
-        dense_list = _collect(res_dense)
-        sparse_list = _collect(res_sparse)
-        rrf: Dict[tuple, float] = {}
-        text_map: Dict[tuple, str] = {}  # ★ 텍스트 매핑 추가
-        K = 60.0
-        for rank, (key, _s) in enumerate(dense_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
-            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 5:  # ent_text가 있으면 저장
-                text_map[key_short] = key[5]
-        for rank, (key, _s) in enumerate(sparse_list, start=1):
-            key_short = key[:5]  # (path, cidx, ttype, lvl, doc_id)
-            rrf[key_short] = rrf.get(key_short, 0.0) + 1.0 / (K + rank)
-            if len(key) > 5:  # ent_text가 있으면 저장
-                text_map[key_short] = key[5]
-        merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
-        for (path, cidx, ttype, lvl, doc_id), fused in merged:
-            # 스니펫 결정 로직
-            ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
-            else:
-                snippet = _load_snippet_for_session(path, cidx)
-            
-            s_vec = next((s for (k, s) in dense_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
-            s_spa = next((s for (k, s) in sparse_list if k[:5] == (path, cidx, ttype, lvl, doc_id)), 0.0)
-            hits_raw.append({
-                "path": path, "chunk_idx": cidx, "task_type": ttype, "security_level": lvl, "doc_id": doc_id,
-                "score_vec": float(s_vec), "score_sparse": float(s_spa), "score_fused": float(fused), "snippet": snippet
-            })
-
-    rerank_candidates = []
-    for hit in hits_raw:
-        snippet = hit.get("snippet", "")
-        if not snippet:
-            continue
-        rerank_candidates.append(
-            {
-                "text": snippet,
-                "score": float(hit.get("score_fused", hit.get("score_vec", hit.get("score_sparse", 0.0)) or 0.0)),
-                "doc_id": hit.get("doc_id"),
-                "title": hit.get("doc_id") or hit.get("path") or "snippet",
-                "source": "milvus",
-                "metadata": hit,
-            }
+        res_dense = run_dense_search(
+            client,
+            collection_name=coll,
+            query_vector=q_emb.tolist(),
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
         )
+        hits_raw = build_dense_hits(res_dense, snippet_loader=snippet_loader)
+    else:
+        res_hybrid = run_hybrid_search(
+            client,
+            collection_name=coll,
+            query_vector=q_emb.tolist(),
+            query_text=req.query,
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
+        )
+        hits_raw = build_dense_hits(res_hybrid, snippet_loader=snippet_loader)
+    #     hits_raw = build_rrf_hits(
+    #         res_dense,
+    #         res_sparse,
+    #         snippet_loader=snippet_loader,
+    #         limit=candidate,
+    #     )
+
+    rerank_candidates = build_rerank_payload(hits_raw)
 
     if rerank_candidates:
         reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
