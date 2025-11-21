@@ -16,161 +16,21 @@ def _ext(p: Path) -> str:
 
 
 def _clean_text(s: str | None) -> str:
-    """텍스트 정규화 (pdf_preprocessing에서 import)"""
-    from service.preprocessing.extension.pdf_preprocessing import _clean_text as _clean_text_pdf
-    return _clean_text_pdf(s)
-
-
-def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
-    """TXT/MD 파일 추출"""
-    try:
-        text = fp.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        text = fp.read_text(errors="ignore")
-    return _clean_text(text), []
-
-
-def _extract_docx(fp: Path) -> tuple[str, list[dict]]:
-    """DOCX 파일 추출"""
-    try:
-        from docx import Document
-    except Exception:
-        logger.warning(f"python-docx not available, treating {fp} as plain text")
-        return _extract_plain_text(fp)
-    
-    try:
-        d = Document(str(fp))
-        paras = [_clean_text(p.text) for p in d.paragraphs if _clean_text(p.text)]
-        tables = []
-        for tb in d.tables:
-            rows = []
-            for r in tb.rows:
-                rows.append([_clean_text(c.text) for c in r.cells])
-            if rows:
-                md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
-                tables.append({"page": 0, "bbox": [], "text": md})
-        return _clean_text("\n\n".join(paras)), tables
-    except Exception as e:
-        logger.exception(f"Failed to extract DOCX {fp}: {e}")
-        return _extract_plain_text(fp)
-
-
-def _extract_pptx(fp: Path) -> tuple[str, list[dict]]:
-    """PPTX 파일 추출"""
-    try:
-        from pptx import Presentation
-    except Exception:
-        logger.warning(f"python-pptx not available, skipping {fp}")
-        return "", []
-    
-    try:
-        prs = Presentation(str(fp))
-        texts = []
-        tables = []
-        for i, slide in enumerate(prs.slides, start=1):
-            for sh in slide.shapes:
-                if hasattr(sh, "has_text_frame") and sh.has_text_frame:
-                    txt = "\n".join(p.text for p in sh.text_frame.paragraphs if p.text)
-                    txt = _clean_text(txt)
-                    if txt:
-                        texts.append(txt)
-                if hasattr(sh, "has_table") and sh.has_table:
-                    rows = []
-                    for r in sh.table.rows:
-                        rows.append([_clean_text(c.text) for c in r.cells])
-                    if rows:
-                        md = "\n".join("| " + " | ".join(row) + " |" for row in rows)
-                        tables.append({"page": i, "bbox": [], "text": md})
-        return _clean_text("\n\n".join(texts)), tables
-    except Exception as e:
-        logger.exception(f"Failed to extract PPTX {fp}: {e}")
-        return "", []
-
-
-def _df_to_markdown(df, max_rows=500) -> str:
-    """DataFrame을 마크다운 테이블로 변환"""
-    if len(df) > max_rows:
-        df = df.head(max_rows)
-    cols = [str(c) for c in df.columns]
-    lines = ["| " + " | ".join(cols) + " |"]
-    for _, row in df.iterrows():
-        lines.append("| " + " | ".join(_clean_text(str(v)) for v in row.tolist()) + " |")
-    return "\n".join(lines)
-
-
-def _extract_csv(fp: Path) -> tuple[str, list[dict]]:
-    """CSV 파일 추출"""
-    try:
-        import pandas as pd
-        df = pd.read_csv(fp)
-        md = _df_to_markdown(df)
-        return "", [{"page": 0, "bbox": [], "text": md}]
-    except Exception as e:
-        logger.warning(f"Failed to extract CSV {fp}: {e}, trying as plain text")
-        return _extract_plain_text(fp)
-
-
-def _extract_excel(fp: Path) -> tuple[str, list[dict]]:
-    """Excel 파일 추출"""
-    try:
-        import pandas as pd
-        xls = pd.ExcelFile(fp)
-        tables = []
-        for name in xls.sheet_names:
-            df = xls.parse(name)
-            md = f"### {name}\n" + _df_to_markdown(df)
-            tables.append({"page": 0, "bbox": [], "text": md})
-        return "", tables
-    except Exception as e:
-        logger.warning(f"Failed to extract Excel {fp}: {e}")
-        return "", []
-
-
-def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
-    """LibreOffice를 통한 문서 변환"""
-    try:
-        import subprocess
-        outdir = src.parent
-        subprocess.run([
-            "libreoffice", "--headless", "--convert-to", target_ext, 
-            "--outdir", str(outdir), str(src)
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        cand = src.with_suffix("." + target_ext)
-        return cand if cand.exists() else None
-    except Exception:
-        return None
-
-
-def _extract_doc(fp: Path) -> tuple[str, list[dict]]:
-    """DOC 파일 추출 (LibreOffice 변환 시도)"""
-    conv = _convert_via_libreoffice(fp, "docx")
-    if conv and conv.exists():
-        result = _extract_docx(conv)
-        try:
-            conv.unlink()  # 임시 변환 파일 삭제
-        except Exception:
-            pass
-        return result
-    return _extract_plain_text(fp)
-
-
-def _extract_ppt(fp: Path) -> tuple[str, list[dict]]:
-    """PPT 파일 추출 (LibreOffice 변환 시도)"""
-    conv = _convert_via_libreoffice(fp, "pptx")
-    if conv and conv.exists():
-        result = _extract_pptx(conv)
-        try:
-            conv.unlink()  # 임시 변환 파일 삭제
-        except Exception:
-            pass
-        return result
-    return "", []
+    """텍스트 정규화 (공통 유틸리티에서 import)"""
+    from service.preprocessing.extension.utils import _clean_text as _clean_text_util
+    return _clean_text_util(s)
 
 
 def _extract_any(path: Path) -> tuple[str, list[dict]]:
     """통합 문서 추출 라우터"""
     from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-    from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
+    # from service.preprocessing.extension.txt_preprocessing import _extract_plain_text
+    from service.preprocessing.extension.docx_preprocessing import _extract_docx
+    from service.preprocessing.extension.pptx_preprocessing import _extract_pptx
+    from service.preprocessing.extension.csv_preprocessing import _extract_csv
+    from service.preprocessing.extension.excel_preprocessing import _extract_excel
+    from service.preprocessing.extension.doc_preprocessing import _extract_doc
+    from service.preprocessing.extension.ppt_preprocessing import _extract_ppt
     
     ext = _ext(path)
     if ext == ".pdf":
@@ -191,8 +51,10 @@ def _extract_any(path: Path) -> tuple[str, list[dict]]:
         return _extract_doc(path)
     if ext == ".ppt":
         return _extract_ppt(path)
+    # HWP 파일은 현재 지원하지 않음 (Windows 서버 필요)
     if ext == ".hwp":
-        return _extract_hwp(path)
+        logger.warning(f"[Extract] HWP 파일은 현재 지원하지 않습니다: {path.name}")
+        return "", []
     # 모르는 확장자는 텍스트로 시도
     return _extract_plain_text(path)
 
@@ -222,7 +84,8 @@ async def extract_documents():
         _parse_doc_version,
         get_security_level_rules_all,
     )
-    from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables, _clean_text
+    from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
+    from service.preprocessing.extension.utils import _clean_text
     from utils.time import now_kst_string
     
     EXTRACTED_TEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -256,7 +119,19 @@ async def extract_documents():
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and _ext(p) in SUPPORTED_EXTS]
+    # HWP 파일 제외 (Windows 서버 필요로 인해 현재 지원하지 않음)
+    raw_files = [
+        p for p in RAW_DATA_DIR.rglob("*") 
+        if p.is_file() and _ext(p) in SUPPORTED_EXTS and _ext(p) != ".hwp"
+    ]
+    
+    # HWP 파일이 있으면 경고 로그
+    hwp_files = [p for p in RAW_DATA_DIR.rglob("*.hwp") if p.is_file()]
+    if hwp_files:
+        logger.warning(
+            f"[Extract] HWP 파일 {len(hwp_files)}개가 발견되었으나 현재 지원하지 않습니다. "
+            f"파일: {[f.name for f in hwp_files[:5]]}"
+        )
 
     # base(문서ID 유사)별로 버전 후보 묶기: (Path, date_num)
     grouped: dict[str, list[tuple[Path, int]]] = defaultdict(list)
