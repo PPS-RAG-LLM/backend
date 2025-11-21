@@ -1146,7 +1146,7 @@ async def ingest_embeddings(
                         "text": part,
                     })
                     if len(batch) >= BATCH_SIZE:                        
-                        client.insert(collection_name, batch)
+                        client.insert(collection_name=collection_name, data=batch)
                         total_inserted += len(batch)
                         batch = []
 
@@ -1154,7 +1154,7 @@ async def ingest_embeddings(
             # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
 
         if batch:
-            client.insert(collection_name, batch)
+            client.insert(collection_name=collection_name, data=batch)
             total_inserted += len(batch)
 
     # 인덱스/로딩 재보장 및 메타 저장(유추된 doc_id/version 반영)
@@ -1271,7 +1271,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                     "text": part,
                 })
                 if len(batch) >= 128:
-                    client.insert(COLLECTION_NAME, batch)
+                    client.insert(collection_name=COLLECTION_NAME, data=batch)
                     cnt += len(batch)
                     batch = []
 
@@ -1301,12 +1301,12 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                     "text": part,
                 })
                 if len(batch) >= 128:
-                    client.insert(COLLECTION_NAME, batch)
+                    client.insert(collection_name=COLLECTION_NAME, data=batch)
                     cnt += len(batch)
                     batch = []
 
     if batch:
-        client.insert(COLLECTION_NAME, batch)
+        client.insert(collection_name=COLLECTION_NAME, data=batch)
         cnt += len(batch)
 
     try:
@@ -1437,7 +1437,7 @@ async def ingest_specific_files_with_levels(
                             "text": part,
                         })
                         if len(batch) >= 128:
-                            client.insert(coll, batch); cnt += len(batch); batch = []
+                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
 
                 # 표
                 base_idx = len(chunks)
@@ -1463,10 +1463,10 @@ async def ingest_specific_files_with_levels(
                             "text": part,
                         })
                         if len(batch) >= 128:
-                            client.insert(coll, batch); cnt += len(batch); batch = []
+                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
 
             if batch:
-                client.insert(coll, batch); cnt += len(batch)
+                client.insert(collection_name=coll, data=batch); cnt += len(batch)
 
             processed.append({
                 "file": src.name, "doc_id": doc_id, "version": int(ver),
@@ -1794,43 +1794,64 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             reverse=True,
         )[:final_results]
     
-    # 리랭크 후 중복 제거: (doc_id, snippet_text) 기준으로 중복 제거
-    # 동일한 스니펫이 여러 번 나타나면 가장 높은 점수만 유지
-    seen: dict[tuple[str, str], dict] = {}  # (doc_id, snippet_text) -> hit
-    max_chunks_per_doc = 2  # 문서당 최대 청크 수
+    # 리랭크 후 중복 제거
+    # 1) snippet_text 기준: 동일한 내용의 스니펫은 하나만 (최고 점수만 유지, doc_id 무관)
+    # 2) (doc_id, chunk_idx) 기준: 같은 문서의 같은 청크는 하나만 (chunk_idx 중복 방지)
+    # 문서당 제한 없음 - rerank_topN만큼 모두 반환
+    seen_by_snippet: dict[str, dict] = {}  # snippet_text -> hit (최고 점수만 유지)
+    seen_by_chunk: dict[tuple[str, int], dict] = {}  # (doc_id, chunk_idx) -> hit
+    
+    original_count = len(hits_sorted)
     
     for hit in hits_sorted:
         doc_id = hit.get("doc_id", "")
+        chunk_idx = int(hit.get("chunk_idx", 0))
         snippet = hit.get("snippet", "").strip()
-        if not doc_id or not snippet:
+        
+        if not snippet:
             continue
         
-        key = (doc_id, snippet)
-        if key not in seen:
-            seen[key] = hit
-        else:
-            # 이미 있는 경우 더 높은 점수로 교체
-            if hit.get("score", 0.0) > seen[key].get("score", 0.0):
-                seen[key] = hit
+        chunk_key = (doc_id, chunk_idx)
+        
+        # 1) snippet_text 중복 체크 - 동일한 내용이면 중복 (다른 문서/청크여도)
+        if snippet in seen_by_snippet:
+            # 동일한 스니펫이 이미 있으면 더 높은 점수로 교체
+            existing = seen_by_snippet[snippet]
+            if hit.get("score", 0.0) > existing.get("score", 0.0):
+                # 기존 항목의 chunk_key도 제거
+                old_doc_id = existing.get("doc_id", "")
+                old_chunk_idx = int(existing.get("chunk_idx", 0))
+                old_chunk_key = (old_doc_id, old_chunk_idx)
+                if old_chunk_key in seen_by_chunk:
+                    del seen_by_chunk[old_chunk_key]
+                # 새 항목으로 교체
+                seen_by_snippet[snippet] = hit
+                seen_by_chunk[chunk_key] = hit
+            continue  # 중복이므로 스킵
+        
+        # 2) (doc_id, chunk_idx) 중복 체크 - 같은 문서의 같은 청크는 하나만
+        if chunk_key in seen_by_chunk:
+            # 같은 (doc_id, chunk_idx)가 이미 있으면 더 높은 점수로 교체
+            existing = seen_by_chunk[chunk_key]
+            if hit.get("score", 0.0) > existing.get("score", 0.0):
+                # 기존 항목의 snippet도 제거
+                old_snippet = existing.get("snippet", "").strip()
+                if old_snippet in seen_by_snippet and seen_by_snippet[old_snippet] == existing:
+                    del seen_by_snippet[old_snippet]
+                # 새 항목으로 교체
+                seen_by_chunk[chunk_key] = hit
+                seen_by_snippet[snippet] = hit
+            continue  # 중복이므로 스킵
+        
+        # 새로운 항목 추가
+        seen_by_snippet[snippet] = hit
+        seen_by_chunk[chunk_key] = hit
     
-    # 문서별로 최대 개수 제한
-    doc_counts: dict[str, int] = {}
-    deduplicated: list[dict] = []
+    # 중복 제거된 결과를 점수 순으로 정렬하고 rerank_topN만큼만 반환
+    deduplicated = sorted(seen_by_snippet.values(), key=lambda x: x.get("score", 0.0), reverse=True)
+    hits_sorted = deduplicated[:final_results]
     
-    for hit in seen.values():
-        doc_id = hit.get("doc_id", "")
-        if doc_id:
-            count = doc_counts.get(doc_id, 0)
-            if count < max_chunks_per_doc:
-                deduplicated.append(hit)
-                doc_counts[doc_id] = count + 1
-        else:
-            deduplicated.append(hit)
-    
-    # 점수 순으로 재정렬
-    hits_sorted = sorted(deduplicated, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
-    
-    logger.info(f"🔍 [Deduplication] 중복 제거 완료: {len(hits_sorted)}개 결과 (원본: {len(hits_sorted) + len(seen) - len(deduplicated)}개)")
+    logger.info(f"🔍 [Deduplication] 중복 제거 완료: {len(hits_sorted)}개 결과 (원본: {original_count}개, 제거: {original_count - len(hits_sorted)}개)")
 
     # 리랭크 결과 로그 출력
     if hits_sorted:
@@ -2259,7 +2280,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                         "text": part,
                     })
                     if len(batch) >= 128:
-                        client.insert(coll, batch)
+                        client.insert(collection_name=coll, data=batch)
                         total += len(batch)
                         batch = []
 
@@ -2289,12 +2310,12 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                         "text": part,
                     })
                     if len(batch) >= 128:
-                        client.insert(coll, batch)
+                        client.insert(collection_name=coll, data=batch)
                         total += len(batch)
                         batch = []
 
         if batch:
-            client.insert(coll, batch)
+            client.insert(collection_name=coll, data=batch)
             total += len(batch)
 
     try:
