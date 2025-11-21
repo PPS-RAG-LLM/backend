@@ -1581,8 +1581,15 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             return [[]]
 
     def _load_snippet(
-        path: str, cidx: int, max_tokens: int = 512, overlap: int = 64
+        path: str, cidx: int, max_tokens: int = None, overlap: int = None
     ) -> str:
+        """스니펫 로드 (설정값 사용)"""
+        # 설정에서 chunk_size와 overlap 가져오기
+        if max_tokens is None:
+            max_tokens = int(settings.get("chunkSize", 512))
+        if overlap is None:
+            overlap = int(settings.get("overlap", 64))
+        
         file_path = EXTRACTED_TEXT_DIR / path
 
         logger.debug(f"\n###########################\nfile_path: {file_path}")
@@ -1592,7 +1599,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             logger.warning(f"[Milvus] snippet 파일 로드 실패: {file_path} ({exc})")
             full_txt = ""
         if not full_txt:
-            # 필요하면 ent_text로부터 넘어온 값이나 최소 안내 문구 반환
             return ""
 
         words = full_txt.split()
@@ -1639,10 +1645,12 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
                 page = int(hit.entity.get("page", 0))  # 페이지 정보 추출
                 score_vec = float(hit.score)
             
-            # 스니펫 결정 로직: 표면 저장된 텍스트 그대로, 아니면 기존 로직
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            # 스니펫 결정 로직: DB에 저장된 text 필드를 우선 사용
+            if isinstance(ent_text, str) and ent_text.strip():
+                # DB에 저장된 텍스트가 있으면 그대로 사용 (표 마커 포함)
+                snippet = ent_text
             else:
+                # DB에 텍스트가 없으면 파일에서 재구성 (폴백)
                 snippet = _load_snippet(path, cidx)
                 
             hits_raw.append({
@@ -1722,11 +1730,13 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
 
         merged = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:candidate]
         for (path, cidx, ttype, lvl, doc_id), fused in merged:
-            # 스니펫 결정 로직
+            # 스니펫 결정 로직: DB에 저장된 text 필드를 우선 사용
             ent_text = text_map.get((path, cidx, ttype, lvl, doc_id))
-            if isinstance(ent_text, str) and ent_text.startswith(TABLE_MARK):
-                snippet = ent_text  # ★ 표는 저장된 마크다운 그대로
+            if isinstance(ent_text, str) and ent_text.strip():
+                # DB에 저장된 텍스트가 있으면 그대로 사용 (표 마커 포함)
+                snippet = ent_text
             else:
+                # DB에 텍스트가 없으면 파일에서 재구성 (폴백)
                 snippet = _load_snippet(path, cidx)
             
             page_num = page_map.get((path, cidx, ttype, lvl, doc_id), 0)
@@ -1783,6 +1793,44 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
             reverse=True,
         )[:final_results]
+    
+    # 리랭크 후 중복 제거: (doc_id, snippet_text) 기준으로 중복 제거
+    # 동일한 스니펫이 여러 번 나타나면 가장 높은 점수만 유지
+    seen: dict[tuple[str, str], dict] = {}  # (doc_id, snippet_text) -> hit
+    max_chunks_per_doc = 2  # 문서당 최대 청크 수
+    
+    for hit in hits_sorted:
+        doc_id = hit.get("doc_id", "")
+        snippet = hit.get("snippet", "").strip()
+        if not doc_id or not snippet:
+            continue
+        
+        key = (doc_id, snippet)
+        if key not in seen:
+            seen[key] = hit
+        else:
+            # 이미 있는 경우 더 높은 점수로 교체
+            if hit.get("score", 0.0) > seen[key].get("score", 0.0):
+                seen[key] = hit
+    
+    # 문서별로 최대 개수 제한
+    doc_counts: dict[str, int] = {}
+    deduplicated: list[dict] = []
+    
+    for hit in seen.values():
+        doc_id = hit.get("doc_id", "")
+        if doc_id:
+            count = doc_counts.get(doc_id, 0)
+            if count < max_chunks_per_doc:
+                deduplicated.append(hit)
+                doc_counts[doc_id] = count + 1
+        else:
+            deduplicated.append(hit)
+    
+    # 점수 순으로 재정렬
+    hits_sorted = sorted(deduplicated, key=lambda x: x.get("score", 0.0), reverse=True)[:final_results]
+    
+    logger.info(f"🔍 [Deduplication] 중복 제거 완료: {len(hits_sorted)}개 결과 (원본: {len(hits_sorted) + len(seen) - len(deduplicated)}개)")
 
     # 리랭크 결과 로그 출력
     if hits_sorted:
