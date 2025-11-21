@@ -7,10 +7,10 @@ from utils import logger
 from repository.documents import list_doc_ids_by_workspace
 
 from service.retrieval.adapters.base import RetrievalResult
-from service.retrieval.adapters.local import LocalVectorAdapter
+from service.retrieval.adapters.temp_attatchments import TempAttachmentsVectorAdapter
 
 logger = logger(__name__)
-class WorkspaceAdapter(LocalVectorAdapter):
+class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
     """workspace_documents 테이블에 등록된 문서를 검색한다."""
 
     def __init__(self) -> None:

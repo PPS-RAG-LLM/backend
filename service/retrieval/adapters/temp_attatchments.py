@@ -17,7 +17,7 @@ from service.retrieval.common import (
 logger = logger(__name__)
 
 
-class LocalVectorAdapter(BaseRetrievalAdapter):
+class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
     """doc_id 목록을 입력받아 로컬 벡터 캐시에서 스니펫을 찾는다."""
 
     def __init__(self, source: str = "local") -> None:

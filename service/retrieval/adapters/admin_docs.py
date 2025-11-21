@@ -21,7 +21,7 @@ def _run_execute_search(**kwargs: Any) -> Dict[str, Any]:
             loop.close()
 
 
-class MilvusAdapter(BaseRetrievalAdapter):
+class AdminDocsAdapter(BaseRetrievalAdapter):
     """Milvus Server 검색 래퍼."""
 
     def __init__(self) -> None:

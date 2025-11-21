@@ -7,16 +7,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from service.retrieval.adapters.base import RetrievalResult
-from service.retrieval.adapters.local import LocalVectorAdapter
-from service.retrieval.adapters.milvus import MilvusAdapter
-from service.retrieval.adapters.workspace import WorkspaceAdapter
+from service.retrieval.adapters.temp_attatchments import TempAttachmentsVectorAdapter
+from service.retrieval.adapters.admin_docs import AdminDocsAdapter
+from service.retrieval.adapters.workspace_docs import WorkspaceDocsAdapter
 from service.retrieval.common import get_document_dirs
 from service.retrieval.reranker import rerank_snippets
 from utils import logger
 
 
 LOGGER = logger(__name__)
-DEFAULT_SOURCES = ("workspace_documents", "thread_attachments", "milvus")
+DEFAULT_SOURCES = ("WS_DOCS", "TEMP_ATTACH", "ADMIN_DOCS") # 워크스페이스 문서, 스레드 임시 문서, 관리자 문서
 
 def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     """
@@ -45,8 +45,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
 
     results: List[RetrievalResult] = []
 
-    if "workspace_documents" in sources and config.get("workspace_id"):
-        adapter = WorkspaceAdapter()
+    if "WS_DOCS" in sources and config.get("workspace_id"):
+        adapter = WorkspaceDocsAdapter()
         workspace_hits = adapter.search(
             query,
             top_k,
@@ -60,10 +60,10 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     elif "workspace" in sources:
         LOGGER.info("[UnifiedSearch] workspace source enabled but workspace_id missing")
 
-    if "thread_attachments" in sources:
+    if "TEMP_ATTACH_DOCS" in sources:
         attachment_doc_ids = extract_doc_ids_from_attachments(config.get("attachments"))
         if attachment_doc_ids:
-            adapter = LocalVectorAdapter()
+            adapter = TempAttachmentsVectorAdapter()
             local_hits = adapter.search(
                 query,
                 top_k,
@@ -81,9 +81,9 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         else:
             LOGGER.info("[UnifiedSearch] local source enabled but no attachment doc_ids")
 
-    if "milvus" in sources:
+    if "ADMIN_DOCS" in sources:
         sec_level = int(config.get("security_level") or 1)
-        adapter = MilvusAdapter()
+        adapter = AdminDocsAdapter()
 
         LOGGER.info("\n\nsearch_type: %s", config.get("search_type"))
         milvus_hits = adapter.search(
