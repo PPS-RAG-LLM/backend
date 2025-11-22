@@ -1011,7 +1011,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -1311,6 +1311,65 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
             reverse=True,
         )[:final_results]
+    
+    # 리랭크 후 중복 제거
+    # 1) snippet_text 기준: 동일한 내용의 스니펫은 하나만 (최고 점수만 유지, doc_id 무관)
+    # 2) (doc_id, chunk_idx) 기준: 같은 문서의 같은 청크는 하나만 (chunk_idx 중복 방지)
+    # 문서당 제한 없음 - rerank_topN만큼 모두 반환
+    seen_by_snippet: dict[str, dict] = {}  # snippet_text -> hit (최고 점수만 유지)
+    seen_by_chunk: dict[tuple[str, int], dict] = {}  # (doc_id, chunk_idx) -> hit
+    
+    original_count = len(hits_sorted)
+    
+    for hit in hits_sorted:
+        doc_id = hit.get("doc_id", "")
+        chunk_idx = int(hit.get("chunk_idx", 0))
+        snippet = hit.get("snippet", "").strip()
+        
+        if not snippet:
+            continue
+        
+        chunk_key = (doc_id, chunk_idx)
+        
+        # 1) snippet_text 중복 체크 - 동일한 내용이면 중복 (다른 문서/청크여도)
+        if snippet in seen_by_snippet:
+            # 동일한 스니펫이 이미 있으면 더 높은 점수로 교체
+            existing = seen_by_snippet[snippet]
+            if hit.get("score", 0.0) > existing.get("score", 0.0):
+                # 기존 항목의 chunk_key도 제거
+                old_doc_id = existing.get("doc_id", "")
+                old_chunk_idx = int(existing.get("chunk_idx", 0))
+                old_chunk_key = (old_doc_id, old_chunk_idx)
+                if old_chunk_key in seen_by_chunk:
+                    del seen_by_chunk[old_chunk_key]
+                # 새 항목으로 교체
+                seen_by_snippet[snippet] = hit
+                seen_by_chunk[chunk_key] = hit
+            continue  # 중복이므로 스킵
+        
+        # 2) (doc_id, chunk_idx) 중복 체크 - 같은 문서의 같은 청크는 하나만
+        if chunk_key in seen_by_chunk:
+            # 같은 (doc_id, chunk_idx)가 이미 있으면 더 높은 점수로 교체
+            existing = seen_by_chunk[chunk_key]
+            if hit.get("score", 0.0) > existing.get("score", 0.0):
+                # 기존 항목의 snippet도 제거
+                old_snippet = existing.get("snippet", "").strip()
+                if old_snippet in seen_by_snippet and seen_by_snippet[old_snippet] == existing:
+                    del seen_by_snippet[old_snippet]
+                # 새 항목으로 교체
+                seen_by_chunk[chunk_key] = hit
+                seen_by_snippet[snippet] = hit
+            continue  # 중복이므로 스킵
+        
+        # 새로운 항목 추가
+        seen_by_snippet[snippet] = hit
+        seen_by_chunk[chunk_key] = hit
+    
+    # 중복 제거된 결과를 점수 순으로 정렬하고 rerank_topN만큼만 반환
+    deduplicated = sorted(seen_by_snippet.values(), key=lambda x: x.get("score", 0.0), reverse=True)
+    hits_sorted = deduplicated[:final_results]
+    
+    logger.info(f"🔍 [Deduplication] 중복 제거 완료: {len(hits_sorted)}개 결과 (원본: {original_count}개, 제거: {original_count - len(hits_sorted)}개)")
 
     # 리랭크 결과 로그 출력
     if hits_sorted:
