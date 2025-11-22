@@ -224,7 +224,7 @@ NEWLINES_RE = re.compile(r"\n{3,}")
 
 # 확장자별 추출 함수들은 service/preprocessing/rag_preprocessing.py와 
 # service/preprocessing/extension/ 폴더로 이동했습니다.
-from service.preprocessing.rag_preprocessing import extract_any
+from service.preprocessing.rag_preprocessing import ext, extract_any
 
 
 # -------------------------------------------------
@@ -669,8 +669,7 @@ async def ingest_embeddings(
     """
     # ==== 설정/모델 ====
     settings = get_vector_settings()
-    MAX_TOKENS = int(chunk_size if chunk_size is not None else settings["chunkSize"])
-    OVERLAP = int(overlap if overlap is not None else settings["overlap"])
+    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
 
     if not META_JSON_PATH.exists():
         return {"error": "메타 JSON이 없습니다. 먼저 PDF/문서 추출을 수행하세요."}
@@ -821,7 +820,7 @@ async def ingest_embeddings(
         for page_num, page_text in page_blocks:
             if not page_text:
                 continue
-            page_chunks = chunk_text(page_text)
+            page_chunks = chunk_text(page_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
             for chunk in page_chunks:
                 if chunk.strip():  # 빈 청크 제외
                     chunks_with_page.append((page_num, global_chunk_idx, chunk))
@@ -868,7 +867,7 @@ async def ingest_embeddings(
                         "text": part,
                     })
                     if len(batch) >= BATCH_SIZE:                        
-                        client.insert(collection_name, batch)
+                        client.insert(collection_name=collection_name, data=batch)
                         total_inserted += len(batch)
                         batch = []
 
@@ -876,7 +875,7 @@ async def ingest_embeddings(
             # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
 
         if batch:
-            client.insert(collection_name, batch)
+            client.insert(collection_name=collection_name, data=batch)
             total_inserted += len(batch)
 
     # 인덱스/로딩 재보장 및 메타 저장(유추된 doc_id/version 반영)
@@ -896,8 +895,6 @@ async def ingest_embeddings(
         "message": f"Ingest 완료(Milvus Server, collection={collection_name})",
         "inserted_chunks": int(total_inserted),
     }
-
-
 
 # -------------------------------------------------
 # 2-1) 단일 파일 인제스트(선택 작업유형)
@@ -939,11 +936,13 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     txt_path.parent.mkdir(parents=True, exist_ok=True)
     txt_path.write_text(text_all, encoding="utf-8")
 
+    from service.preprocessing.rag_preprocessing import _clean_text as clean_text
+
     doc_id, ver = parse_doc_version(file_path.stem)
     meta[str(rel_file)] = {
         "chars": len(text_all),
         "lines": len(text_all.splitlines()),
-        "preview": (_clean_text(text_all[:200].replace("\n", " ")) + "…") if text_all else "",
+        "preview": (clean_text(text_all[:200].replace("\n", " ")) + "…") if text_all else "",
         "security_levels": sec_map,
         "doc_id": doc_id,
         "version": ver,
@@ -961,7 +960,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=ADMIN_COLLECTION)
 
     s = get_vector_settings()
-    MAX_TOKENS, OVERLAP = int(s["chunkSize"]), int(s["overlap"])
+    max_token, overlab = int(s["chunkSize"]), int(s["overlap"])
 
     # 기존 삭제
     try:
@@ -970,7 +969,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
         pass
 
     tasks = req.task_types or list(TASK_TYPES)
-    chunks = chunk_text(text_all, max_tokens=MAX_TOKENS, overlap=OVERLAP)
+    chunks = chunk_text(text_all, max_tokens=max_token, overlab=overlab)
     batch, cnt = [], 0
 
     for task in tasks:
@@ -981,7 +980,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
             for part in split_for_varchar_bytes(c):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
@@ -994,7 +993,7 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                     "text": part,
                 })
                 if len(batch) >= 128:
-                    client.insert(ADMIN_COLLECTION, batch)
+                    client.insert(collection_name=ADMIN_COLLECTION, data=batch)
                     cnt += len(batch)
                     batch = []
 
@@ -1025,12 +1024,12 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
                     "text": part,
                 })
                 if len(batch) >= 128:
-                    client.insert(ADMIN_COLLECTION, batch)
+                    client.insert(collection_name=ADMIN_COLLECTION, data=batch)
                     cnt += len(batch)
                     batch = []
 
     if batch:
-        client.insert(ADMIN_COLLECTION, batch)
+        client.insert(collection_name=ADMIN_COLLECTION, data=batch)
         cnt += len(batch)
 
     try:
@@ -1162,7 +1161,7 @@ async def ingest_specific_files_with_levels(
                             "text": part,
                         })
                         if len(batch) >= 128:
-                            client.insert(coll, batch); cnt += len(batch); batch = []
+                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
 
                 # 표
                 base_idx = len(chunks)
@@ -1189,10 +1188,10 @@ async def ingest_specific_files_with_levels(
                             "text": part,
                         })
                         if len(batch) >= 128:
-                            client.insert(coll, batch); cnt += len(batch); batch = []
+                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
 
             if batch:
-                client.insert(coll, batch); cnt += len(batch)
+                client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
 
             processed.append({
                 "file": src.name, "doc_id": doc_id, "version": int(ver),

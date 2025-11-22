@@ -22,6 +22,7 @@ class DocumentType(str, Enum):
     ADMIN = "ADMIN_DOCS"
     WORKSPACE = "WS_DOCS"
     TEMP = "TEMP_ATTACH"
+    LLM_TEST = "LLM_TEST"
 
 
 class Document(Base):

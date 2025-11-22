@@ -849,7 +849,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                         "text": part,
                     })
                     if len(batch) >= 128:
-                        client.insert(coll, batch)
+                        client.insert(collection_name=coll, data=batch)
                         total += len(batch)
                         batch = []
 
@@ -881,12 +881,12 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
                         "text": part,
                     })
                     if len(batch) >= 128:
-                        client.insert(coll, batch)
+                        client.insert(collection_name=coll, data=batch)
                         total += len(batch)
                         batch = []
 
         if batch:
-            client.insert(coll, batch)
+            client.insert(collection_name=coll, data=batch)
             total += len(batch)
 
     try:
