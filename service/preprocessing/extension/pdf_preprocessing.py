@@ -24,10 +24,10 @@ from service.admin.manage_vator_DB import (
     TASK_TYPES,
     SUPPORTED_EXTS,
     # 함수
-    _determine_level_for_task,
-    _parse_doc_version,
+    determine_level_for_task,
+    parse_doc_version,
     get_security_level_rules_all,
-    # _extract_any는 rag_preprocessing에서 import
+    # extract_any는 rag_preprocessing에서 import
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
 NEWLINES_RE = re.compile(r'\n{3,}')
 
 
-def _ext(p: Path) -> str:
+def ext(p: Path) -> str:
     """파일 확장자 반환 (소문자)"""
     return p.suffix.lower()
 
@@ -326,7 +326,7 @@ async def extract_pdfs():
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and _ext(p) in SUPPORTED_EXTS]
+    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and ext(p) in SUPPORTED_EXTS]
 
     # base(문서ID 유사)별로 버전 후보 묶기: (Path, date_num)
     grouped: Dict[str, List[Tuple[Path, int]]] = defaultdict(list)
@@ -365,12 +365,12 @@ async def extract_pdfs():
             # PDF인 경우 페이지별 정보를 포함하여 추출
             pages_text_dict: Dict[int, str] = {}
             total_pages = 0
-            if _ext(src) == ".pdf":
+            if ext(src) == ".pdf":
                 text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(src)
             else:
-                # PDF가 아닌 파일은 rag_preprocessing의 _extract_any 사용
-                from service.preprocessing.rag_preprocessing import _extract_any
-                text, tables = _extract_any(src)
+                # PDF가 아닌 파일은 rag_preprocessing의 extract_any 사용
+                from service.preprocessing.rag_preprocessing import extract_any
+                text, tables = extract_any(src)
             
             # 표 추출 결과 로깅
             if tables:
@@ -384,7 +384,7 @@ async def extract_pdfs():
             
             # 작업유형별 보안 레벨 (본문+표 모두 포함해서 판정)
             whole_for_level = text + "\n\n" + "\n\n".join(t.get("text","") for t in (tables or []))
-            sec_map = {task: _determine_level_for_task(
+            sec_map = {task: determine_level_for_task(
                 whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})
             ) for task in TASK_TYPES}
 
@@ -475,7 +475,7 @@ async def extract_pdfs():
 
             # doc_id/version 유추
             stem = rel_from_raw.stem
-            doc_id, version = _parse_doc_version(stem)
+            doc_id, version = parse_doc_version(stem)
 
             info = {
                 "chars": len(text),
@@ -487,7 +487,7 @@ async def extract_pdfs():
                 "tables": tables or [],  # ★ 표 정보 추가
                 "pages": pages_text_dict if pages_text_dict else {},  # ★ 페이지별 텍스트 정보 (메타데이터용)
                 "total_pages": total_pages,  # ★ 총 페이지 수
-                "sourceExt": _ext(src),  # 원본 확장자 기록
+                "sourceExt": ext(src),  # 원본 확장자 기록
                 "saved_files": saved_files,  # 저장된 파일 경로 추가
                 # 페이로드 정보 (LLM에 전달하지 않지만 메타데이터로 저장)
                 "extraction_info": {

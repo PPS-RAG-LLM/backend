@@ -1,6 +1,6 @@
 """Doc Gen 카테고리 스트리밍 로직"""
 from typing import Dict, Any, Generator, List
-from ..documents.full_document_loader import get_full_documents_texts
+from service.manage_documents import get_full_documents_texts
 from utils import logger
 from .common import (
     build_system_message,

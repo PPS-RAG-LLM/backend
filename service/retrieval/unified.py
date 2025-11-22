@@ -16,7 +16,7 @@ from utils import logger
 
 
 LOGGER = logger(__name__)
-DEFAULT_SOURCES = ("WS_DOCS", "TEMP_ATTACH", "ADMIN_DOCS") # 워크스페이스 문서, 스레드 임시 문서, 관리자 문서
+DEFAULT_SOURCES = ("WS_DOCS", "TEMP_ATTACH", "ADMIN_DOCS", "LLM_TEST") # 워크스페이스 문서, 스레드 임시 문서, 관리자 문서, LLM 테스트 문서
 
 def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     """
@@ -51,9 +51,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
             query,
             top_k,
             workspace_id=int(config["workspace_id"]),
-            # search_type=config.get("search_type"),
-            # model_key=config.get("model_key"),
             threshold=threshold,
+            mode=str(config.get("search_type") or "hybrid"),
         )
         LOGGER.info("[UnifiedSearch] workspace hits=%s", len(workspace_hits))
         results.extend(workspace_hits)
@@ -68,9 +67,8 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
                 query,
                 top_k,
                 doc_ids=attachment_doc_ids,
-                # search_type=config.get("search_type"),
-                # model_key=config.get("model_key"),
                 threshold=threshold,
+                mode=str(config.get("search_type") or "hybrid"),
             )
             LOGGER.info(
                 "[UnifiedSearch] local hits=%s (doc_ids=%s)",
@@ -82,6 +80,23 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
             LOGGER.info("[UnifiedSearch] local source enabled but no attachment doc_ids")
 
     if "ADMIN_DOCS" in sources:
+        sec_level = int(config.get("security_level") or 1)
+        adapter = AdminDocsAdapter()
+
+        LOGGER.info("\n\nsearch_type: %s", config.get("search_type"))
+        milvus_hits = adapter.search(
+            query,
+            top_k,
+            security_level=sec_level,
+            task_type=str(config.get("task_type") or "qna"),
+            search_type=config.get("search_type"),
+            model_key=config.get("model_key"),
+            rerank_top_n=rerank_top_n,
+        )
+        LOGGER.info("[UnifiedSearch] milvus hits=%s", len(milvus_hits))
+        results.extend(milvus_hits)
+
+    if "LLM_TEST_DOCS" in sources:
         sec_level = int(config.get("security_level") or 1)
         adapter = AdminDocsAdapter()
 

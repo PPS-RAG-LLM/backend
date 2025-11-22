@@ -1,10 +1,9 @@
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form
-from service.users.documents import upload_documents
 from utils import logger
 from pydantic import BaseModel
 from typing import List
-from service.users.documents import delete_documents_by_ids
+from service.manage_documents import upload_documents, delete_documents_by_ids
 
 logger = logger(__name__)
 router = APIRouter(tags=["Document"], prefix="/v1/document")

@@ -10,7 +10,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _ext(p: Path) -> str:
+def ext(p: Path) -> str:
     """파일 확장자 반환 (소문자)"""
     return p.suffix.lower()
 
@@ -167,32 +167,32 @@ def _extract_ppt(fp: Path) -> tuple[str, list[dict]]:
     return "", []
 
 
-def _extract_any(path: Path) -> tuple[str, list[dict]]:
+def extract_any(path: Path) -> tuple[str, list[dict]]:
     """통합 문서 추출 라우터"""
     from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-    from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
+    # from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
     
-    ext = _ext(path)
-    if ext == ".pdf":
-        # PDF는 페이지 정보를 포함하지만, _extract_any는 (text, tables)만 반환
+    file_ext = ext(path)
+    if file_ext == ".pdf":
+        # PDF는 페이지 정보를 포함하지만, extract_any는 (text, tables)만 반환
         text, tables, _, _ = _extract_pdf_with_tables(path)
         return text, tables
-    if ext in {".txt", ".text", ".md"}:
+    if file_ext in {".txt", ".text", ".md"}:
         return _extract_plain_text(path)
-    if ext == ".docx":
+    if file_ext == ".docx":
         return _extract_docx(path)
-    if ext == ".pptx":
+    if file_ext == ".pptx":
         return _extract_pptx(path)
-    if ext == ".csv":
+    if file_ext == ".csv":
         return _extract_csv(path)
-    if ext in {".xlsx", ".xls"}:
+    if file_ext in {".xlsx", ".xls"}:
         return _extract_excel(path)
-    if ext == ".doc":
+    if file_ext == ".doc":
         return _extract_doc(path)
-    if ext == ".ppt":
+    if file_ext == ".ppt":
         return _extract_ppt(path)
-    if ext == ".hwp":
-        return _extract_hwp(path)
+    # if ext == ".hwp":
+    #     return _extract_hwp(path)
     # 모르는 확장자는 텍스트로 시도
     return _extract_plain_text(path)
 
@@ -200,7 +200,7 @@ def _extract_any(path: Path) -> tuple[str, list[dict]]:
 async def extract_documents():
     """
     문서 전처리 메인 함수
-    모든 확장자의 파일을 _extract_any를 사용하여 처리합니다.
+    모든 확장자의 파일을 extract_any를 사용하여 처리합니다.
     
     Returns:
         dict: 전처리 결과
@@ -218,8 +218,8 @@ async def extract_documents():
         META_JSON_PATH,
         TASK_TYPES,
         SUPPORTED_EXTS,
-        _determine_level_for_task,
-        _parse_doc_version,
+        determine_level_for_task,
+        parse_doc_version,
         get_security_level_rules_all,
     )
     from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables, _clean_text
@@ -256,7 +256,7 @@ async def extract_documents():
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and _ext(p) in SUPPORTED_EXTS]
+    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and ext(p) in SUPPORTED_EXTS]
 
     # base(문서ID 유사)별로 버전 후보 묶기: (Path, date_num)
     grouped: dict[str, list[tuple[Path, int]]] = defaultdict(list)
@@ -292,16 +292,16 @@ async def extract_documents():
         try:
             logger.info(f"[Extract] 파일 처리 시작: {src.name}")
             
-            # _extract_any를 사용하여 모든 확장자 처리
+            # extract_any를 사용하여 모든 확장자 처리
             pages_text_dict: dict[int, str] = {}
             total_pages = 0
             
             # PDF인 경우 페이지별 정보를 포함하여 추출
-            if _ext(src) == ".pdf":
+            if ext(src) == ".pdf":
                 text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(src)
             else:
-                # PDF가 아닌 파일은 _extract_any 사용
-                text, tables = _extract_any(src)
+                # PDF가 아닌 파일은 extract_any 사용
+                text, tables = extract_any(src)
             
             # 표 추출 결과 로깅
             if tables:
@@ -315,7 +315,7 @@ async def extract_documents():
             
             # 작업유형별 보안 레벨 (본문+표 모두 포함해서 판정)
             whole_for_level = text + "\n\n" + "\n\n".join(t.get("text","") for t in (tables or []))
-            sec_map = {task: _determine_level_for_task(
+            sec_map = {task: determine_level_for_task(
                 whole_for_level, all_rules.get(task, {"maxLevel": 1, "levels": {}})
             ) for task in TASK_TYPES}
 
@@ -406,7 +406,7 @@ async def extract_documents():
 
             # doc_id/version 유추
             stem = rel_from_raw.stem
-            doc_id, version = _parse_doc_version(stem)
+            doc_id, version = parse_doc_version(stem)
 
             info = {
                 "chars": len(text),
@@ -418,7 +418,7 @@ async def extract_documents():
                 "tables": tables or [],  # ★ 표 정보 추가
                 "pages": pages_text_dict if pages_text_dict else {},  # ★ 페이지별 텍스트 정보 (메타데이터용)
                 "total_pages": total_pages,  # ★ 총 페이지 수
-                "sourceExt": _ext(src),  # 원본 확장자 기록
+                "sourceExt": ext(src),  # 원본 확장자 기록
                 "saved_files": saved_files,  # 저장된 파일 경로 추가
                 # 페이로드 정보 (LLM에 전달하지 않지만 메타데이터로 저장)
                 "extraction_info": {

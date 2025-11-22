@@ -5,17 +5,41 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List
-
+import time
+from typing import Optional, Dict, Any, List, Tuple
+import uuid
+from config import config as app_config
+from repository.llm_test_session import get_test_session_by_sid, insert_test_session
+from service.preprocessing.rag_preprocessing import ext, extract_any
+from service.retrieval.common import hf_embed_text, chunk_text
+from service.retrieval.pipeline.milvus_pipeline import build_dense_hits, build_rerank_payload, load_snippet_from_store
+from service.retrieval.reranker import rerank_snippets
+from service.vector_db import ensure_collection_and_index, get_milvus_client, run_dense_search, run_hybrid_search
+from functools import partial
 logger = logging.getLogger(__name__)
 
 # ===== 경로/세션 고정값 =====
+BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
+PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
+_RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
+_RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
+_MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
+
+LLM_TEST_COLLECTION = _MILVUS_CFG.get("LLM_TEST", "llm_test_collection")
+
+def _cfg_path(key: str, fallback: str) -> Path:
+    value = _RETRIEVAL_PATHS.get(key, fallback)
+    return (PROJECT_ROOT / Path(value)).resolve()
+
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]     # .../backend
-VAL_DIR = _BACKEND_ROOT / "storage" / "val_data"        # 공유 원본 저장소
-VAL_DIR.mkdir(parents=True, exist_ok=True)
+VAL_DIR = _BACKEND_ROOT / "storage" / "val_data"        # TODO: DB로 마이그레이션
+VAL_DIR.mkdir(parents=True, exist_ok=True)              # TODO: DB로 마이그레이션
+TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
+SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 
-_SHARED_META = VAL_DIR / ".shared_session.json"         # 세션 SID 유지용
-
+EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
+_SHARED_META = VAL_DIR / ".shared_session.json"         # TODO: DB로 마이그레이션
+VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
 # ===== 외부 의존 (기존 모듈 재사용) =====
 from service.admin.manage_admin_LLM import (
     _connect,
@@ -27,17 +51,18 @@ from service.admin.manage_admin_LLM import (
 )
 
 from service.admin.manage_vator_DB import (
-    create_test_session,         # (sid, dir) 생성
-    get_test_session,            # sid -> meta
-    ingest_test_pdfs,            # (sid, paths, task_types)
-    delete_test_files_by_names,  # (sid, file_names, task_type)
-    search_documents_test,       # (req, sid, search_type_override)
+    determine_level_for_task,
+    get_security_level_rules_all,         # (sid, dir) 생성
+    get_vector_settings,            # sid -> meta
     RAGSearchRequest,
+    parse_doc_version,
+    split_for_varchar_bytes,
 )
+from utils.model_load import _get_or_load_embedder_async
 
 # ===== (옵션) 모델 스트리머 (가능 시 스트림, 실패 시 _simple_generate 폴백) =====
 try:
-    from utils.llms.huggingface.qwen_7b import stream_chat as _qwen_stream
+    from utils.llms.huggingface.qwen import stream_chat as _qwen_stream
 except Exception:
     _qwen_stream = None
 
@@ -529,3 +554,345 @@ def delete_past_runs(
         return {"success": False, "error": "delete_past_runs failed"}
     finally:
         conn.close()
+
+
+
+# --- add: search_documents_test ---
+async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None, rerank_top_n: Optional[int] = None) -> Dict:
+    """
+    세션 전용 컬렉션에서만 검색 (기존 search_documents의 세션 버전)
+    """
+    meta = get_test_session(sid)
+    if not meta:
+        return {"error": "invalid sid"}
+
+    t0 = time.perf_counter()
+    if req.task_type not in TASK_TYPES:
+        return {"error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"}
+
+    settings = get_vector_settings()
+    model_key = req.model or settings["embeddingModel"]
+    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
+
+    tok, model, device = await _get_or_load_embedder_async(model_key)
+    q_emb = hf_embed_text(tok, model, device, req.query)
+
+    client = get_milvus_client()
+    coll = meta.get("collection") 
+    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=coll)
+    if coll not in client.list_collections():
+        return {"error": "세션 컬렉션이 없습니다. 먼저 인제스트 하세요."}
+
+    embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
+    final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
+    candidate = max(embedding_candidates, final_results * 2)
+    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
+    snippet_loader = partial(
+        load_snippet_from_store,
+        EXTRACTED_TEXT_DIR,
+        max_tokens=int(settings["chunkSize"]),
+        overlap=int(settings["overlap"]),
+    )
+    output_fields = ("path", "chunk_idx", "task_type", "security_level", "doc_id", "text")
+
+    if search_type == "vector":
+        res_dense = run_dense_search(
+            client,
+            collection_name=coll,
+            query_vector=q_emb.tolist(),
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
+        )
+        hits_raw = build_dense_hits(res_dense, snippet_loader=snippet_loader)
+    else:
+        res_hybrid = run_hybrid_search(
+            client,
+            collection_name=coll,
+            query_vector=q_emb.tolist(),
+            query_text=req.query,
+            limit=candidate,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
+        )
+        hits_raw = build_dense_hits(res_hybrid, snippet_loader=snippet_loader)
+
+    rerank_candidates = build_rerank_payload(hits_raw)
+
+    if rerank_candidates:
+        reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
+        hits_sorted = []
+        for res in reranked:
+            original = res.metadata or {}
+            hits_sorted.append(
+                {
+                    "score": float(res.score),
+                    "path": original.get("path"),
+                    "chunk_idx": int(original.get("chunk_idx", 0)),
+                    "task_type": original.get("task_type"),
+                    "security_level": int(original.get("security_level", 1)),
+                    "doc_id": original.get("doc_id"),
+                    "snippet": res.text,
+                }
+            )
+    else:
+        hits_sorted = sorted(
+            hits_raw,
+            key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
+            reverse=True,
+        )[:final_results]
+
+    # 리랭크 결과 로그 출력 (테스트 세션)
+    if hits_sorted:
+        top_hit = hits_sorted[0]
+        logger.info(f"✨ [Rerank-Test] 완료! 최고 점수: {top_hit.get('score', 0):.4f}")
+        logger.info(f"🏆 [Rerank-Test] 최고 스니펫 (doc_id: {top_hit.get('doc_id', 'unknown')}): {top_hit.get('snippet', '')[:100]}...")
+
+    context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
+    prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
+    elapsed = round(time.perf_counter() - t0, 4)
+
+    # 세션 파일명 체크(문서명 리스트)
+    check_files: List[str] = []
+    try:
+        for h in hits_sorted:
+            did = h.get("doc_id")
+            if did:
+                check_files.append(f"{did}.pdf")
+            else:
+                p = Path(h.get("path", ""))
+                if str(p):
+                    check_files.append(p.with_suffix(".pdf").name)
+    except Exception:
+        pass
+
+    return {
+        "elapsed_sec": elapsed,
+        "settings_used": {"model": model_key, "searchType": search_type},
+        "hits": [
+            {
+                "score": float(h["score"]),
+                "path": h["path"],
+                "chunk_idx": int(h["chunk_idx"]),
+                "task_type": h["task_type"],
+                "security_level": int(h["security_level"]),
+                "doc_id": h.get("doc_id"),
+                "snippet": h["snippet"],
+            }
+            for h in hits_sorted
+        ],
+        "prompt": prompt,
+        "check_file": sorted(list(set(check_files))),
+        "sid": sid,
+        "collection": coll,
+    }
+
+
+def _serialize_session(row: LlmTestSession) -> Dict[str, Any]:
+    return {
+        "sid": row.sid,
+        "dir": row.directory,
+        "collection": row.collection,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    }
+
+from typing import Any, Optional, Dict
+import uuid
+from utils import logger
+from utils.database import get_session
+from sqlalchemy import select
+from storage.db_models import LlmTestSession
+
+logger = logger(__name__)
+
+
+def create_test_session() -> Dict:
+    sid = uuid.uuid4().hex[:12]
+    sess_dir = (VAL_SESSION_ROOT / sid).resolve()
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    obj = insert_test_session(sid, sess_dir, LLM_TEST_COLLECTION)
+    return _serialize_session(obj)
+
+def get_test_session(sid: str) -> Optional[Dict]:
+    row = get_test_session_by_sid(sid)
+    return _serialize_session(row)
+
+# --- 
+# add: delete_test_files_by_names ---
+async def delete_test_files_by_names(sid: str, file_names: List[str], task_type: Optional[str] = None):
+    meta = get_test_session(sid)
+    if not meta:
+        return {"deleted": 0, "requested": len(file_names), "error": "invalid sid"}
+
+    client = get_milvus_client()
+    coll = meta.get("collection") 
+    if coll not in client.list_collections():
+        return {"deleted": 0, "requested": len(file_names), "error": "collection not found"}
+
+    # 검증
+    task_filter = ""
+    if task_type:
+        if task_type not in TASK_TYPES:
+            return {"deleted": 0, "requested": len(file_names), "error": f"invalid taskType: {task_type}"}
+        task_filter = f" && task_type == '{task_type}'"
+
+    deleted_total = 0
+    per_file: dict[str, int] = {}
+
+    for name in (file_names or []):
+        stem = Path(name).stem
+        try:
+            base_id, _ = parse_doc_version(stem)
+        except Exception:
+            base_id = stem
+        try:
+            filt = f"doc_id == '{base_id}'{task_filter}"
+            client.delete(collection_name=coll, filter=filt)
+            deleted_total += 1
+            per_file[name] = per_file.get(name, 0) + 1
+        except Exception:
+            logger.exception("[test-delete] failed: %s", name)
+            per_file[name] = per_file.get(name, 0)
+
+    try:
+        client.flush(coll)
+    except Exception:
+        pass
+    try:
+        client.release_collection(collection_name=coll)
+    except Exception:
+        pass
+    try:
+        client.load_collection(collection_name=coll)
+    except Exception:
+        pass
+
+    return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file, "sid": sid}
+    
+# --- add: ingest_test_pdfs ---
+async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[List[str]] = None):
+    meta = get_test_session(sid)
+    if not meta:
+        return {"error": "invalid sid"}
+
+    settings = get_vector_settings()
+    eff_model_key = settings["embeddingModel"]
+    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
+    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
+
+    client = get_milvus_client()
+    coll = meta.get("collection")
+    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=coll)
+
+    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
+
+    all_rules = get_security_level_rules_all()
+    sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
+    sess_txt_root.mkdir(parents=True, exist_ok=True)
+
+    tasks = task_types or list(TASK_TYPES)
+    total = 0
+
+    for p in pdf_paths:
+        file_path = Path(str(p))
+        if ext(file_path) not in SUPPORTED_EXTS:
+            logger.warning(f"[test-ingest] Unsupported file type: {file_path}")
+            continue
+
+        try:
+            file_text, table_blocks_all = extract_any(file_path)
+        except Exception:
+            logger.exception("[test-ingest] read failed: %s", p)
+            continue
+
+        whole_for_level = file_text + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
+        sec_map = {t: determine_level_for_task(whole_for_level, all_rules.get(t, {"maxLevel": 1, "levels": {}})) for t in TASK_TYPES}
+        max_sec = max(sec_map.values()) if sec_map else 1
+        sec_folder = f"securityLevel{int(max_sec)}"
+
+        rel_txt = Path("__sessions__") / sid / sec_folder / file_path.with_suffix(".txt").name
+        abs_txt = EXTRACTED_TEXT_DIR / rel_txt
+        abs_txt.parent.mkdir(parents=True, exist_ok=True)
+        abs_txt.write_text(file_text, encoding="utf-8")
+
+        stem = file_path.stem
+        doc_id, ver = parse_doc_version(stem)
+
+        try:
+            client.delete(coll, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
+        except Exception:
+            pass
+
+        chunks = chunk_text(file_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)  # pyright: ignore[reportUndefinedVariable]
+        batch: List[Dict] = []
+
+        for t in tasks:
+            lvl = int(sec_map.get(t, 1))
+
+            # 본문: VARCHAR 안전 분할
+            for idx, c in enumerate(chunks):
+                for part in split_for_varchar_bytes(c):
+                    if len(part.encode("utf-8")) > 32768:
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(idx),
+                        "task_type": t,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(ver),
+                        "page": 0,
+                        "workspace_id": 0,
+                        "text": part,
+                    })
+                    if len(batch) >= 128:
+                        client.insert(coll, batch)
+                        total += len(batch)
+                        batch = []
+
+            # 표: VARCHAR 안전 분할
+            base_idx = len(chunks)
+            for t_i, table in enumerate(table_blocks_all or []):
+                md = (table.get("text") or "").strip()
+                if not md:
+                    continue
+                page = int(table.get("page", 0))
+                bbox = table.get("bbox") or []
+                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+
+                for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
+                    if len(part.encode("utf-8")) > 32768:
+                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    batch.append({
+                        "embedding": vec.tolist(),
+                        "path": str(rel_txt.as_posix()),
+                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                        "task_type": t,
+                        "security_level": lvl,
+                        "doc_id": str(doc_id),
+                        "version": int(ver),
+                        "page": int(page),
+                        "workspace_id": 0,
+                        "text": part,
+                    })
+                    if len(batch) >= 128:
+                        client.insert(coll, batch)
+                        total += len(batch)
+                        batch = []
+
+        if batch:
+            client.insert(coll, batch)
+            total += len(batch)
+
+    try:
+        client.flush(coll)
+    except Exception:
+        pass
+    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=coll)
+
+    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": total}

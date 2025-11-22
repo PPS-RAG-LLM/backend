@@ -6,8 +6,6 @@ from service.retrieval.pipeline.milvus_pipeline import (
     # build_rrf_hits,
     build_rerank_payload,
     load_snippet_from_store,
-    run_dense_search,
-    run_hybrid_search,
 )
 
 __all__ = [
@@ -16,7 +14,5 @@ __all__ = [
     # "build_rrf_hits",
     "build_rerank_payload",
     "load_snippet_from_store",
-    "run_dense_search",
-    "run_hybrid_search",
 ]
 

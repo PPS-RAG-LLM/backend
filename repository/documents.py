@@ -1,26 +1,134 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional, Dict, Any
-from repository.workspace import update_workspace_vector_count
-from utils import logger
-from utils.database import get_session
-from storage.db_models import WorkspaceDocument, DocumentVector
-from sqlalchemy import select, delete, desc
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import delete, desc, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from utils import logger, now_kst, now_kst_string
+from utils.database import get_session
+
+from storage.db_models import (
+    Document,
+    DocumentMetadata,
+    DocumentVector,
+    WorkspaceDocument,
+)
 
 logger = logger(__name__)
 
 
-def insert_workspace_document(*, doc_id: str, filename: str, docpath: str, workspace_id: int, metadata: Optional[Dict[str, Any]] = None) -> int:
-    """workspace_documents에 1건 추가 후 PK(id) 반환"""
+def upsert_document(
+    *,
+    doc_id: str,
+    doc_type: str,
+    filename: str,
+    storage_path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    workspace_id: Optional[int] = None,
+    security_level: Optional[int] = None,
+    source_path: Optional[str] = None,
+) -> None:
+    """documents 테이블에 공통 메타데이터를 upsert."""
+    payload = payload or {}
     with get_session() as session:
+        insert_stmt = sqlite_insert(Document).values(
+            doc_id=doc_id,
+            doc_type=doc_type,
+            workspace_id=workspace_id,
+            security_level=security_level,
+            filename=filename,
+            storage_path=storage_path,
+            source_path=source_path,
+            payload=payload,
+        )
+        update_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[Document.doc_id],
+            set_={
+                "doc_type": insert_stmt.excluded.doc_type,
+                "workspace_id": insert_stmt.excluded.workspace_id,
+                "security_level": insert_stmt.excluded.security_level,
+                "filename": insert_stmt.excluded.filename,
+                "storage_path": insert_stmt.excluded.storage_path,
+                "source_path": insert_stmt.excluded.source_path,
+                "payload": insert_stmt.excluded.payload,
+            },
+        )
+        session.execute(update_stmt)
+        session.commit()
+
+
+def bulk_upsert_document_metadata(
+    *,
+    doc_id: str,
+    records: List[Dict[str, Any]],
+) -> int:
+    """document_metadata에 페이지/청크 단위 메타데이터를 upsert."""
+    if not records:
+        return 0
+    rows = []
+    for record in records:
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "page": int(record.get("page", 0)),
+                "chunk_index": int(record.get("chunk_index", 0)),
+                "text": record.get("text") or "",
+                "payload": record.get("payload") or {},
+            }
+        )
+    with get_session() as session:
+        insert_stmt = sqlite_insert(DocumentMetadata).values(rows)
+        update_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentMetadata.doc_id,
+                DocumentMetadata.page,
+                DocumentMetadata.chunk_index,
+            ],
+            set_={
+                "text": insert_stmt.excluded.text,
+                "payload": insert_stmt.excluded.payload,
+            },
+        )
+        result = session.execute(update_stmt)
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def insert_workspace_document(
+    *,
+    doc_id: str,
+    filename: str,
+    docpath: str,
+    workspace_id: int,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> int:
+    """workspace_documents에 upsert하고 PK(id)를 반환한다."""
+    with get_session() as session:
+        stmt = (
+            select(WorkspaceDocument)
+            .where(WorkspaceDocument.doc_id == doc_id)
+            .limit(1)
+        )
+        existing = session.execute(stmt).scalar_one_or_none()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+        if existing is not None:
+            existing.filename = filename
+            existing.docpath = docpath
+            existing.workspace_id = int(workspace_id)
+            existing.metadata_json = metadata_json
+            existing.updated_at = now_kst()
+            existing.created_at = now_kst()
+            session.commit()
+            return int(existing.id)
+
         obj = WorkspaceDocument(
             doc_id=doc_id,
             filename=filename,
             docpath=docpath,
             workspace_id=int(workspace_id),
-            metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
+            metadata_json=metadata_json,
         )
         session.add(obj)
         session.commit()
@@ -28,14 +136,43 @@ def insert_workspace_document(*, doc_id: str, filename: str, docpath: str, works
         return int(obj.id)
 
 
-def insert_document_vectors(*, doc_id: str, vector_ids: List[str]) -> int:
-    """document_vectors에 doc_id:vector_id 1:N 매핑 기록 (중복 무시)"""
-    if not vector_ids:
+def insert_document_vectors(
+    *,
+    doc_id: str,
+    collection: str,
+    embedding_version: str,
+    vectors: List[Dict[str, Any]],
+) -> int:
+    """document_vectors에 doc_id와 Milvus vector pk 매핑을 기록."""
+    if not vectors:
         return 0
+    rows = []
+    for item in vectors:
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "vector_id": str(item["vector_id"]),
+                "collection": collection,
+                "embedding_version": embedding_version,
+                "page": item.get("page"),
+                "chunk_index": item.get("chunk_index"),
+            }
+        )
     with get_session() as session:
-        rows = [{"doc_id": doc_id, "vector_id": v} for v in vector_ids]
-        stmt = sqlite_insert(DocumentVector).values(rows).on_conflict_do_nothing(index_elements=["doc_id", "vector_id"])
-        result = session.execute(stmt)
+        insert_stmt = sqlite_insert(DocumentVector).values(rows)
+        insert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[
+                DocumentVector.doc_id,
+                DocumentVector.vector_id,
+            ],
+            set_={
+                "collection": insert_stmt.excluded.collection,
+                "embedding_version": insert_stmt.excluded.embedding_version,
+                "page": insert_stmt.excluded.page,
+                "chunk_index": insert_stmt.excluded.chunk_index,
+            },
+        )
+        result = session.execute(insert_stmt)
         session.commit()
         return int(result.rowcount or 0)
 
@@ -88,7 +225,53 @@ def delete_document_vectors_by_doc_ids(doc_ids: List[str]) -> int:
         session.commit()
         return int(result.rowcount or 0)
 
-def delete_workspace_documents_by_doc_ids(doc_ids: List[str], workspace_id: int) -> int:
+
+def fetch_document_vectors(doc_ids: List[str]) -> List[Dict[str, Any]]:
+    """doc_id에 해당하는 vector 메타데이터 목록을 반환."""
+    if not doc_ids:
+        return []
+    with get_session() as session:
+        stmt = (
+            select(
+                DocumentVector.doc_id,
+                DocumentVector.vector_id,
+                DocumentVector.collection,
+            )
+            .where(DocumentVector.doc_id.in_(doc_ids))
+            .order_by(DocumentVector.doc_id)
+        )
+        rows = session.execute(stmt).all()
+        return [
+            {
+                "doc_id": doc_id,
+                "vector_id": vector_id,
+                "collection": collection,
+            }
+            for doc_id, vector_id, collection in rows
+        ]
+
+
+def get_documents_by_ids(doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """documents 테이블에서 doc_id 매핑을 조회."""
+    if not doc_ids:
+        return {}
+    with get_session() as session:
+        stmt = select(Document).where(Document.doc_id.in_(doc_ids))
+        rows = session.execute(stmt).scalars().all()
+        return {
+            row.doc_id: {
+                "doc_id": row.doc_id,
+                "doc_type": row.doc_type,
+                "filename": row.filename,
+                "workspace_id": row.workspace_id,
+                "payload": row.payload or {},
+            }
+            for row in rows
+        }
+
+def delete_workspace_documents_by_doc_ids(
+    doc_ids: List[str], workspace_id: Optional[int] = None
+) -> int:
     """
     워크스페이스에 등록된 문서의 경우, 
     workspace_documents에서 주어진 doc_id들의 행을 삭제한다. 
@@ -98,9 +281,21 @@ def delete_workspace_documents_by_doc_ids(doc_ids: List[str], workspace_id: int)
         return 0
     with get_session() as session:
         stmt = delete(WorkspaceDocument).where(
-            WorkspaceDocument.doc_id.in_(doc_ids),
-            WorkspaceDocument.workspace_id == int(workspace_id),
+            WorkspaceDocument.doc_id.in_(doc_ids)
         )
+        if workspace_id is not None:
+            stmt = stmt.where(WorkspaceDocument.workspace_id == int(workspace_id))
+        result = session.execute(stmt)
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def delete_documents(doc_ids: List[str]) -> int:
+    """documents 테이블에서 doc_id 목록을 삭제."""
+    if not doc_ids:
+        return 0
+    with get_session() as session:
+        stmt = delete(Document).where(Document.doc_id.in_(doc_ids))
         result = session.execute(stmt)
         session.commit()
         return int(result.rowcount or 0)

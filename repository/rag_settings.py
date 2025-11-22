@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from utils import logger
+from utils import logger, now_kst
 from utils.database import get_session
 from storage.db_models import  RagSettings
 from sqlalchemy.dialects.sqlite import insert 
@@ -22,14 +22,16 @@ def get_rag_settings_row() -> dict:
         }
 
 
-def get_vector_settings_row() -> dict:
-    """레거시 호환: rag_settings(싱글톤)에서 기본 청크 설정을 읽어온다."""
+def set_rag_settings_row(new_search: str, new_chunk: int, new_overlap: int, new_key: str):
     with get_session() as session:
-        row = session.query(RagSettings).filter(RagSettings.id == 1).first()
-        if not row:
-            return {"search_type": "hybrid", "chunk_size": 512, "overlap": 64}
-        return {
-            "search_type": str(row.search_type or "hybrid"),
-            "chunk_size": int(row.chunk_size or 512),
-            "overlap": int(row.overlap or 64),
-        }
+        settings = session.query(RagSettings).get(1)
+        if not settings:
+            settings = RagSettings(id=1)
+            session.add(settings)
+
+        settings.embedding_key = new_key
+        settings.search_type = new_search
+        settings.chunk_size = new_chunk
+        settings.overlap = new_overlap
+        settings.updated_at = now_kst()
+        session.commit()

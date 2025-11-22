@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 from typing import List
-from utils import logger
-from repository.documents import list_doc_ids_by_workspace
 
+from utils import logger
+
+from repository.documents import list_doc_ids_by_workspace
 from service.retrieval.adapters.base import RetrievalResult
 from service.retrieval.adapters.temp_attatchments import TempAttachmentsVectorAdapter
+from service.vector_db.milvus_store import resolve_collection
+from storage.db_models import DocumentType
 
 logger = logger(__name__)
+
+
 class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
-    """workspace_documents 테이블에 등록된 문서를 검색한다."""
+    """workspace_documents 테이블에 등록된 문서를 Milvus에서 검색한다."""
 
     def __init__(self) -> None:
         super().__init__(source="workspace")
+        self.collection_name = resolve_collection(DocumentType.WORKSPACE.value)
 
     def search(
         self,
@@ -23,16 +29,8 @@ class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
         *,
         workspace_id: int,
         threshold: float = 0.0,
+        mode: str = "hybrid",
     ) -> List[RetrievalResult]:
-        """
-        특정 워크스페이스에 연결된 문서에서 스니펫 검색.
-
-        Args:
-            query: 사용자 질문
-            top_k: 반환할 결과 수
-            workspace_id: workspace_documents.workspace_id
-            threshold: 코사인 유사도 하한
-        """
         if not workspace_id:
             return []
 
@@ -42,8 +40,8 @@ class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
             for row in rows
             if row
         ]
-        logger.info("[WorkspaceAdapter] workspace_id=%s doc_ids=%s", workspace_id, doc_ids)
         if not doc_ids:
+            logger.info("[WorkspaceAdapter] no documents for workspace_id=%s", workspace_id)
             return []
 
         return super().search(
@@ -51,4 +49,6 @@ class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
             top_k,
             doc_ids=doc_ids,
             threshold=threshold,
+            mode=mode,
+            workspace_id=workspace_id,
         )

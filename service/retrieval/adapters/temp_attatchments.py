@@ -1,27 +1,31 @@
-"""로컬 벡터 캐시 검색 어댑터."""
+"""Milvus 기반 임시 첨부 검색 어댑터."""
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
-import numpy as np
 from utils import logger
+
+from repository.documents import get_documents_by_ids
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
-from service.retrieval.common import (
-    cosine_similarity,
-    embed_text,
-    get_document_title,
-    load_document_vectors,
+from service.retrieval.common import embed_text
+from service.vector_db.milvus_store import (
+    get_milvus_client,
+    resolve_collection,
+    run_dense_search,
+    run_hybrid_search,
 )
+from storage.db_models import DocumentType
 
 logger = logger(__name__)
 
 
 class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
-    """doc_id 목록을 입력받아 로컬 벡터 캐시에서 스니펫을 찾는다."""
+    """doc_id 목록을 입력받아 Milvus에서 검색."""
 
-    def __init__(self, source: str = "local") -> None:
+    def __init__(self, source: str = "milvus") -> None:
         super().__init__(source=source)
+        self.collection_name = resolve_collection(DocumentType.TEMP.value)
 
     def search(
         self,
@@ -30,66 +34,128 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
         *,
         doc_ids: List[str],
         threshold: float = 0.0,
+        mode: str = "hybrid",
+        workspace_id: Optional[int] = None,
     ) -> List[RetrievalResult]:
-        """
-        로컬 문서(doc_id 기반)에서 검색.
-
-        Args:
-            query: 사용자 질문
-            top_k: 반환할 최대 결과 수
-            doc_ids: 검색 대상 문서 ID 목록
-            threshold: 코사인 유사도 하한선
-        """
         if not doc_ids:
             return []
 
-        query_vec = embed_text(query)
-        title_cache: Dict[str, str] = {}
-        hits: List[RetrievalResult] = []
-        logger.debug("[LocalAdapter] doc_ids=%s", doc_ids)
+        query_vec = embed_text(query).tolist()
+        filter_expr = self._build_filter_expr(doc_ids=doc_ids, workspace_id=workspace_id)
+        client = get_milvus_client()
+        output_fields = ["doc_id", "chunk_idx", "page", "text", "workspace_id"]
 
-        for doc_id in doc_ids:
-            logger.debug("[LocalAdapter] doc_id=%s", doc_id)
-            vectors = load_document_vectors(doc_id)
-            if not vectors:
-                logger.warning("[LocalAdapter] no vectors for doc_id=%s", doc_id)
+        if mode == "hybrid":
+            raw_hits = run_hybrid_search(
+                client,
+                collection_name=self.collection_name,
+                query_vector=query_vec,
+                query_text=query,
+                limit=top_k,
+                filter_expr=filter_expr,
+                output_fields=output_fields,
+            )
+        else:
+            raw_hits = run_dense_search(
+                client,
+                collection_name=self.collection_name,
+                query_vector=query_vec,
+                limit=top_k,
+                filter_expr=filter_expr,
+                output_fields=output_fields,
+            )
+
+        return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
+
+    def _build_filter_expr(
+        self, *, doc_ids: List[str], workspace_id: Optional[int]
+    ) -> str:
+        clauses = []
+        if doc_ids:
+            quoted = ", ".join(f'"{doc_id}"' for doc_id in doc_ids)
+            clauses.append(f"doc_id in [{quoted}]")
+        if workspace_id is not None:
+            clauses.append(f"workspace_id == {int(workspace_id)}")
+        return " and ".join(clauses) if clauses else ""
+
+    def _normalize_hits(
+        self, raw_hits: Iterable, *, threshold: float
+    ) -> List[RetrievalResult]:
+        flattened = list(self._iter_hits(raw_hits))
+        doc_ids = {self._extract_field(hit, "doc_id") for hit in flattened}
+        doc_map = get_documents_by_ids([d for d in doc_ids if d])
+
+        results: List[RetrievalResult] = []
+        for hit in flattened:
+            score = self._extract_score(hit)
+            if score is None or score < threshold:
                 continue
-            if doc_id not in title_cache:
-                title_cache[doc_id] = get_document_title(doc_id)
-            title = title_cache[doc_id]
-
-            for idx, chunk in enumerate(vectors):
-                vec = chunk.get("values")
-                meta = chunk.get("metadata") or {}
-                text = str(meta.get("text") or "")
-                if not text:
-                    continue
-
-                if not isinstance(vec, list):
-                    continue
-                try:
-                    chunk_vec = np.asarray(vec, dtype=float)
-                except Exception:  # pragma: no cover - 잘못된 벡터 방어
-                    continue
-
-                score = cosine_similarity(query_vec, chunk_vec)
-                if score < threshold:
-                    continue
-
-                hits.append(
-                    self._build_result(
-                        doc_id=str(doc_id),
-                        title=title,
-                        text=text,
-                        score=score,
-                        chunk_index=idx,
-                        page=meta.get("page"),
-                        metadata={"chunk_index": idx, **meta},
-                    )
+            doc_id = str(self._extract_field(hit, "doc_id") or "")
+            if not doc_id:
+                continue
+            chunk_idx = self._extract_field(hit, "chunk_idx")
+            page = self._extract_field(hit, "page")
+            text = str(self._extract_field(hit, "text") or "").strip()
+            if not text:
+                continue
+            doc_meta = doc_map.get(doc_id, {})
+            title = doc_meta.get("filename") or doc_id
+            metadata = {
+                "workspace_id": doc_meta.get("workspace_id"),
+                "doc_type": doc_meta.get("doc_type"),
+            }
+            results.append(
+                self._build_result(
+                    doc_id=doc_id,
+                    title=title,
+                    text=text,
+                    score=float(score),
+                    chunk_index=int(chunk_idx or 0),
+                    page=int(page) if page is not None else None,
+                    metadata=metadata,
                 )
+            )
 
-        hits.sort(key=lambda r: r.score, reverse=True)
-        if top_k <= 0:
-            return hits
-        return hits[: max(1, int(top_k))]
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results
+
+    @staticmethod
+    def _iter_hits(raw_hits: Iterable) -> Iterable:
+        for batch in raw_hits or []:
+            if batch is None:
+                continue
+            for hit in batch:
+                yield hit
+
+    @staticmethod
+    def _extract_field(hit, field: str):
+        entity = getattr(hit, "entity", None)
+        if entity is not None:
+            getter = getattr(entity, "get", None)
+            if callable(getter):
+                value = getter(field)
+                if value is not None:
+                    return value
+            if hasattr(entity, field):
+                return getattr(entity, field)
+        if isinstance(hit, dict):
+            if field in hit:
+                return hit[field]
+            entity = hit.get("entity")
+            if isinstance(entity, dict) and field in entity:
+                return entity[field]
+        return getattr(hit, field, None)
+
+    @staticmethod
+    def _extract_score(hit) -> Optional[float]:
+        if hasattr(hit, "score"):
+            return float(getattr(hit, "score"))
+        if hasattr(hit, "distance"):
+            return float(getattr(hit, "distance"))
+        if isinstance(hit, dict):
+            if "score" in hit:
+                return float(hit["score"])
+            if "distance" in hit:
+                return float(hit["distance"])
+        return None
 

@@ -1,13 +1,12 @@
+import asyncio
+import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import config as app_config
-from repository.embedding_model import (
-    get_active_embedding_model_name,
-    get_embedding_model_path_by_name,
-)
 from sentence_transformers import SentenceTransformer
+from repository.rag_settings import get_rag_settings_row
 from utils import logger
 
 logger = logger(__name__)
@@ -28,15 +27,19 @@ def _resolve_model_root() -> Path:
 
 MODEL_ROOT_DIR = _resolve_model_root()
 
+_EMBED_CACHE: Dict[str, Tuple[Any, Any, Any]] = {}
+_EMBED_ACTIVE_KEY: Optional[str] = None
+_EMBED_LOCK = threading.Lock()
+
 def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
     """
     주어진 모델 키(embedding_models.name)를 실제 로컬 디렉토리에 매핑.
     1) DB의 model_path가 우선이며, 없을 경우 storage/embedding-models 폴더를 탐색.
     """
     key = (model_key or "bge").lower()
-
     try:
-        db_path = get_embedding_model_path_by_name(model_key)
+        embedding_key = get_rag_settings_row().get("embedding_key")
+        db_path = MODEL_ROOT_DIR / embedding_key
         if db_path:
             mp = Path(db_path).resolve()
             if mp.exists() and mp.is_dir():
@@ -71,13 +74,20 @@ def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
     return fallback.name, fallback
 
 
+def _load_hf_embedder_tuple(model_key: str) -> Tuple[Any, Any, Any]:
+    from service.retrieval.common import get_or_load_hf_embedder
+
+    _, model_dir = resolve_model_input(model_key)
+    return get_or_load_hf_embedder(str(model_dir))
+
+
 @lru_cache(maxsize=2)
 def load_embedding_model():
     """
     DB에서 활성화된 임베딩 모델을 조회하고 SentenceTransformer 로드.
     model_path는 DB(embedding_models) 또는 폴더 스캔 fallback으로 결정됨.
     """
-    model_name = get_active_embedding_model_name()  # 예: "embedding_qwen3_8b"
+    model_name = get_rag_settings_row().get("embedding_key")  # 예: "embedding_qwen3_8b"
     _, model_dir = resolve_model_input(model_name)  # model_dir는 이미 Path 객체
     
     if not model_dir.exists():
@@ -88,6 +98,7 @@ def load_embedding_model():
 
 _MODEL_MANAGER = None
 
+
 def get_model_manager():
     """지연 로딩으로 MODEL_MANAGER 가져오기"""
     global _MODEL_MANAGER
@@ -95,3 +106,41 @@ def get_model_manager():
         from service.admin.manage_admin_LLM import _MODEL_MANAGER as MGR
         _MODEL_MANAGER = MGR
     return _MODEL_MANAGER
+
+
+def _invalidate_embedder_cache() -> None:
+    global _EMBED_CACHE, _EMBED_ACTIVE_KEY
+    with _EMBED_LOCK:
+        _EMBED_CACHE.clear()
+        _EMBED_ACTIVE_KEY = None
+
+
+async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
+    """
+    비동기 래퍼: blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
+    이벤트 루프 블로킹 방지
+    """
+    loop = asyncio.get_running_loop()
+    # blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
+    return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
+
+
+def _get_or_load_embedder(model_key: str, preload: bool = False):
+    """
+    전역 캐시에서 (tok, model, device) 반환.
+    - 캐시에 없으면 로드해서 저장(지연 로딩)
+    - preload=True는 의미상 웜업 호출일 뿐, 반환 동작은 동일
+    """
+    global _EMBED_CACHE, _EMBED_ACTIVE_KEY
+    if not model_key:
+        raise ValueError(
+            "활성화된 임베딩 모델이 없습니다. 먼저 /v1/admin/vector/settings에서 모델을 설정하세요."
+        )
+    with _EMBED_LOCK:
+        if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
+            return _EMBED_CACHE[model_key]
+        _EMBED_CACHE.clear()
+        tok, model, device = _load_hf_embedder_tuple(model_key)
+        _EMBED_CACHE[model_key] = (tok, model, device)
+        _EMBED_ACTIVE_KEY = model_key
+        return _EMBED_CACHE[model_key]

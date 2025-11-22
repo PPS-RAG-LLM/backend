@@ -2,7 +2,7 @@
 from typing import Any, Dict, Generator, List
 
 from errors import BadRequestError
-from repository.embedding_model import get_active_embedding_model_name
+from repository.rag_settings import get_rag_settings_row
 from repository.workspace_chat import get_chat_history_by_thread_id
 from utils import logger
 from service.retrieval.unified import (
@@ -37,7 +37,8 @@ def _insert_rag_context(
     temp_doc_ids = extract_doc_ids_from_attachments(attachments)
 
     try:
-        model_key = get_active_embedding_model_name()
+        rag_settings = get_rag_settings_row()
+        model_key = rag_settings.get("embedding_key")
     except Exception as exc:  # pragma: no cover - 안전장치
         logger.warning("활성 임베딩 모델 조회 실패: %s", exc)
         model_key = None

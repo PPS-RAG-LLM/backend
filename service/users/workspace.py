@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from config import config
-from repository.documents import delete_workspace_documents_by_doc_ids, list_doc_ids_by_workspace
-from repository.rag_settings import get_vector_settings_row
+from repository.documents import list_doc_ids_by_workspace
+from repository.rag_settings import get_rag_settings_row
 from utils import generate_unique_slug, generate_thread_slug, logger
 from errors import BadRequestError, InternalServerError, NotFoundError
 from pathlib import Path
@@ -22,6 +22,7 @@ from repository.workspace_thread import (
     create_default_thread, 
     get_threads_by_workspace_id,
 )
+from service.manage_documents import delete_documents_by_ids
 
 logger = logger(__name__)
 
@@ -41,7 +42,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         raise BadRequestError("name is required")
     
     try: 
-        db_settings = get_vector_settings_row()
+        db_settings = get_rag_settings_row()
         
     except Exception as exc :
         logger.warning(f"Milvus DB 설정 조회 실패 : {exc}")
@@ -176,7 +177,6 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
 
 
 def delete_workspace(user_id: int, slug: str) -> None:
-    from service.users.documents.documents import delete_document_files
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     doc_ids_rows = list_doc_ids_by_workspace(workspace_id)
     doc_ids = [r["doc_id"] for r in doc_ids_rows]
@@ -184,13 +184,8 @@ def delete_workspace(user_id: int, slug: str) -> None:
     logger.debug(f"doc_ids: {doc_ids}")
     
     if doc_ids:
-        # 공통 함수 사용해서 파일 삭제
-        deleted_files = delete_document_files(doc_ids)
-        logger.info(f"File deletion summary: {deleted_files}")
-        
-        # DB 삭제
-        delete_workspace_documents_by_doc_ids(doc_ids, workspace_id)
-        logger.debug(f"deleted document records from workspace: {workspace_id}")
+        delete_documents_by_ids(doc_ids)
+        logger.debug("deleted %s documents before workspace removal", len(doc_ids))
 
     deleted = delete_workspace_by_workspace_id(workspace_id)
     if not deleted:

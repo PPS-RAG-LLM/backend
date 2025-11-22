@@ -120,8 +120,7 @@ pyflakes==3.2.0
 Pygments
 PyJWT==2.10.1
 pylint
-pymilvus==2.6.0b0
-pymilvus.model==0.3.2
+pymilvus==2.6.3
 PyMuPDF==1.26.3
 python-dateutil
 python-dotenv==1.1.1

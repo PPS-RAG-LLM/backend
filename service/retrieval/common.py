@@ -16,7 +16,6 @@ from utils import free_torch_memory, load_embedding_model, logger
 
 logger = logger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-vector_conf = app_config.get("vector_defaults", {}) or {}
 
 def _resolve_path(value: Optional[str], fallback: str) -> Path:
     path_val = value or fallback
@@ -206,8 +205,6 @@ def chunk_text(
     overlap: Optional[int] = None,
 ) -> List[str]:
     """간단한 토큰 길이 기반 청크 분할(단어 단위)."""
-    max_tokens = int(max_tokens or int(vector_conf.get("chunk_size")))
-    overlap = int(overlap if overlap is not None else int(vector_conf.get("overlap")))
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
     if overlap < 0 or overlap >= max_tokens:
