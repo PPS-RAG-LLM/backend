@@ -1,17 +1,19 @@
-import json
 from typing import Optional, Dict, Any
 from datetime import datetime
 from utils import logger
 from utils.database import get_session
 from utils.time import to_kst_string, now_kst_string, now_kst
 from storage.db_models import (
+    Document,
+    DocumentMetadata,
+    DocumentType,
     Workspace,
     WorkspaceUser,
     LlmModel,
     SystemPromptTemplate,
     User,
 )
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 from errors import DatabaseError
 
 logger = logger(__name__)
@@ -234,21 +236,37 @@ def update_workspace_vector_count(workspace_id: int) -> int:
     워크스페이스의 총 벡터 수를 계산하여 workspace.vector_count에 업데이트.
     Returns: 업데이트된 벡터 수
     """
-    from storage.db_models import Workspace, WorkspaceDocument
-    
     with get_session() as session:
-        # 1) 해당 워크스페이스의 모든 문서의 chunks 합산
-        stmt = select(WorkspaceDocument.metadata_json).where(
-            WorkspaceDocument.workspace_id == workspace_id
+        stmt = (
+            select(Document.doc_id, Document.payload)
+            .where(
+                Document.workspace_id == workspace_id,
+                Document.doc_type == DocumentType.WORKSPACE.value,
+            )
         )
-        rows = session.execute(stmt).scalars().all()
-        
+        rows = session.execute(stmt).all()
+
         total_chunks = 0
-        for metadata_json in rows:
-            metadata = json.loads(metadata_json or "{}")
-            total_chunks += metadata.get("chunks", 0)
-        
-        # 2) Workspace.vector_count 업데이트
+        missing: list[str] = []
+        for doc_id, payload in rows:
+            meta = (payload or {}).get("workspace_metadata") or {}
+            chunks = meta.get("chunks")
+            try:
+                value = int(chunks)
+            except (TypeError, ValueError):
+                missing.append(doc_id)
+            else:
+                total_chunks += value
+
+        if missing:
+            count_stmt = (
+                select(DocumentMetadata.doc_id, func.count())
+                .where(DocumentMetadata.doc_id.in_(missing))
+                .group_by(DocumentMetadata.doc_id)
+            )
+            for _, count in session.execute(count_stmt).all():
+                total_chunks += int(count or 0)
+
         stmt_update = (
             update(Workspace)
             .where(Workspace.id == workspace_id)
@@ -256,7 +274,7 @@ def update_workspace_vector_count(workspace_id: int) -> int:
         )
         session.execute(stmt_update)
         session.commit()
-        
+
         return total_chunks
 
 def get_workspace_by_workspace_id(

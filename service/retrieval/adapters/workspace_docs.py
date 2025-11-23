@@ -16,7 +16,7 @@ logger = logger(__name__)
 
 
 class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
-    """workspace_documents 테이블에 등록된 문서를 Milvus에서 검색한다."""
+    """documents 테이블에서 워크스페이스 문서로 등록된 항목을 Milvus에서 검색한다."""
 
     def __init__(self) -> None:
         super().__init__(source="workspace")

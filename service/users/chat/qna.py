@@ -6,10 +6,10 @@ from repository.rag_settings import get_rag_settings_row
 from repository.workspace_chat import get_chat_history_by_thread_id
 from utils import logger
 from service.retrieval.unified import (
-    DEFAULT_SOURCES,
     extract_doc_ids_from_attachments,
     unified_search,
 )
+from storage.db_models import DocumentType
 from service.retrieval.adapters.base import RetrievalResult
 from .common import (
     build_user_message_with_context,
@@ -165,9 +165,9 @@ def stream_chat_for_qna(
         temp_doc_ids, 
         thread_id
     )
-
 def _resolve_rag_sources(raw_sources: Any) -> tuple:
     """워크스페이스 설정에서 RAG 소스 배열을 안전하게 파싱."""
+    DEFAULT_SOURCES = [DocumentType.WORKSPACE.value, DocumentType.TEMP.value, DocumentType.ADMIN.value, DocumentType.LLM_TEST.value]
     if not raw_sources:
         return DEFAULT_SOURCES
 

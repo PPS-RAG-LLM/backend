@@ -4,6 +4,8 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import List, Dict
+WORKSPACE_DOC_TYPE = "WS_DOCS"
+
 
 # 프로젝트 루트 추가 (backend/에서 실행하지 않아도 import 가능)
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,11 +44,12 @@ def _fetch_docs_by_ids(conn: sqlite3.Connection, doc_ids: List[str]) -> Dict[str
     qmarks = ",".join(["?"] * len(doc_ids))
     cur = conn.execute(
         f"""
-        SELECT doc_id, filename, docpath
-        FROM workspace_documents
-        WHERE doc_id IN ({qmarks})
+        SELECT doc_id, filename, storage_path AS docpath
+        FROM documents
+        WHERE doc_type = ?
+          AND doc_id IN ({qmarks})
         """,
-        doc_ids,
+        [WORKSPACE_DOC_TYPE, *doc_ids],
     )
     return {r["doc_id"]: r for r in cur.fetchall()}
 
@@ -54,10 +57,13 @@ def _fetch_docs_by_ids(conn: sqlite3.Connection, doc_ids: List[str]) -> Dict[str
 def _fetch_all_docs(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     cur = conn.execute(
         """
-        SELECT doc_id, filename, docpath
-        FROM workspace_documents
+        SELECT doc_id, filename, storage_path AS docpath
+        FROM documents
+        WHERE doc_type = ?
         ORDER BY id DESC
         """
+        ,
+        (WORKSPACE_DOC_TYPE,),
     )
     return list(cur.fetchall())
 
@@ -101,20 +107,20 @@ def _delete_all_vectors(conn: sqlite3.Connection) -> int:
 
 def _delete_db_records(conn: sqlite3.Connection, doc_ids: List[str]) -> Dict[str, int]:
     if not doc_ids:
-        return {"workspace_documents": 0, "document_vectors": 0}
+        return {"documents": 0, "document_vectors": 0}
     qmarks = ",".join(["?"] * len(doc_ids))
     # document_vectors(1:N) 먼저 삭제
     dv = conn.execute(
         f"DELETE FROM document_vectors WHERE doc_id IN ({qmarks})",
         doc_ids,
     ).rowcount
-    # workspace_documents 삭제
+    # documents 삭제
     wd = conn.execute(
-        f"DELETE FROM workspace_documents WHERE doc_id IN ({qmarks})",
-        doc_ids,
+        f"DELETE FROM documents WHERE doc_type = ? AND doc_id IN ({qmarks})",
+        [WORKSPACE_DOC_TYPE, *doc_ids],
     ).rowcount
     conn.commit()
-    return {"workspace_documents": wd, "document_vectors": dv}
+    return {"documents": wd, "document_vectors": dv}
 
 
 def _remove_files(filename: str, doc_id: str, doc_rel_path: str, dry_run: bool = True) -> Dict[str, bool]:
@@ -157,7 +163,7 @@ def delete_by_doc_ids(doc_ids: List[str], dry_run: bool = True, vectors_only: bo
             for doc_id in doc_ids:
                 row = rows.get(doc_id)
                 if not row:
-                    print(f"[skip] doc_id not found in workspace_documents: {doc_id}")
+                    print(f"[skip] doc_id not found in documents table: {doc_id}")
                     continue
                 _remove_files(
                     filename=row["filename"],
@@ -166,11 +172,11 @@ def delete_by_doc_ids(doc_ids: List[str], dry_run: bool = True, vectors_only: bo
                     dry_run=dry_run,
                 )
         else:
-            print("[info] no matching workspace_documents; will still delete document_vectors for provided doc_ids.")
+            print("[info] no matching workspace documents; will still delete document_vectors for provided doc_ids.")
 
         # DB 삭제
         if dry_run:
-            print(f"[dry-run] would delete DB rows(workspace_documents + document_vectors) for: {doc_ids}")
+            print(f"[dry-run] would delete DB rows(documents + document_vectors) for: {doc_ids}")
         else:
             counts = _delete_db_records(conn, doc_ids)
             print(f"[db-removed] {counts}")
@@ -191,7 +197,7 @@ def delete_all(dry_run: bool = True, vectors_only: bool = False) -> None:
 
         rows = _fetch_all_docs(conn)
         if not rows:
-            print("[info] workspace_documents is empty.")
+            print("[info] workspace documents are empty.")
             return
 
         doc_ids = [r["doc_id"] for r in rows]
@@ -207,7 +213,7 @@ def delete_all(dry_run: bool = True, vectors_only: bool = False) -> None:
 
         # DB 삭제
         if dry_run:
-            print(f"[dry-run] would delete ALL DB rows(workspace_documents + document_vectors): total={len(doc_ids)}")
+            print(f"[dry-run] would delete ALL DB rows(documents + document_vectors): total={len(doc_ids)}")
         else:
             counts = _delete_db_records(conn, doc_ids)
             print(f"[db-removed] {counts}")
@@ -221,7 +227,7 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--doc-id", action="append", help="doc_id to delete (repeatable)", dest="doc_ids")
     g.add_argument("--all", action="store_true", help="delete all")
-    ap.add_argument("--vectors-only", action="store_true", help="delete only from document_vectors (no file or workspace_documents removal)")
+    ap.add_argument("--vectors-only", action="store_true", help="delete only from document_vectors (no file or documents removal)")
     ap.add_argument("--dry-run", action="store_true", help="preview without deleting")
     ap.add_argument("--db-path", help="override sqlite db path (absolute or relative to CWD)")
     args = ap.parse_args()

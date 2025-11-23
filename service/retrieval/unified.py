@@ -16,7 +16,6 @@ from utils import logger
 
 
 LOGGER = logger(__name__)
-DEFAULT_SOURCES = ("WS_DOCS", "TEMP_ATTACH", "ADMIN_DOCS", "LLM_TEST") # 워크스페이스 문서, 스레드 임시 문서, 관리자 문서, LLM 테스트 문서
 
 def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     """
@@ -59,7 +58,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
     elif "workspace" in sources:
         LOGGER.info("[UnifiedSearch] workspace source enabled but workspace_id missing")
 
-    if "TEMP_ATTACH_DOCS" in sources:
+    if "TEMP_ATTACH" in sources:
         attachment_doc_ids = extract_doc_ids_from_attachments(config.get("attachments"))
         if attachment_doc_ids:
             adapter = TempAttachmentsVectorAdapter()
@@ -96,7 +95,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         LOGGER.info("[UnifiedSearch] milvus hits=%s", len(milvus_hits))
         results.extend(milvus_hits)
 
-    if "LLM_TEST_DOCS" in sources:
+    if "LLM_TEST" in sources:
         sec_level = int(config.get("security_level") or 1)
         adapter = AdminDocsAdapter()
 

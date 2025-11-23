@@ -111,7 +111,7 @@ async def extract_documents():
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and _ext(p) in SUPPORTED_EXTS]
+    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and ext(p) in SUPPORTED_EXTS]
 
     # base(문서ID 유사)별로 버전 후보 묶기: (Path, date_num)
     grouped: dict[str, list[tuple[Path, int]]] = defaultdict(list)

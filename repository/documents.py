@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -12,8 +11,8 @@ from utils.database import get_session
 from storage.db_models import (
     Document,
     DocumentMetadata,
+    DocumentType,
     DocumentVector,
-    WorkspaceDocument,
 )
 
 logger = logger(__name__)
@@ -104,36 +103,30 @@ def insert_workspace_document(
     workspace_id: int,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> int:
-    """workspace_documents에 upsert하고 PK(id)를 반환한다."""
+    """
+    documents 테이블에 워크스페이스 전용 메타데이터를 병합한다.
+    기존 row가 없으면 ValueError를 발생시킨다(업로드 흐름에서 선행 upsert 필요).
+    """
+    metadata = metadata or {}
     with get_session() as session:
-        stmt = (
-            select(WorkspaceDocument)
-            .where(WorkspaceDocument.doc_id == doc_id)
-            .limit(1)
-        )
+        stmt = select(Document).where(Document.doc_id == doc_id).limit(1)
         existing = session.execute(stmt).scalar_one_or_none()
-        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
-        if existing is not None:
-            existing.filename = filename
-            existing.docpath = docpath
-            existing.workspace_id = int(workspace_id)
-            existing.metadata_json = metadata_json
-            existing.updated_at = now_kst()
-            existing.created_at = now_kst()
-            session.commit()
-            return int(existing.id)
+        if existing is None:
+            raise ValueError(f"Document not found for doc_id={doc_id}")
 
-        obj = WorkspaceDocument(
-            doc_id=doc_id,
-            filename=filename,
-            docpath=docpath,
-            workspace_id=int(workspace_id),
-            metadata_json=metadata_json,
-        )
-        session.add(obj)
+        payload = dict(existing.payload or {})
+        payload.setdefault("doc_info_path", docpath)
+        payload["workspace_metadata"] = metadata
+
+        existing.filename = filename
+        existing.storage_path = docpath or existing.storage_path
+        existing.workspace_id = int(workspace_id)
+        existing.doc_type = DocumentType.WORKSPACE.value
+        existing.payload = payload
+        existing.updated_at = now_kst()
+
         session.commit()
-        session.refresh(obj)
-        return int(obj.id)
+        return int(existing.id)
 
 
 def insert_document_vectors(
@@ -180,7 +173,13 @@ def insert_document_vectors(
 def list_doc_ids_by_workspace(workspace_id: int) -> List[Dict[str, Any]]:
     """주어진 워크스페이스에 매핑된 문서 doc_id 목록을 반환."""
     with get_session() as session:
-        stmt = select(WorkspaceDocument.doc_id).where(WorkspaceDocument.workspace_id == workspace_id)
+        stmt = (
+            select(Document.doc_id)
+            .where(
+                Document.workspace_id == workspace_id,
+                Document.doc_type == DocumentType.WORKSPACE.value,
+            )
+        )
         rows = session.execute(stmt).all()
         return [{"doc_id": r[0]} for r in rows]
 
@@ -189,17 +188,20 @@ def list_workspace_documents(workspace_id: int) -> List[Dict[str, Any]]:
     """주어진 워크스페이스에 매핑된 문서 메타데이터 목록(doc_id, filename, docpath, metadata)을 반환."""
     with get_session() as session:
         stmt = (
-            select(WorkspaceDocument)
-            .where(WorkspaceDocument.workspace_id == workspace_id)
-            .order_by(desc(WorkspaceDocument.id))
+            select(Document)
+            .where(
+                Document.workspace_id == workspace_id,
+                Document.doc_type == DocumentType.WORKSPACE.value,
+            )
+            .order_by(desc(Document.id))
         )
         rows = session.execute(stmt).scalars().all()
         return [
             {
                 "doc_id": r.doc_id,
                 "filename": r.filename,
-                "docpath": r.docpath,
-                "metadata": json.loads(r.metadata_json or "{}"),
+                "docpath": r.storage_path or (r.payload or {}).get("doc_info_path"),
+                "metadata": (r.payload or {}).get("workspace_metadata") or {},
             }
             for r in rows
         ]
@@ -209,7 +211,10 @@ def delete_workspace_documents_by_filenames(filenames: List[str]) -> int:
     if not filenames:
         return 0
     with get_session() as session:
-        stmt = delete(WorkspaceDocument).where(WorkspaceDocument.filename.in_(filenames))
+        stmt = delete(Document).where(
+            Document.doc_type == DocumentType.WORKSPACE.value,
+            Document.filename.in_(filenames),
+        )
         result = session.execute(stmt)
         session.commit()
         return int(result.rowcount or 0)
@@ -280,11 +285,12 @@ def delete_workspace_documents_by_doc_ids(
     if not doc_ids:
         return 0
     with get_session() as session:
-        stmt = delete(WorkspaceDocument).where(
-            WorkspaceDocument.doc_id.in_(doc_ids)
+        stmt = delete(Document).where(
+            Document.doc_type == DocumentType.WORKSPACE.value,
+            Document.doc_id.in_(doc_ids),
         )
         if workspace_id is not None:
-            stmt = stmt.where(WorkspaceDocument.workspace_id == int(workspace_id))
+            stmt = stmt.where(Document.workspace_id == int(workspace_id))
         result = session.execute(stmt)
         session.commit()
         return int(result.rowcount or 0)

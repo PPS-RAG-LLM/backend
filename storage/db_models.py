@@ -19,6 +19,7 @@ from utils.database import Base
 
 
 class DocumentType(str, Enum):
+    """문서가 저장되는 영역(관리자, 워크스페이스, 임시 첨부, LLM 테스트)을 구분하는 열거형입니다."""
     ADMIN = "ADMIN_DOCS"
     WORKSPACE = "WS_DOCS"
     TEMP = "TEMP_ATTACH"
@@ -26,6 +27,7 @@ class DocumentType(str, Enum):
 
 
 class Document(Base):
+    """원본 문서 메타데이터(식별자, 유형, 저장 경로, 보안 등)를 보관하고 다른 테이블의 기준이 되는 마스터 레코드입니다."""
     __tablename__ = "documents"
     __table_args__ = (
         Index("documents_doc_type_idx", "doc_type"),
@@ -37,7 +39,7 @@ class Document(Base):
     doc_type = Column(Text, nullable=False)
     workspace_id = Column(
         Integer,
-        ForeignKey("workspaces.id", ondelete="SET NULL", onupdate="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=True,
     )
     security_level = Column(Integer, nullable=True)
@@ -54,7 +56,6 @@ class Document(Base):
         onupdate=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
-
     metadata_entries = relationship(
         "DocumentMetadata",
         back_populates="document",
@@ -63,14 +64,12 @@ class Document(Base):
     vectors = relationship(
         "DocumentVector", back_populates="document", cascade="all, delete-orphan"
     )
-    workspace_document = relationship(
-        "WorkspaceDocument",
-        back_populates="document",
-        uselist=False,
-    )
+    workspace = relationship("Workspace", back_populates="documents")
+
 
 
 class DocumentMetadata(Base):
+    """문서의 페이지·청크별 메타데이터와 원문 텍스트(검색 스니펫용)를 저장하는 테이블입니다."""
     __tablename__ = "document_metadata"
     __table_args__ = (
         UniqueConstraint(
@@ -81,7 +80,6 @@ class DocumentMetadata(Base):
         ),
         Index("document_metadata_doc_idx", "doc_id"),
     )
-
     id = Column(Integer, primary_key=True, autoincrement=True)
     doc_id = Column(
         Text,
@@ -101,42 +99,12 @@ class DocumentMetadata(Base):
         nullable=False,
     )
     text = Column(Text, nullable=False)
-
     document = relationship("Document", back_populates="metadata_entries")
 
 
-class WorkspaceDocument(Base):
-    __tablename__ = "workspace_documents"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    doc_id = Column(
-        Text,
-        ForeignKey("documents.doc_id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    filename = Column(Text, nullable=False)
-    docpath = Column(Text, nullable=False)
-    workspace_id = Column(
-        Integer,
-        ForeignKey("workspaces.id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=False,
-    )
-    metadata_json = Column("metadata", Text)
-    created_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-    updated_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-    pinned = Column(Boolean, server_default=text("false"))
-    watched = Column(Boolean, server_default=text("false"))
-
-    workspace = relationship("Workspace", back_populates="documents")
-    document = relationship("Document", back_populates="workspace_document")
-
 
 class DocumentVector(Base):
+    """문서 청크의 임베딩 벡터를 저장하고, Milvus 컬렉션/버전/페이지/청크 인덱스를 함께 추적합니다."""
     __tablename__ = "document_vectors"
     __table_args__ = (
         UniqueConstraint(
@@ -263,7 +231,7 @@ class Workspace(Base):
     vector_search_mode = Column(Text, nullable=False, server_default=text("'hybrid'"))
 
     # 관계 정의
-    documents = relationship("WorkspaceDocument", back_populates="workspace")
+    documents = relationship("Document", back_populates="workspace")
     chats = relationship("WorkspaceChat", back_populates="workspace")
     threads = relationship("WorkspaceThread", back_populates="workspace")
     workspace_users = relationship("WorkspaceUser", back_populates="workspace")

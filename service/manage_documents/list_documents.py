@@ -47,7 +47,7 @@ def _build_local_file_item(docinfo_path: Path, payload: Dict[str, Any]) -> Dict[
 def list_local_documents_for_workspace(user_id: int, slug: str) -> Dict[str, Any]:
     """
     워크스페이스 슬러그로 등록된 문서 목록을 반환한다.
-    - DB(workspace_documents)에서 doc_id/filename/docpath를 조회
+    - DB(documents)에서 doc_id/filename/docpath를 조회
     - docpath로 documents-info JSON을 읽어 응답 스키마로 매핑
     """
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
