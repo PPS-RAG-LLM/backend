@@ -3,9 +3,39 @@ RAG 전처리 라우터 모듈
 확장자별로 적절한 전처리 함수를 호출하는 라우팅 기능 제공
 """
 from __future__ import annotations
+
 import logging
+import shutil
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+
+from tqdm import tqdm  # type: ignore
+
+from repository.documents import delete_documents_not_in_doc_ids
+from service.admin.manage_vator_DB import (
+    ADMIN_DOC_TYPE,
+    EXTRACTED_TEXT_DIR,
+    LOCAL_DATA_ROOT,
+    RAW_DATA_DIR,
+    TASK_TYPES,
+    SUPPORTED_EXTS,
+    determine_level_for_task,
+    get_security_level_rules_all,
+    parse_doc_version,
+    register_admin_document,
+)
+from utils.documents import generate_doc_id
+from service.preprocessing.extension.csv_preprocessing import _extract_csv
+from service.preprocessing.extension.doc_preprocessing import _extract_doc
+from service.preprocessing.extension.docx_preprocessing import _extract_docx
+from service.preprocessing.extension.excel_preprocessing import _extract_excel
+from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
+from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
+from service.preprocessing.extension.ppt_preprocessing import _extract_ppt
+from service.preprocessing.extension.pptx_preprocessing import _extract_pptx
+from service.preprocessing.extension.txt_preprocessing import _extract_plain_text
+from utils.time import now_kst_string
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +48,12 @@ def ext(p: Path) -> str:
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티에서 import)"""
     from service.preprocessing.extension.utils import _clean_text as _clean_text_util
+
     return _clean_text_util(s)
 
 
 def extract_any(path: Path) -> tuple[str, list[dict]]:
     """통합 문서 추출 라우터"""
-    from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-    from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
-    
     file_ext = ext(path)
     if file_ext == ".pdf":
         # PDF는 페이지 정보를 포함하지만, extract_any는 (text, tables)만 반환
@@ -59,27 +87,6 @@ async def extract_documents():
     Returns:
         dict: 전처리 결과
     """
-    import json
-    import shutil
-    from collections import defaultdict
-    from tqdm import tqdm  # type: ignore
-    
-    # 필요한 상수 및 함수 import
-    from service.admin.manage_vator_DB import (
-        EXTRACTED_TEXT_DIR,
-        LOCAL_DATA_ROOT,
-        RAW_DATA_DIR,
-        META_JSON_PATH,
-        TASK_TYPES,
-        SUPPORTED_EXTS,
-        determine_level_for_task,
-        parse_doc_version,
-        get_security_level_rules_all,
-    )
-    from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-    from service.preprocessing.extension.utils import _clean_text
-    from utils.time import now_kst_string
-    
     EXTRACTED_TEXT_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_DATA_ROOT.mkdir(parents=True, exist_ok=True)
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,13 +95,6 @@ async def extract_documents():
     all_rules = get_security_level_rules_all()  # {task: {"maxLevel":N, "levels":{...}}}
 
     # 이전 메타 로드
-    prev_meta: dict[str, dict] = {}
-    if META_JSON_PATH.exists():
-        try:
-            prev_meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            logger.exception("Failed to read META JSON; recreating.")
-
     # 중복 제거 로직: 파일명 마지막 토큰이 날짜/버전 숫자면 최신만 유지
     def _extract_base_and_date(p: Path):
         name = p.stem
@@ -138,11 +138,11 @@ async def extract_documents():
     if not kept:
         return {
             "message": "처리할 문서가 없습니다.",
-            "meta_path": str(META_JSON_PATH),
+            "document_count": 0,
             "deduplicated": {"removedCount": len(removed), "removed": removed},
         }
 
-    new_meta: dict[str, dict] = {}
+    processed_doc_ids: list[str] = []
     for src in tqdm(kept, desc="문서 전처리"):
         try:
             logger.info(f"[Extract] 파일 처리 시작: {src.name}")
@@ -259,49 +259,50 @@ async def extract_documents():
             except Exception as e:
                 logger.exception(f"[Extract] 통합 파일 저장 실패: {e}")
 
-            # doc_id/version 유추
+            # doc_id는 UUID로 생성하되, 버전은 기존 파일명 패턴에서 추출
             stem = rel_from_raw.stem
-            doc_id, version = parse_doc_version(stem)
+            _, version = parse_doc_version(stem)
+            doc_id = generate_doc_id()
 
-            info = {
-                "chars": len(text),
-                "lines": len(text.splitlines()),
-                "preview": (_clean_text(text[:200].replace("\n"," ")) + "…") if text else "",
-                "security_levels": sec_map,  # 작업유형별 보안레벨
-                "doc_id": doc_id,
-                "version": version,
-                "tables": tables or [],  # ★ 표 정보 추가
-                "pages": pages_text_dict if pages_text_dict else {},  # ★ 페이지별 텍스트 정보 (메타데이터용)
-                "total_pages": total_pages,  # ★ 총 페이지 수
-                "sourceExt": ext(src),  # 원본 확장자 기록
-                "saved_files": saved_files,  # 저장된 파일 경로 추가
-                # 페이로드 정보 (LLM에 전달하지 않지만 메타데이터로 저장)
-                "extraction_info": {
+            preview = (_clean_text(text[:200].replace("\n"," ")) + "…") if text else ""
+            extraction_info = {
                     "original_file": src.name,
                     "text_length": len(text),
                     "table_count": len(tables or []),
                     "extracted_at": now_kst_string(),
-                },
             }
-            new_meta[str(dest_rel)] = info
-            logger.info(f"[Extract] {src.name}: 메타데이터 저장 완료 (텍스트={len(text)}자, 표={len(tables or [])}개)")
+            register_admin_document(
+                doc_id=doc_id,
+                filename=src.name,
+                rel_text_path=str(txt_rel.as_posix()),
+                rel_source_path=str(dest_rel.as_posix()),
+                sec_map=sec_map,
+                version=int(version),
+                preview=preview,
+                tables=tables or [],
+                total_pages=total_pages,
+                pages=pages_text_dict if pages_text_dict else {},
+                source_ext=ext(src),
+                extraction_info=extraction_info,
+            )
+            processed_doc_ids.append(doc_id)
+            logger.info(
+                f"[Extract] {src.name}: 메타데이터 저장 완료 (텍스트={len(text)}자, 표={len(tables or [])}개)"
+            )
 
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to process: %s", src)
-            try:
-                rel_from_raw = src.relative_to(RAW_DATA_DIR)
-                dest_rel = Path("securityLevel1") / rel_from_raw
-                new_meta[str(dest_rel)] = {"error": str(e)}
-            except Exception:
-                new_meta[src.name] = {"error": str(e)}
 
-    META_JSON_PATH.write_text(
-        json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    deleted_docs = 0
+    if processed_doc_ids:
+        unique_ids = list(dict.fromkeys(processed_doc_ids))
+        deleted_docs = delete_documents_not_in_doc_ids(ADMIN_DOC_TYPE, unique_ids)
+
     return {
         "message": "문서 추출 완료",
         "file_count": len(kept),
-        "meta_path": str(META_JSON_PATH),
+        "document_count": len(processed_doc_ids),
+        "deleted_documents": int(deleted_docs),
         "deduplicated": {"removedCount": len(removed), "removed": removed},
     }
 

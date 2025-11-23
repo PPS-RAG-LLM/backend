@@ -18,6 +18,22 @@ from storage.db_models import (
 logger = logger(__name__)
 
 
+def _serialize_document(row: Document) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "doc_id": row.doc_id,
+        "doc_type": row.doc_type,
+        "filename": row.filename,
+        "workspace_id": row.workspace_id,
+        "storage_path": row.storage_path,
+        "source_path": row.source_path,
+        "payload": row.payload or {},
+        "security_level": row.security_level,
+        "updated_at": row.updated_at,
+        "created_at": row.created_at,
+    }
+
+
 def upsert_document(
     *,
     doc_id: str,
@@ -302,6 +318,54 @@ def delete_documents(doc_ids: List[str]) -> int:
         return 0
     with get_session() as session:
         stmt = delete(Document).where(Document.doc_id.in_(doc_ids))
+        result = session.execute(stmt)
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def list_documents_by_type(
+    doc_type: str,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """지정 doc_type의 문서 메타데이터 목록을 반환한다."""
+    with get_session() as session:
+        stmt = (
+            select(Document)
+            .where(Document.doc_type == doc_type)
+            .order_by(desc(Document.updated_at))
+            .offset(max(0, int(offset)))
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(0, int(limit)))
+        rows = session.execute(stmt).scalars().all()
+        return [_serialize_document(r) for r in rows]
+
+
+def delete_documents_by_type_and_ids(doc_type: str, doc_ids: List[str]) -> int:
+    """특정 doc_type에 속한 문서 중 doc_id 목록을 삭제한다."""
+    if not doc_ids:
+        return 0
+    with get_session() as session:
+        stmt = delete(Document).where(
+            Document.doc_type == doc_type,
+            Document.doc_id.in_(doc_ids),
+        )
+        result = session.execute(stmt)
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def delete_documents_not_in_doc_ids(doc_type: str, doc_ids: List[str]) -> int:
+    """
+    doc_type에 해당하는 문서들 중 전달된 doc_id 목록에 포함되지 않는 항목을 삭제한다.
+    doc_ids가 비어 있으면 해당 doc_type 전체를 삭제한다.
+    """
+    with get_session() as session:
+        stmt = delete(Document).where(Document.doc_type == doc_type)
+        if doc_ids:
+            stmt = stmt.where(~Document.doc_id.in_(doc_ids))
         result = session.execute(stmt)
         session.commit()
         return int(result.rowcount or 0)

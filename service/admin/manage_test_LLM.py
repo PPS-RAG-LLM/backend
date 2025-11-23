@@ -10,6 +10,11 @@ from typing import Optional, Dict, Any, List, Tuple
 import uuid
 from config import config as app_config
 from repository.llm_test_session import get_test_session_by_sid, insert_test_session
+from repository.documents import (
+    delete_documents_by_type_and_ids,
+    upsert_document,
+)
+from storage.db_models import DocumentType
 from service.preprocessing.rag_preprocessing import ext, extract_any
 from service.retrieval.common import hf_embed_text, chunk_text
 from service.retrieval.pipeline.milvus_pipeline import build_dense_hits, build_rerank_payload, load_snippet_from_store
@@ -40,6 +45,46 @@ SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
 _SHARED_META = VAL_DIR / ".shared_session.json"         # TODO: DB로 마이그레이션
 VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
+
+LLM_TEST_DOC_TYPE = DocumentType.LLM_TEST.value
+
+
+def _session_doc_id(sid: str, base: str) -> str:
+    return f"{sid}:{base}"
+
+
+def _max_sec_level(sec_map: Dict[str, int]) -> int:
+    vals = [int(v) for v in sec_map.values() if v]
+    return max(vals or [1])
+
+
+def _record_llm_test_document(
+    *,
+    doc_id: str,
+    filename: str,
+    sid: str,
+    rel_text_path: str,
+    source_path: str,
+    sec_map: Dict[str, int],
+    version: int,
+) -> None:
+    payload = {
+        "security_levels": sec_map,
+        "version": int(version),
+        "session_id": sid,
+        "saved_files": {"text": rel_text_path, "source": source_path},
+        "source_ext": Path(filename).suffix,
+        "updated_at": now_kst_string(),
+    }
+    upsert_document(
+        doc_id=doc_id,
+        doc_type=LLM_TEST_DOC_TYPE,
+        filename=filename,
+        storage_path=rel_text_path,
+        source_path=source_path,
+        security_level=_max_sec_level(sec_map),
+        payload=payload,
+    )
 # ===== 외부 의존 (기존 모듈 재사용) =====
 from service.admin.manage_admin_LLM import (
     _connect,
@@ -59,6 +104,7 @@ from service.admin.manage_vator_DB import (
     split_for_varchar_bytes,
 )
 from utils.model_load import _get_or_load_embedder_async
+from utils.time import now_kst_string
 
 # ===== (옵션) 모델 스트리머 (가능 시 스트림, 실패 시 _simple_generate 폴백) =====
 try:
@@ -740,14 +786,18 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
     deleted_total = 0
     per_file: dict[str, int] = {}
 
+    doc_ids_to_remove: set[str] = set()
+
     for name in (file_names or []):
         stem = Path(name).stem
         try:
             base_id, _ = parse_doc_version(stem)
         except Exception:
             base_id = stem
+        doc_key = _session_doc_id(sid, base_id)
+        doc_ids_to_remove.add(doc_key)
         try:
-            filt = f"doc_id == '{base_id}'{task_filter}"
+            filt = f"doc_id == '{doc_key}'{task_filter}"
             client.delete(collection_name=coll, filter=filt)
             deleted_total += 1
             per_file[name] = per_file.get(name, 0) + 1
@@ -767,6 +817,12 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
         client.load_collection(collection_name=coll)
     except Exception:
         pass
+
+    if doc_ids_to_remove:
+        try:
+            delete_documents_by_type_and_ids(LLM_TEST_DOC_TYPE, list(doc_ids_to_remove))
+        except Exception:
+            logger.exception("[test-delete] failed to remove document metadata")
 
     return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file, "sid": sid}
     
@@ -817,7 +873,8 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         abs_txt.write_text(file_text, encoding="utf-8")
 
         stem = file_path.stem
-        doc_id, ver = parse_doc_version(stem)
+        base_doc_id, ver = parse_doc_version(stem)
+        doc_id = _session_doc_id(sid, base_doc_id)
 
         try:
             client.delete(coll, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
@@ -888,6 +945,16 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         if batch:
             client.insert(collection_name=coll, data=batch)
             total += len(batch)
+
+        _record_llm_test_document(
+            doc_id=doc_id,
+            filename=file_path.name,
+            sid=sid,
+            rel_text_path=str(rel_txt.as_posix()),
+            source_path=str(file_path),
+            sec_map=sec_map,
+            version=int(ver),
+        )
 
     try:
         client.flush(coll)

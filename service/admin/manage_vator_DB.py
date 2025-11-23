@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 import asyncio
-import json
 import logging
 import re
 import shutil
@@ -18,8 +17,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 from config import config as app_config
 from repository.rag_settings import get_rag_settings_row, set_rag_settings_row
+from repository.documents import (
+    bulk_upsert_document_metadata,
+    delete_documents_by_type_and_ids,
+    delete_documents_not_in_doc_ids,
+    insert_document_vectors,
+    list_documents_by_type,
+    upsert_document,
+)
 from utils.database import get_session
+from utils.documents import generate_doc_id
 from storage.db_models import (
+    DocumentType,
     RagSettings,
     SecurityLevelConfigTask,
     SecurityLevelKeywordsTask,
@@ -200,9 +209,9 @@ RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/user_data/row_data")
 LOCAL_DATA_ROOT = _cfg_path("local_data_root", "storage/user_data/preprocessed_data")
 RESOURCE_DIR = _cfg_path("resources_dir", str(BASE_DIR / "resources"))
 EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
-META_JSON_PATH = _cfg_path("meta_json_path", "storage/extracted_texts/_extraction_meta.json")
 MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
 RERANK_MODEL_PATH = _cfg_path("rerank_model_path", "storage/rerank_model/Qwen3-Reranker-0.6B")
+VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
 
 DATABASE_CFG = app_config.get("database", {}) or {}
 SQLITE_DB_PATH = (PROJECT_ROOT / Path(DATABASE_CFG.get("path", "storage/pps_rag.db"))).resolve()
@@ -224,7 +233,198 @@ NEWLINES_RE = re.compile(r"\n{3,}")
 
 # 확장자별 추출 함수들은 service/preprocessing/rag_preprocessing.py와 
 # service/preprocessing/extension/ 폴더로 이동했습니다.
-from service.preprocessing.rag_preprocessing import ext, extract_any
+
+# -------------------------------------------------
+# Admin 문서 메타데이터 헬퍼
+# -------------------------------------------------
+ADMIN_DOC_TYPE = DocumentType.ADMIN.value
+
+
+def _ext(value: Path | str) -> str:
+    """Path helper returning lowercase suffix."""
+    return Path(value).suffix.lower()
+
+
+def _relative_to(base: Path, target: Path) -> str:
+    try:
+        return target.relative_to(base).as_posix()
+    except ValueError:
+        return str(target)
+
+
+def _max_security_level(sec_map: Dict[str, int]) -> int:
+    if not sec_map:
+        return 1
+    levels = [int(v) for v in sec_map.values() if isinstance(v, (int, float, str))]
+    parsed = []
+    for lv in levels:
+        try:
+            parsed.append(int(lv))
+        except Exception:
+            continue
+    return max(parsed or [1])
+
+
+def _extract_insert_ids(result: Any) -> List[str]:
+    """
+    Milvus insert 결과에서 primary key 리스트를 추출한다.
+    다양한 리턴 타입(dict/InsertResult 등)을 모두 처리한다.
+    """
+    ids: Any = None
+    if isinstance(result, dict):
+        ids = (
+            result.get("ids")
+            or result.get("primary_keys")
+            or result.get("inserted_ids")
+        )
+    else:
+        ids = getattr(result, "primary_keys", None) or getattr(result, "ids", None)
+    if not ids:
+        return []
+    return [str(pk) for pk in ids]
+
+
+def _build_admin_payload(
+    *,
+    sec_map: Dict[str, int],
+    version: int,
+    preview: str,
+    tables: List[Dict[str, Any]],
+    total_pages: int,
+    saved_files: Dict[str, str],
+    pages: Dict[str, Any],
+    source_ext: str,
+    extraction_info: Dict[str, Any],
+    rel_key: str,
+) -> Dict[str, Any]:
+    return {
+        "security_levels": sec_map,
+        "version": int(version),
+        "preview": preview,
+        "tables": tables or [],
+        "total_pages": int(total_pages or 0),
+        "saved_files": saved_files,
+        "pages": pages or {},
+        "source_ext": source_ext,
+        "doc_rel_key": rel_key,
+        "extraction_info": extraction_info,
+    }
+
+
+def register_admin_document(
+    *,
+    doc_id: str,
+    filename: str,
+    rel_text_path: str,
+    rel_source_path: str,
+    sec_map: Dict[str, int],
+    version: int,
+    preview: str,
+    tables: List[Dict[str, Any]],
+    total_pages: int,
+    pages: Dict[str, Any],
+    source_ext: str,
+    extraction_info: Dict[str, Any],
+) -> None:
+    payload = _build_admin_payload(
+        sec_map=sec_map,
+        version=version,
+        preview=preview,
+        tables=tables,
+        total_pages=total_pages,
+        saved_files={"text": rel_text_path, "source": rel_source_path},
+        pages=pages,
+        source_ext=source_ext,
+        extraction_info=extraction_info,
+        rel_key=rel_source_path,
+    )
+    upsert_document(
+        doc_id=doc_id,
+        doc_type=ADMIN_DOC_TYPE,
+        filename=filename,
+        storage_path=rel_text_path,
+        source_path=rel_source_path,
+        security_level=_max_security_level(sec_map),
+        payload=payload,
+    )
+
+
+def _doc_matches_tokens(doc: Dict[str, Any], tokens: set[str]) -> bool:
+    if not tokens:
+        return True
+    payload = doc.get("payload") or {}
+    candidates = [
+        doc.get("doc_id"),
+        doc.get("filename"),
+        Path(str(doc.get("filename") or "")).stem,
+        doc.get("storage_path"),
+        Path(str(doc.get("storage_path") or "")).name,
+        Path(str(doc.get("storage_path") or "")).stem,
+        doc.get("source_path"),
+        Path(str(doc.get("source_path") or "")).name,
+        payload.get("doc_rel_key"),
+    ]
+    if payload.get("doc_rel_key"):
+        candidates.append(Path(str(payload.get("doc_rel_key"))).name)
+        candidates.append(Path(str(payload.get("doc_rel_key"))).stem)
+    for value in candidates:
+        if value and str(value).lower() in tokens:
+            return True
+    return False
+
+
+def _load_admin_documents(file_keys_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    docs = list_documents_by_type(ADMIN_DOC_TYPE)
+    if not file_keys_filter:
+        return docs
+    tokens = {str(f).lower() for f in file_keys_filter if str(f).strip()}
+    if not tokens:
+        return docs
+    return [doc for doc in docs if _doc_matches_tokens(doc, tokens)]
+
+
+def _doc_name_tokens(doc: Dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+
+    def _push(value: Any) -> None:
+        if not value:
+            return
+        try:
+            s = str(value).strip()
+        except Exception:
+            return
+        if not s:
+            return
+        tokens.add(s.lower())
+        try:
+            p = Path(s)
+            tokens.add(p.name.lower())
+            tokens.add(p.stem.lower())
+        except Exception:
+            pass
+
+    _push(doc.get("doc_id"))
+    _push(doc.get("filename"))
+    _push(doc.get("storage_path"))
+    _push(doc.get("source_path"))
+    payload = doc.get("payload") or {}
+    _push(payload.get("doc_rel_key"))
+    saved = payload.get("saved_files") or {}
+    for path in saved.values():
+        _push(path)
+    return {t for t in tokens if t}
+
+
+def _build_doc_name_index() -> Dict[str, str]:
+    docs = list_documents_by_type(ADMIN_DOC_TYPE)
+    index: Dict[str, str] = {}
+    for doc in docs:
+        doc_id = str(doc.get("doc_id") or "").strip()
+        if not doc_id:
+            continue
+        for token in _doc_name_tokens(doc):
+            index.setdefault(token, doc_id)
+    return index
 
 
 # -------------------------------------------------
@@ -263,12 +463,12 @@ class SinglePDFIngestRequest(BaseModel):
 
 
 # ====== New helpers ======
-def save_raw_file(filename: str, content: bytes) -> str:
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    out = RAW_DATA_DIR / filename
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(content)
-    return str(out)
+# def save_raw_file(filename: str, content: bytes) -> str:
+#     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+#     out = RAW_DATA_DIR / filename
+#     out.parent.mkdir(parents=True, exist_ok=True)
+#     out.write_bytes(content)
+#     return str(out)
 
 
 def save_raw_to_row_data(f):
@@ -654,247 +854,278 @@ def parse_doc_version(stem: str) -> Tuple[str, int]:
 # -------------------------------------------------
 async def ingest_embeddings(
     model_key: str | None = None,
-    chunk_size: int | None = None,
-    overlap: int | None = None,
     target_tasks: list[str] | None = None,
+    max_token: int = 512,
+    overlab: int = 64,
     collection_name: str = ADMIN_COLLECTION,
-    file_keys_filter: list[str] | None = None,  # ★ 추가: 특정 파일만 인제스트
+    file_keys_filter: list[str] | None = None,
 ):
     """
-    META_JSON을 읽어 추출된 텍스트(.txt)들을 인제스트한다.
+    documents 테이블에 저장된 관리자 문서를 기준으로 추출된 텍스트(.txt)를 인제스트한다.
     - VARCHAR(32768 bytes) 초과 방지: split_for_varchar_bytes 로 안전 분할
     - 표는 [[TABLE ...]] 머리글 유지, 이어지는 조각은 [[TABLE_CONT i/n]] 마커로 연속성 표시
-    - collection_name 파라미터를 끝까지 사용(기본/세션 컬렉션 공용)
-    - file_keys_filter 가 주어지면 해당되는 파일(meta key/파일명/스텀)이 '포함'된 항목만 인제스트
+    - file_keys_filter 전달 시 doc_id/파일명/스토리지 경로가 일치하는 문서만 인제스트
     """
-    # ==== 설정/모델 ====
-    settings = get_vector_settings()
-    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
-    if not META_JSON_PATH.exists():
-        return {"error": "메타 JSON이 없습니다. 먼저 PDF/문서 추출을 수행하세요."}
-
-    eff_model_key = model_key or settings["embeddingModel"]
-    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    
-    # 벡터 차원 검증
+    tok, model, device = await _get_or_load_embedder_async(model_key)
     probe_vec = hf_embed_text(tok, model, device, "probe")
     emb_dim = int(probe_vec.shape[0])
-    logger.info(f"[Ingest] 임베딩 모델: {eff_model_key}, 벡터 차원: {emb_dim}")
-    
+    logger.info("[Ingest] 임베딩 모델: %s, 벡터 차원: %s", model_key, emb_dim)
+
     client = get_milvus_client()
-    
-    # 기존 컬렉션이 있으면 차원을 확인하고, 다르면 삭제
     if collection_name in client.list_collections():
         try:
-            # 컬렉션 정보 확인
             desc = client.describe_collection(collection_name)
             existing_dim = None
             for field in desc.get("fields", []):
                 if field.get("name") == "embedding":
                     existing_dim = field.get("params", {}).get("dim")
                     break
-            
             if existing_dim and int(existing_dim) != emb_dim:
-                logger.warning(f"[Ingest] 차원 불일치: 기존={existing_dim}, 새모델={emb_dim}. 컬렉션 재생성.")
+                logger.warning("[Ingest] 차원 불일치: 기존=%s, 새모델=%s. 컬렉션 재생성.", existing_dim, emb_dim)
                 client.drop_collection(collection_name)
-        except Exception as e:
-            logger.warning(f"[Ingest] 컬렉션 정보 확인 실패: {e}. 재생성 시도.")
+        except Exception as exc:
+            logger.warning("[Ingest] 컬렉션 정보 확인 실패: %s. 재생성 시도.", exc)
             try:
                 client.drop_collection(collection_name)
             except Exception:
                 pass
-    
+
     ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=collection_name)
 
-    # ==== META 로드 및 대상 필터 구성 ====
-    meta: dict = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
     tasks = [t for t in (target_tasks or TASK_TYPES) if t in TASK_TYPES]
     if not tasks:
         return {"error": f"유효한 작업유형이 없습니다. 허용: {TASK_TYPES}"}
 
-    filter_tokens = set()
-    if file_keys_filter:
-        # meta key / 파일명 / 스템을 모두 매칭할 수 있도록 소문자 토큰화
-        for f in file_keys_filter:
-            p = Path(str(f))
-            filter_tokens.add(str(f).lower())
-            filter_tokens.add(p.name.lower())
-            filter_tokens.add(p.stem.lower())
+    documents = _load_admin_documents(file_keys_filter)
+    if not documents:
+        return {"error": "관리자 문서 메타데이터가 없습니다. 먼저 문서를 추출하세요."}
 
     total_inserted = 0
     BATCH_SIZE = 128
 
-    # ==== 인제스트 ====
-    # 주의: EXTRACTED_TEXT_DIR 안의 *.txt 를 돌면서, 해당 txt 가 어떤 meta key(원본 확장자)와 매칭되는지 찾는다.
-    for txt_path in EXTRACTED_TEXT_DIR.rglob("*.txt"):
-        rel_txt = txt_path.relative_to(EXTRACTED_TEXT_DIR)
-
-        # 다양한 확장자 후보로 META key 찾기
-        cands = [rel_txt.with_suffix(ext).as_posix() for ext in SUPPORTED_EXTS]
-        meta_key = next((k for k in cands if k in meta), None)
-        if not meta_key:
+    for doc in documents:
+        rel_txt = str(doc.get("storage_path") or "").strip()
+        if not rel_txt:
+            continue
+        txt_path = EXTRACTED_TEXT_DIR / Path(rel_txt)
+        if not txt_path.exists():
+            logger.warning("[Ingest] 텍스트 파일 누락: %s", txt_path)
             continue
 
-        # ★ 업로드한 것만 인제스트 옵션: meta key / 파일명 / 스템 기준 필터링
-        if filter_tokens:
-            p = Path(meta_key)
-            if (meta_key.lower() not in filter_tokens and
-                p.name.lower() not in filter_tokens and
-                p.stem.lower() not in filter_tokens):
-                continue
+        payload = doc.get("payload") or {}
+        sec_map = payload.get("security_levels", {}) or {}
+        doc_id = str(doc.get("doc_id") or "").strip()
+        version = int(payload.get("version") or 0)
+        if not doc_id:
+            doc_id, parsed_version = parse_doc_version(Path(rel_txt).stem)
+            version = version or parsed_version
+        if version == 0:
+            _, version = parse_doc_version(Path(rel_txt).stem)
 
-        entry = meta.get(meta_key) or {}
-        sec_map = entry.get("security_levels", {}) or {}
-
-        # doc_id / version 확보(없으면 파일명에서 유추)
-        doc_id = entry.get("doc_id")
-        version = int(entry.get("version", 0) or 0)
-        if not doc_id or version == 0:
-            _id, _ver = parse_doc_version(Path(meta_key).stem)
-            doc_id = doc_id or _id
-            version = version or _ver
-            entry["doc_id"] = doc_id
-            entry["version"] = version
-            meta[meta_key] = entry  # 변경사항 반영
-
-        # 기존 동일 문서/버전 삭제(작업유형 상관 없이)
-        try:
-            client.delete(
-                collection_name=collection_name,
-                filter=f"doc_id == '{doc_id}' && version <= {int(version)}",
-            )
-        except Exception:
-            pass
-
-        # 본문 텍스트 로드 및 청크화
         try:
             text = txt_path.read_text(encoding="utf-8")
         except Exception:
-            # 혹시 모를 인코딩 문제 폴백
             text = txt_path.read_text(errors="ignore")
-        
-        # 통합 파일을 직접 파싱하여 페이지별로 분할 (텍스트와 표가 함께 저장된 파일)
-        # 페이지 구분선 "---" 기준으로 페이지 분리
-        def _parse_integrated_file(text: str) -> list[tuple[int, str]]:
-            """통합 파일을 페이지별로 분할 (페이지 구분선 "---" 기준)"""
+
+        def _parse_integrated_file(content: str) -> list[tuple[int, str]]:
             page_blocks: list[tuple[int, str]] = []
-            lines = text.split('\n')
+            lines = content.split("\n")
             current_page = 1
-            current_content = []
-            
+            current_content: List[str] = []
             for line in lines:
-                # 페이지 구분선 확인: "---" (빈 줄로 둘러싸인 경우)
                 if line.strip() == "---":
-                    # 이전 페이지 저장
                     if current_content:
-                        page_text = '\n'.join(current_content).strip()
+                        page_text = "\n".join(current_content).strip()
                         if page_text:
                             page_blocks.append((current_page, page_text))
                     current_page += 1
                     current_content = []
                 else:
                     current_content.append(line)
-            
-            # 마지막 페이지 저장
             if current_content:
-                page_text = '\n'.join(current_content).strip()
+                page_text = "\n".join(current_content).strip()
                 if page_text:
                     page_blocks.append((current_page, page_text))
-            
-            # 페이지 구분선이 없으면 전체를 1페이지로 처리
-            if not page_blocks:
-                if text.strip():
-                    page_blocks = [(1, text.strip())]
-            
+            if not page_blocks and content.strip():
+                page_blocks = [(1, content.strip())]
             return page_blocks
-        
-        # 통합 파일 파싱
+
         page_blocks = _parse_integrated_file(text)
-        logger.info(f"[Ingest] 통합 파일 파싱: {len(page_blocks)}개 페이지 블록 발견")
-        
-        # 전체 문서에서 청크 인덱스 누적 (페이지별로 0부터 시작하지 않도록)
-        chunks_with_page: list[tuple[int, int, str]] = []  # (page, chunk_idx, chunk_text)
-        global_chunk_idx = 0  # 전체 문서에서 누적되는 청크 인덱스
-        
+        logger.info("[Ingest] doc_id=%s → %s개 페이지 블록", doc_id, len(page_blocks))
+
+        chunks_with_page: list[tuple[int, int, str]] = []
+        global_chunk_idx = 0
         for page_num, page_text in page_blocks:
             if not page_text:
                 continue
-            page_chunks = chunk_text(page_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
+            page_chunks = chunk_text(page_text, max_tokens=max_token, overlap=overlab)
             for chunk in page_chunks:
-                if chunk.strip():  # 빈 청크 제외
+                if chunk.strip():
                     chunks_with_page.append((page_num, global_chunk_idx, chunk))
                     global_chunk_idx += 1
-        
-        logger.info(f"[Ingest] 총 {global_chunk_idx}개 청크 생성 (페이지별 청크 인덱스 누적)")
-        
-        # 표 블록 처리
-        # 통합 파일에 이미 표가 포함되어 있으므로, 표를 별도로 인제스트하지 않음
-        # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
-        tables = entry.get("tables", []) or []
-        logger.info(f"[Ingest] 표 정보: {len(tables)}개 (통합 파일에 이미 포함되어 있으므로 별도 인제스트 안 함)")
 
-        batch: list[dict] = []
+        tables = payload.get("tables", []) or []
+        logger.info("[Ingest] doc_id=%s 표 정보: %s개", doc_id, len(tables))
+
+        rel_txt_posix = Path(rel_txt).as_posix()
+        chunk_entries: List[Dict[str, Any]] = []
+        metadata_records: List[Dict[str, Any]] = []
+        metadata_seen: set[int] = set()
+
+        for page_num, idx, chunk_text_val in chunks_with_page:
+            for part in split_for_varchar_bytes(chunk_text_val):
+                chunk_entries.append(
+                    {
+                        "page": int(page_num),
+                        "chunk_idx": int(idx),
+                        "text": part,
+                    }
+                )
+            idx_int = int(idx)
+            if idx_int not in metadata_seen:
+                metadata_records.append(
+                    {
+                        "page": int(page_num),
+                        "chunk_index": idx_int,
+                        "text": chunk_text_val,
+                        "payload": {"path": rel_txt_posix},
+                    }
+                )
+                metadata_seen.add(idx_int)
+
+        base_idx = len(chunks_with_page)
+        for t_i, table in enumerate(tables):
+            md = (table.get("text") or "").strip()
+            if not md:
+                continue
+            page = int(table.get("page", 0))
+            bbox = table.get("bbox") or []
+            bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+            table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+            for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
+                chunk_idx = base_idx + t_i * 1000 + sub_j
+                chunk_entries.append(
+                    {
+                        "page": int(page),
+                        "chunk_idx": int(chunk_idx),
+                        "text": part,
+                    }
+                )
+                if chunk_idx not in metadata_seen:
+                    metadata_records.append(
+                        {
+                            "page": int(page),
+                            "chunk_index": int(chunk_idx),
+                            "text": part,
+                            "payload": {"path": rel_txt_posix, "table": True},
+                        }
+                    )
+                    metadata_seen.add(chunk_idx)
+
+        if metadata_records:
+            try:
+                bulk_upsert_document_metadata(doc_id=doc_id, records=metadata_records)
+            except Exception:
+                logger.exception("Failed to upsert metadata for doc_id=%s", doc_id)
+
+        batch: List[Dict[str, Any]] = []
+        batch_meta: List[Dict[str, int]] = []
+        vector_records: List[Dict[str, Any]] = []
+
+        def flush_batch() -> None:
+            nonlocal batch, batch_meta, total_inserted
+            if not batch:
+                return
+            try:
+                result = client.insert(collection_name=collection_name, data=batch)
+            except Exception:
+                logger.exception("Milvus insert 실패(doc_id=%s)", doc_id)
+                batch.clear()
+                batch_meta.clear()
+                return
+            ids = _extract_insert_ids(result)
+            if ids and len(ids) != len(batch_meta):
+                logger.warning(
+                    "inserted ids count mismatch doc_id=%s expected=%s got=%s",
+                    doc_id,
+                    len(batch_meta),
+                    len(ids),
+                )
+            for vec_id, meta in zip(ids or [], batch_meta):
+                vector_records.append(
+                    {
+                        "vector_id": vec_id,
+                        "page": meta["page"],
+                        "chunk_index": meta["chunk_idx"],
+                    }
+                )
+            total_inserted += len(batch)
+            batch.clear()
+            batch_meta.clear()
 
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
 
-            # 1) 본문 조각 (페이지 정보 포함, 텍스트와 표 모두 포함)
-            for page_num, idx, c in chunks_with_page:
-                # VARCHAR 한도 안전 분할(바이트 기준)
-                for part in split_for_varchar_bytes(c):
-                    # 최종 방어(예외적으로 경계 잘림 실패 시)
-                    if len(part.encode("utf-8")) > 32768:
-                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-
-                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                    
-                    # 벡터 차원 검증
-                    if len(vec) != emb_dim:
-                        logger.error(f"[Ingest] 벡터 차원 불일치: 예상={emb_dim}, 실제={len(vec)}, 텍스트='{part[:50]}...'")
-                        continue  # 이 벡터는 건너뛰기
-                    
-                    batch.append({
+            for entry_chunk in chunk_entries:
+                part = entry_chunk["text"]
+                if not part:
+                    continue
+                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
+                if len(vec) != emb_dim:
+                    logger.error(
+                        "[Ingest] 벡터 차원 불일치: 예상=%s, 실제=%s, doc_id=%s",
+                        emb_dim,
+                        len(vec),
+                        doc_id,
+                    )
+                    continue
+                batch.append(
+                    {
                         "embedding": vec.tolist(),
-                        "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(idx),
+                        "path": rel_txt_posix,
+                        "chunk_idx": int(entry_chunk["chunk_idx"]),
                         "task_type": task,
                         "security_level": lvl,
-                        "doc_id": str(doc_id),
+                        "doc_id": doc_id,
                         "version": int(version),
-                        "page": int(page_num),  # 페이지 번호 추가
+                        "page": int(entry_chunk["page"]),
                         "workspace_id": 0,
                         "text": part,
-                    })
-                    if len(batch) >= BATCH_SIZE:                        
-                        client.insert(collection_name=collection_name, data=batch)
-                        total_inserted += len(batch)
-                        batch = []
+                    }
+                )
+                batch_meta.append(
+                    {
+                        "page": int(entry_chunk["page"]),
+                        "chunk_idx": int(entry_chunk["chunk_idx"]),
+                    }
+                )
+                if len(batch) >= BATCH_SIZE:
+                    flush_batch()
 
-            # 2) 표 조각은 통합 파일에 이미 포함되어 있으므로 별도 인제스트하지 않음
-            # (통합 파일을 파싱할 때 표도 함께 청크화되므로 중복 방지)
+        flush_batch()
 
-        if batch:
-            client.insert(collection_name=collection_name, data=batch)
-            total_inserted += len(batch)
+        if vector_records:
+            try:
+                insert_document_vectors(
+                    doc_id=doc_id,
+                    collection=collection_name,
+                    embedding_version=str(model_key),
+                    vectors=vector_records,
+                )
+            except Exception:
+                logger.exception("document_vectors 기록 실패(doc_id=%s)", doc_id)
 
-    # 인덱스/로딩 재보장 및 메타 저장(유추된 doc_id/version 반영)
     try:
         client.flush(collection_name)
     except Exception:
         pass
     ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=collection_name)
 
-    # META에 doc_id/version 보정이 있었다면 저장
-    try:
-        META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
     return {
         "message": f"Ingest 완료(Milvus Server, collection={collection_name})",
         "inserted_chunks": int(total_inserted),
     }
+
 
 # -------------------------------------------------
 # 2-1) 단일 파일 인제스트(선택 작업유형)
@@ -909,16 +1140,12 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     if not file_path.exists():
         return {"error": f"파일 경로를 찾을 수 없습니다: {file_path}"}
 
-    if ext(file_path) not in SUPPORTED_EXTS:
-        return {"error": f"지원되지 않는 파일 형식입니다: {ext(file_path)}"}
-
-    # 메타 로드
-    if META_JSON_PATH.exists():
-        meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-    else:
-        meta = {}
+    if _ext(file_path) not in SUPPORTED_EXTS:
+        return {"error": f"지원되지 않는 파일 형식입니다: {_ext(file_path)}"}
 
     # 추출
+    from service.preprocessing.rag_preprocessing import extract_any
+
     text_all, table_blocks_all = extract_any(file_path)
 
     # 보안 레벨 판정(본문+표)
@@ -938,19 +1165,31 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
     from service.preprocessing.rag_preprocessing import _clean_text as clean_text
 
-    doc_id, ver = parse_doc_version(file_path.stem)
-    meta[str(rel_file)] = {
-        "chars": len(text_all),
-        "lines": len(text_all.splitlines()),
-        "preview": (clean_text(text_all[:200].replace("\n", " ")) + "…") if text_all else "",
-        "security_levels": sec_map,
-        "doc_id": doc_id,
-        "version": ver,
-        "tables": table_blocks_all or [],
-        "sourceExt": ext(file_path),
+    doc_id = generate_doc_id()
+    _, ver = parse_doc_version(file_path.stem)
+    preview = (clean_text(text_all[:200].replace("\n", " ")) + "…") if text_all else ""
+    rel_source_path = str(rel_file.as_posix())
+    rel_text_path = str(rel_file.with_suffix(".txt").as_posix())
+    extraction_info = {
+        "original_file": file_path.name,
+        "text_length": len(text_all),
+        "table_count": len(table_blocks_all or []),
+        "extracted_at": now_kst_string(),
     }
-    META_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    register_admin_document(
+        doc_id=doc_id,
+        filename=file_path.name,
+        rel_text_path=rel_text_path,
+        rel_source_path=rel_source_path,
+        sec_map=sec_map,
+        version=int(ver),
+        preview=preview,
+        tables=table_blocks_all or [],
+        total_pages=0,
+        pages={},
+        source_ext=_ext(file_path),
+        extraction_info=extraction_info,
+    )
 
     # 인제스트
     settings = get_vector_settings()
@@ -970,67 +1209,139 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
     tasks = req.task_types or list(TASK_TYPES)
     chunks = chunk_text(text_all, max_tokens=max_token, overlab=overlab)
-    batch, cnt = [], 0
+
+    chunk_entries: List[Dict[str, Any]] = []
+    metadata_records: List[Dict[str, Any]] = []
+    metadata_seen: set[int] = set()
+
+    for idx, chunk_text_val in enumerate(chunks):
+        for part in split_for_varchar_bytes(chunk_text_val):
+            chunk_entries.append(
+                {
+                    "page": 0,
+                    "chunk_idx": int(idx),
+                    "text": part,
+                }
+            )
+        if idx not in metadata_seen:
+            metadata_records.append(
+                {
+                    "page": 0,
+                    "chunk_index": int(idx),
+                    "text": chunk_text_val,
+                    "payload": {"path": rel_text_path},
+                }
+            )
+            metadata_seen.add(idx)
+
+    base_idx = len(chunks)
+    for t_i, table in enumerate(table_blocks_all or []):
+        md = (table.get("text") or "").strip()
+        if not md:
+            continue
+        page = int(table.get("page", 0))
+        bbox = table.get("bbox") or []
+        bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+        table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+
+        for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
+            chunk_idx = base_idx + t_i * 1000 + sub_j
+            chunk_entries.append(
+                {
+                    "page": int(page),
+                    "chunk_idx": int(chunk_idx),
+                    "text": part,
+                }
+            )
+            if chunk_idx not in metadata_seen:
+                metadata_records.append(
+                    {
+                        "page": int(page),
+                        "chunk_index": int(chunk_idx),
+                        "text": part,
+                        "payload": {"path": rel_text_path, "table": True},
+                    }
+                )
+                metadata_seen.add(chunk_idx)
+
+    if metadata_records:
+        try:
+            bulk_upsert_document_metadata(doc_id=doc_id, records=metadata_records)
+        except Exception:
+            logger.exception("Failed to upsert metadata for doc_id=%s", doc_id)
+
+    batch: List[Dict[str, Any]] = []
+    batch_meta: List[Dict[str, int]] = []
+    vector_records: List[Dict[str, Any]] = []
+    cnt = 0
+
+    def flush_single_batch() -> None:
+        nonlocal batch, batch_meta, cnt
+        if not batch:
+            return
+        try:
+            result = client.insert(collection_name=ADMIN_COLLECTION, data=batch)
+        except Exception:
+            logger.exception("Milvus insert 실패(doc_id=%s)", doc_id)
+            batch.clear()
+            batch_meta.clear()
+            return
+        ids = _extract_insert_ids(result)
+        for vec_id, meta in zip(ids or [], batch_meta):
+            vector_records.append(
+                {
+                    "vector_id": vec_id,
+                    "page": meta["page"],
+                    "chunk_index": meta["chunk_idx"],
+                }
+            )
+        cnt += len(batch)
+        batch.clear()
+        batch_meta.clear()
 
     for task in tasks:
         lvl = int(sec_map.get(task, 1))
 
-        # 본문: VARCHAR 안전 분할
-        for idx, c in enumerate(chunks):
-            for part in split_for_varchar_bytes(c):
-                if len(part.encode("utf-8")) > 32768:
-                    part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
-                batch.append({
-                    "embedding": vec.tolist(),
-                    "path": str(rel_file.with_suffix(".txt")),
-                    "chunk_idx": int(idx),
-                    "task_type": task,
-                    "security_level": lvl,
-                    "doc_id": str(doc_id),
-                    "version": int(ver),
-                    "workspace_id": 0,
-                    "text": part,
-                })
-                if len(batch) >= 128:
-                    client.insert(collection_name=ADMIN_COLLECTION, data=batch)
-                    cnt += len(batch)
-                    batch = []
-
-        # 표: VARCHAR 안전 분할
-        base_idx = len(chunks)
-        for t_i, t in enumerate(table_blocks_all or []):
-            md = (t.get("text") or "").strip()
-            if not md:
+        for entry_chunk in chunk_entries:
+            part = entry_chunk["text"]
+            if not part:
                 continue
-            page = int(t.get("page", 0))
-            bbox = t.get("bbox") or []
-            bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-            table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
-
-            for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
-                if len(part.encode("utf-8")) > 32768:
-                    part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
-                batch.append({
+            vec = hf_embed_text(tok, model, device, part, max_len=max_token)
+            batch.append(
+                {
                     "embedding": vec.tolist(),
-                    "path": str(rel_file.with_suffix(".txt")),
-                    "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                    "path": rel_text_path,
+                    "chunk_idx": int(entry_chunk["chunk_idx"]),
                     "task_type": task,
                     "security_level": lvl,
                     "doc_id": str(doc_id),
                     "version": int(ver),
+                    "page": int(entry_chunk["page"]),
                     "workspace_id": 0,
                     "text": part,
-                })
-                if len(batch) >= 128:
-                    client.insert(collection_name=ADMIN_COLLECTION, data=batch)
-                    cnt += len(batch)
-                    batch = []
+                }
+            )
+            batch_meta.append(
+                {
+                    "page": int(entry_chunk["page"]),
+                    "chunk_idx": int(entry_chunk["chunk_idx"]),
+                }
+            )
+            if len(batch) >= 128:
+                flush_single_batch()
 
-    if batch:
-        client.insert(collection_name=ADMIN_COLLECTION, data=batch)
-        cnt += len(batch)
+    flush_single_batch()
+
+    if vector_records:
+        try:
+            insert_document_vectors(
+                doc_id=doc_id,
+                collection=ADMIN_COLLECTION,
+                embedding_version=str(settings["embeddingModel"]),
+                vectors=vector_records,
+            )
+        except Exception:
+            logger.exception("document_vectors 기록 실패(doc_id=%s)", doc_id)
 
     try:
         client.flush(ADMIN_COLLECTION)
@@ -1039,11 +1350,11 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
     ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=ADMIN_COLLECTION)
 
     return {
-        "message": f"단일 파일 인제스트 완료(Milvus Server) - {ext(file_path)}",
+        "message": f"단일 파일 인제스트 완료(Milvus Server) - {_ext(file_path)}",
         "doc_id": doc_id,
         "version": ver,
         "chunks": cnt,
-        "sourceExt": ext(file_path),
+        "sourceExt": _ext(file_path),
     }
 
 async def ingest_specific_files_with_levels(
@@ -1096,17 +1407,19 @@ async def ingest_specific_files_with_levels(
 
     # 임베더/컬렉션 준비
     settings = get_vector_settings()
-    eff_model_key = settings["embeddingModel"]
-    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
+    model_key = settings["embeddingModel"]
+    tok, model, device = await _get_or_load_embedder_async(model_key)
     emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     coll = collection_name or ADMIN_COLLECTION
     client = get_milvus_client()
     ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=coll)
 
-    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
+    max_token, overlab = int(settings["chunkSize"]), int(settings["overlap"])
 
     processed, total = [], 0
+    from service.preprocessing.rag_preprocessing import extract_any
+
     for src in saved:
         try:
             text, tables = extract_any(src)
@@ -1130,7 +1443,8 @@ async def ingest_specific_files_with_levels(
             abs_txt.write_text(text, encoding="utf-8")
 
             # 문서 ID/버전
-            doc_id, ver = parse_doc_version(src.stem)
+            doc_id = generate_doc_id()
+            _, ver = parse_doc_version(src.stem)
 
             # 기존 삭제
             try:
@@ -1138,65 +1452,150 @@ async def ingest_specific_files_with_levels(
             except Exception:
                 pass
 
-            # 본문
-            chunks = chunk_text(text, max_tokens=MAX_TOKENS, overlap=OVERLAP)
-            batch, cnt = [], 0
+            chunks = chunk_text(text, max_tokens=max_token, overlap=overlab)
+            chunk_entries: List[Dict[str, Any]] = []
+            metadata_records: List[Dict[str, Any]] = []
+            metadata_seen: set[int] = set()
+
+            rel_txt_posix = str(rel_txt.as_posix())
+
+            for idx, chunk_text_val in enumerate(chunks):
+                for part in split_for_varchar_bytes(chunk_text_val):
+                    chunk_entries.append(
+                        {
+                            "page": 0,
+                            "chunk_idx": int(idx),
+                            "text": part,
+                        }
+                    )
+                if idx not in metadata_seen:
+                    metadata_records.append(
+                        {
+                            "page": 0,
+                            "chunk_index": int(idx),
+                            "text": chunk_text_val,
+                            "payload": {"path": rel_txt_posix},
+                        }
+                    )
+                    metadata_seen.add(idx)
+
+            base_idx = len(chunks)
+            for t_i, tb in enumerate(tables or []):
+                md = (tb.get("text") or "").strip()
+                if not md:
+                    continue
+                page = int(tb.get("page", 0))
+                bbox = tb.get("bbox") or []
+                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
+                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
+                for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
+                    chunk_idx = base_idx + t_i * 1000 + sub_j
+                    chunk_entries.append(
+                        {
+                            "page": int(page),
+                            "chunk_idx": int(chunk_idx),
+                            "text": part,
+                        }
+                    )
+                    if chunk_idx not in metadata_seen:
+                        metadata_records.append(
+                            {
+                                "page": int(page),
+                                "chunk_index": int(chunk_idx),
+                                "text": part,
+                                "payload": {"path": rel_txt_posix, "table": True},
+                            }
+                        )
+                        metadata_seen.add(chunk_idx)
+
+            if metadata_records:
+                try:
+                    bulk_upsert_document_metadata(doc_id=doc_id, records=metadata_records)
+                except Exception:
+                    logger.exception("Failed to upsert metadata for doc_id=%s", doc_id)
+
+            batch: List[Dict[str, Any]] = []
+            batch_meta: List[Dict[str, int]] = []
+            doc_vector_records: List[Dict[str, Any]] = []
+            cnt = 0
+
+            def flush_local_batch() -> None:
+                nonlocal batch, batch_meta, cnt, total
+                if not batch:
+                    return
+                try:
+                    result = client.insert(collection_name=coll, data=batch)
+                except Exception:
+                    logger.exception("[upload-and-ingest] insert 실패: doc_id=%s", doc_id)
+                    batch.clear()
+                    batch_meta.clear()
+                    return
+                ids = _extract_insert_ids(result)
+                for vec_id, meta in zip(ids or [], batch_meta):
+                    doc_vector_records.append(
+                        {
+                            "vector_id": vec_id,
+                            "page": meta["page"],
+                            "chunk_index": meta["chunk_idx"],
+                        }
+                    )
+                cnt += len(batch)
+                batch.clear()
+                batch_meta.clear()
+
             for t in tasks_eff:
                 lvl = int(sec_map.get(t, 1))
 
-                for idx, c in enumerate(chunks):
-                    for part in split_for_varchar_bytes(c):
-                        if len(part.encode("utf-8")) > 32768:
-                            part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                        batch.append({
-                            "embedding": vec.tolist(),
-                            "path": str(rel_txt.as_posix()),
-                            "chunk_idx": int(idx),
-                            "task_type": t,
-                            "security_level": lvl,
-                            "doc_id": str(doc_id),
-                            "version": int(ver),
-                            "workspace_id": 0,
-                            "text": part,
-                        })
-                        if len(batch) >= 128:
-                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
-
-                # 표
-                base_idx = len(chunks)
-                for t_i, tb in enumerate(tables or []):
-                    md = (tb.get("text") or "").strip()
-                    if not md:
+                for entry_chunk in chunk_entries:
+                    part = entry_chunk["text"]
+                    if not part:
                         continue
-                    page = int(tb.get("page", 0)); bbox = tb.get("bbox") or []
-                    bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                    table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
-                    for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
-                        if len(part.encode("utf-8")) > 32768:
-                            part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                        vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                        batch.append({
+                    vec = hf_embed_text(tok, model, device, part, max_len=max_token)
+                    batch.append(
+                        {
                             "embedding": vec.tolist(),
-                            "path": str(rel_txt.as_posix()),
-                            "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
+                            "path": rel_txt_posix,
+                            "chunk_idx": int(entry_chunk["chunk_idx"]),
                             "task_type": t,
                             "security_level": lvl,
                             "doc_id": str(doc_id),
                             "version": int(ver),
+                            "page": int(entry_chunk["page"]),
                             "workspace_id": 0,
                             "text": part,
-                        })
-                        if len(batch) >= 128:
-                            client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
+                        }
+                    )
+                    batch_meta.append(
+                        {
+                            "page": int(entry_chunk["page"]),
+                            "chunk_idx": int(entry_chunk["chunk_idx"]),
+                        }
+                    )
+                    if len(batch) >= 128:
+                        flush_local_batch()
 
-            if batch:
-                client.insert(collection_name=coll, data=batch); cnt += len(batch); batch = []
+            flush_local_batch()
 
-            processed.append({
-                "file": src.name, "doc_id": doc_id, "version": int(ver),
-                "levels": sec_map, "chunks": cnt
-            })
+            if doc_vector_records:
+                try:
+                    insert_document_vectors(
+                        doc_id=doc_id,
+                        collection=coll,
+                        embedding_version=str(model_key),
+                        vectors=doc_vector_records,
+                    )
+                except Exception:
+                    logger.exception("document_vectors 기록 실패(doc_id=%s)", doc_id)
+
+            processed.append(
+                {
+                    "file": src.name,
+                    "doc_id": doc_id,
+                    "version": int(ver),
+                    "levels": sec_map,
+                    "chunks": cnt,
+                }
+            )
             total += cnt
 
         except Exception:
@@ -1216,8 +1615,9 @@ async def ingest_specific_files_with_levels(
         "inserted_chunks": int(total),
     }
 
-async def search_documents(req: RAGSearchRequest, search_type_override: Optional[str] = None,
-                           collection_name: str = ADMIN_COLLECTION, rerank_top_n: Optional[int] = None) -> Dict:
+async def search_documents(req: RAGSearchRequest, 
+                            search_type_override: Optional[str] = None,
+                            rerank_top_n: Optional[int] = None) -> Dict:
     t0 = time.perf_counter()
     print(f"🔍 [Search] 검색 시작: query='{req.query}', topK={req.top_k}, rerank_topN={rerank_top_n}, task={req.task_type}")
     
@@ -1274,12 +1674,6 @@ async def search_documents(req: RAGSearchRequest, search_type_override: Optional
             output_fields=DEFAULT_OUTPUT_FIELDS,
         )
         hits_raw = build_dense_hits(res_hybrid, snippet_loader=snippet_loader)
-        # hits_raw = build_rrf_hits(
-        #     res_dense,
-        #     res_sparse,
-        #     snippet_loader=snippet_loader,
-        #     limit=candidate,
-        # )
 
     # 검색 결과 상태 로그
     logger.info(f"📊 [Search] 벡터/BM25 검색 완료: 후보 {len(hits_raw)}개 발견")
@@ -1470,11 +1864,8 @@ async def list_indexed_files(
     if ADMIN_COLLECTION not in client.list_collections():
         return []
 
-    # 메타 로드(원본 확장자 복원용)
-    try:
-        meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
+    doc_records = list_documents_by_type(ADMIN_DOC_TYPE)
+    doc_map = {doc["doc_id"]: doc for doc in doc_records if doc.get("doc_id")}
 
     flt = ""
     if task_type and task_type in TASK_TYPES:
@@ -1483,7 +1874,7 @@ async def list_indexed_files(
         rows = client.query(
             collection_name=ADMIN_COLLECTION,
             filter=flt,
-            output_fields=["path", "chunk_idx", "security_level", "task_type"],
+            output_fields=["doc_id", "path", "chunk_idx", "security_level", "task_type"],
             limit=limit,
             offset=offset,
             consistency_level="Strong",
@@ -1493,30 +1884,38 @@ async def list_indexed_files(
 
     counts: Dict[Tuple[str, str], int] = defaultdict(int)
     level_map: Dict[Tuple[str, str], int] = {}
+    path_map: Dict[Tuple[str, str], str] = {}
+    doc_id_map: Dict[Tuple[str, str], Optional[str]] = {}
     for r in rows:
         path = r.get("path") if isinstance(r, dict) else r["path"]
         ttype = r.get("task_type") if isinstance(r, dict) else r["task_type"]
         lvl = int((r.get("security_level") if isinstance(r, dict) else r["security_level"]) or 1)
-        key = (path, ttype)
+        doc_id_val = r.get("doc_id") if isinstance(r, dict) else r.get("doc_id")
+        key_id = str(doc_id_val).strip() if doc_id_val else ""
+        key = (key_id or path, ttype)
         counts[key] += 1
         level_map.setdefault(key, lvl)
+        path_map.setdefault(key, path)
+        doc_id_map.setdefault(key, key_id or None)
 
     items = []
-    for (path, ttype), cnt in counts.items():
-        txt_rel = Path(path)
+    for key, cnt in counts.items():
+        ttype = key[1]
+        stored_path = path_map.get(key) or ""
+        txt_rel = Path(stored_path)
+        doc_id_val = doc_id_map.get(key)
+        doc_meta = doc_map.get(doc_id_val or "")
 
-        # 메타에서 원래 확장자를 복원
-        cands = [txt_rel.with_suffix(ext).as_posix() for ext in SUPPORTED_EXTS]
-        meta_key = next((k for k in cands if k in meta), None)
-        if meta_key:
-            source_ext = meta.get(meta_key, {}).get("sourceExt") or Path(meta_key).suffix
-            orig_rel = txt_rel.with_suffix(source_ext)
+        if doc_meta:
+            file_name = doc_meta.get("filename") or Path(doc_meta.get("source_path") or stored_path).name
+            file_path = doc_meta.get("source_path") or doc_meta.get("storage_path") or stored_path
+            sec_levels = (doc_meta.get("payload") or {}).get("security_levels", {}) or {}
+            sec_level = int(sec_levels.get(ttype, level_map.get(key, 1)))
         else:
-            # 폴백(구버전 데이터): pdf 가정
-            orig_rel = txt_rel.with_suffix(".pdf")
-
-        file_name = orig_rel.name
-        file_path = str(orig_rel)
+            # fallback to path inference
+            file_name = txt_rel.with_suffix(".pdf").name
+            file_path = str(txt_rel.with_suffix(".pdf"))
+            sec_level = int(level_map.get(key, 1))
 
         txt_abs = EXTRACTED_TEXT_DIR / txt_rel
         try:
@@ -1534,7 +1933,7 @@ async def list_indexed_files(
                 "chunkCount": int(cnt),
                 "indexedAt": indexed_at,
                 "fileSize": size,
-                "securityLevel": int(level_map.get((path, ttype), 1)),
+                "securityLevel": sec_level,
             }
         )
 
@@ -1543,7 +1942,7 @@ async def list_indexed_files(
         items = [it for it in items if q in it["fileName"]]
     return items
 
-async def delete_files_by_names(file_names: List[str], task_type: Optional[str] = None, collection_name: str = ADMIN_COLLECTION):
+async def delete_files_by_names(file_names: List[str], task_type: Optional[str] = None):
     """
     파일명(= doc_id stem) 배열을 받아 벡터 DB에서 삭제.
     - task_type 가 None 이면 모든 작업유형(doc_gen/summary/qna)에서 삭제 (기존 동작과 동일)
@@ -1584,16 +1983,33 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
     deleted_total = 0
     per_file: dict[str, int] = {}
 
+    doc_ids_to_remove: set[str] = set()
+    name_index = _build_doc_name_index()
+
     for name in file_names:
-        stem = Path(name).stem
-        # Align fileName -> doc_id by stripping version suffix if present
+        raw_name = str(name or "").strip()
+        stem = Path(raw_name).stem if raw_name else ""
+
+        doc_id_candidate = None
+        for token in filter(None, [raw_name.lower(), stem.lower() if stem else None]):
+            doc_id_candidate = name_index.get(token)
+            if doc_id_candidate:
+                break
+
+        if not doc_id_candidate:
+            try:
+                base_id, _ver = parse_doc_version(stem or raw_name)
+            except Exception:
+                base_id = stem or raw_name
+            doc_id_candidate = base_id
+
+        if not doc_id_candidate:
+            per_file[name] = per_file.get(name, 0)
+            continue
+
+        doc_ids_to_remove.add(doc_id_candidate)
         try:
-            base_id, _ver = parse_doc_version(stem)
-        except Exception:
-            base_id = stem
-        try:
-            # doc_id == 'stem' [&& task_type == 'xxx']
-            filt = f"doc_id == '{base_id}'{task_filter}"
+            filt = f"doc_id == '{doc_id_candidate}'{task_filter}"
             client.delete(collection_name=ADMIN_COLLECTION, filter=filt)
             deleted_total += 1
             per_file[name] = per_file.get(name, 0) + 1
@@ -1625,6 +2041,12 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
             logger.exception("Failed to delete workspace documents in SQL")
             deleted_sql = None
 
+    if doc_ids_to_remove:
+        try:
+            delete_documents_by_type_and_ids(ADMIN_DOC_TYPE, list(doc_ids_to_remove))
+        except Exception:
+            logger.exception("Failed to delete admin document metadata for %s", doc_ids_to_remove)
+
     return {
         "deleted": deleted_total,  # 요청 파일 기준 성공 건수(작업유형 기준 단순 카운트)
         "deleted_sql": deleted_sql,
@@ -1634,7 +2056,7 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
     }
 
 
-async def list_indexed_files_overview(collection_name: str = ADMIN_COLLECTION):
+async def list_indexed_files_overview():
     items = await list_indexed_files(limit=16384, offset=0, query=None, task_type=None)
     # agg: task_type -> level -> count
     agg: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
@@ -1662,9 +2084,6 @@ class OverrideLevelsRequest(BaseModel):
 
 
 async def override_levels_and_ingest(req: OverrideLevelsRequest):
-    if not META_JSON_PATH.exists():
-        return {"error": "메타 JSON이 없습니다. 먼저 /v1/admin/vector/extract 를 수행하세요."}
-
     target_tasks = [t for t in (req.tasks or TASK_TYPES) if t in TASK_TYPES]
     if not target_tasks:
         return {"error": "유효한 작업유형이 없습니다. (허용: doc_gen|summary|qna)"}
@@ -1673,52 +2092,44 @@ async def override_levels_and_ingest(req: OverrideLevelsRequest):
     if not level_map:
         return {"error": "적용할 보안레벨이 없습니다. level_for_tasks 를 지정하세요."}
 
-    meta = json.loads(META_JSON_PATH.read_text(encoding="utf-8"))
-
-    # 대상 파일 셋(메타키/파일명/스텀 모두 허용)
-    def _to_keyset(files: List[str]) -> set:
-        out = set()
-        for f in files:
-            p = Path(f)
-            out.update({str(f), p.name, p.stem})
-        return out
-
-    all_keys = list(meta.keys())  # "securityLevelX/.../파일명.확장자"
-    if req.files:
-        ks = _to_keyset(req.files)
-        targets = [k for k in all_keys if (k in ks or Path(k).name in ks or Path(k).stem in ks)]
-    else:
-        targets = all_keys
-
-    if not targets:
-        return {"updated": 0, "ingested": 0, "message": "대상 파일이 없습니다."}
+    documents = _load_admin_documents(req.files)
+    if not documents:
+        return {"updated": 0, "ingested": 0, "message": "대상 문서를 찾을 수 없습니다."}
 
     updated = 0
-    for k in targets:
-        entry = meta.get(k) or {}
-        sec = entry.get("security_levels") or {}
+    target_tokens: List[str] = []
+    for doc in documents:
+        doc_id = doc.get("doc_id")
+        if not doc_id:
+            continue
+        payload = dict(doc.get("payload") or {})
+        sec = payload.get("security_levels") or {}
         for t in target_tasks:
             if t in level_map:
                 sec[t] = int(level_map[t])
-        entry["security_levels"] = sec
-        meta[k] = entry
+        payload["security_levels"] = sec
+        upsert_document(
+            doc_id=doc_id,
+            doc_type=ADMIN_DOC_TYPE,
+            filename=doc.get("filename") or doc_id,
+            storage_path=doc.get("storage_path") or "",
+            source_path=doc.get("source_path"),
+            security_level=_max_security_level(sec),
+            payload=payload,
+        )
         updated += 1
+        target_tokens.append(doc_id)
 
-    META_JSON_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # ★ 업로드한(또는 지정한) 파일만 인제스트
     res = await ingest_embeddings(
         model_key=None,
-        chunk_size=None,
-        overlap=None,
         target_tasks=target_tasks,
         collection_name=ADMIN_COLLECTION,
-        file_keys_filter=targets,
+        file_keys_filter=target_tokens,
     )
     return {
         "message": "레벨 오버라이드 후 인제스트 완료",
         "collection": ADMIN_COLLECTION,
         "updated_meta_entries": updated,
         "inserted_chunks": int(res.get("inserted_chunks", 0)),
-        "target_count": len(targets),
+        "target_count": len(target_tokens),
     }

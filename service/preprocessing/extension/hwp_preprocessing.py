@@ -5,7 +5,7 @@ HWP 파일을 텍스트와 표로 추출하는 기능 제공
 from __future__ import annotations
 import logging
 from pathlib import Path
-from typing import Optional, tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
         return None
 
 
-def _extract_hwp(fp: Path) -> tuple[str, list[dict]]:
+def _extract_hwp(fp: Path) -> Tuple[str, list[dict]]:
     """HWP 파일 추출 (다단계 폴백)
     순서: python-hwp(API) -> hwp5txt(CLI) -> LibreOffice 변환(docx) -> olefile(구버전 시도)
     반환: (본문텍스트, 표리스트[])

@@ -60,7 +60,7 @@ retrieval:
     local_data_root: storage/user_data/preprocessed_data
     resources_dir: service/admin/resources
     extracted_text_dir: storage/extracted_texts
-    meta_json_path: storage/extracted_texts/_extraction_meta.json
+    # meta_json_path: storage/extracted_texts/_extraction_meta.json
     model_root_dir: storage/embedding-models
     rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
     val_session_root: storage/val_data

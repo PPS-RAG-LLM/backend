@@ -6,7 +6,6 @@ from typing import List, Optional, Dict, Literal, Any
 import json as _json
 
 from service.admin.manage_vator_DB import (
-    ingest_specific_files_with_levels,
     TASK_TYPES,
     OverrideLevelsRequest,
     override_levels_and_ingest,
@@ -14,11 +13,6 @@ from service.admin.manage_vator_DB import (
     set_vector_settings,
     get_vector_settings,
     list_available_embedding_models,
-    # 인제스트 파라미터(청크/오버랩)  ← 추가
-    set_ingest_params,
-    get_ingest_params,
-    # 보안레벨(작업유형별)
-    set_security_level_rules_per_task,
     get_security_level_rules_all,
     upsert_security_level_for_task,
     get_security_level_rules_for_task,
@@ -34,7 +28,7 @@ from service.admin.manage_vator_DB import (
     # 타입
     SinglePDFIngestRequest,
     # 파일 저장
-    save_raw_file,
+    # save_raw_file,
 )
 from service.preprocessing.rag_preprocessing import extract_documents
 router = APIRouter(
@@ -85,8 +79,6 @@ class SecurityLevelsBody(BaseModel):
     doc_gen: TaskSecurityConfig
     summary: TaskSecurityConfig
     qna: TaskSecurityConfig
-
-
 
 
 class ExecuteBody(BaseModel):
@@ -236,10 +228,10 @@ async def get_security_levels(taskType: Optional[TaskLiteral] = None):
 @router.post("/admin/vector/upload-file", summary="2. 파일 업로드(row_data)")
 async def upload_raw_file(files: List[UploadFile] = File(...)):
     saved_paths = []
-    for file in files:
-        content = await file.read()
-        saved = save_raw_file(file.filename, content)
-        saved_paths.append(saved)
+    # for file in files:
+    #     content = await file.read()
+    #     saved = save_raw_file(file.filename, content)
+    #     saved_paths.append(saved)
     return {"savedPaths": saved_paths, "count": len(saved_paths)}
 
 
@@ -256,7 +248,9 @@ async def rag_ingest_endpoint(request: Request):
         f"[ingest] from {request.client.host} (model={s['embeddingModel']}, searchType={s['searchType']}, chunkSize={s['chunkSize']}, overlap={s['overlap']})"
     )
     return await ingest_embeddings(
-        model_key=s["embeddingModel"],  # 모든 TASK_TYPES 대상으로
+        model_key=s["embeddingModel"],
+        max_token=int(s["chunkSize"]),
+        overlab=int(s["overlap"]),
     )
 
 @router.post("/admin/vector/upload-one",summary="단일 PDF 인제스트(선택 작업유형 지정 가능)")
@@ -443,11 +437,11 @@ async def override_levels_upload_form(
     summary_level: Optional[str] = Form(None),
     doc_gen_level: Optional[str] = Form(None),
 ):
-    # 1) 파일 저장
+    # # 1) 파일 저장
     saved_names = []
     for f in files:
-        content = await f.read()
-        save_raw_file(f.filename, content)
+        # content = await f.read()
+        # save_raw_file(f.filename, content)
         saved_names.append(f.filename)
 
     # 2) 새 파일만 포함되도록 추출(전체 재추출이긴 하지만 META에 신규 포함)
