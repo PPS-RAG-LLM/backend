@@ -28,9 +28,11 @@ from service.admin.manage_vator_DB import (
     # 타입
     SinglePDFIngestRequest,
     # 파일 저장
-    # save_raw_file,
+    save_raw_file,
+    process_saved_raw_files,
 )
 from service.preprocessing.rag_preprocessing import extract_documents
+from utils import logger
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -41,7 +43,7 @@ router = APIRouter(
         status.HTTP_404_NOT_FOUND: {"description": "Not found"},
     },
 )
-
+logger = logger(__name__)
 # ============================
 # Request/Response Models
 # ============================
@@ -438,14 +440,19 @@ async def override_levels_upload_form(
     doc_gen_level: Optional[str] = Form(None),
 ):
     # # 1) 파일 저장
-    saved_names = []
+    saved_original_names: List[str] = []
+    saved_rel_paths : List[str] = []
     for f in files:
-        # content = await f.read()
-        # save_raw_file(f.filename, content)
-        saved_names.append(f.filename)
+        # save_raw_file이 상대 경로를 돌려주도록 수정, 
+        # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
+        content = await f.read()
+        rel_path = save_raw_file(f.filename, content)
+        saved_original_names.append(f.filename)
+        saved_rel_paths.append(rel_path)
 
-    # 2) 새 파일만 포함되도록 추출(전체 재추출이긴 하지만 META에 신규 포함)
-    await extract_documents()
+    processed_docs = await process_saved_raw_files(saved_rel_paths)
+    target_tokens = [doc["doc_id"] for doc in processed_docs] or saved_original_names
+    logger.debug(f"🎯 [API] target_tokens: {target_tokens}")
 
     # 3) task 목록
     tlist = None
@@ -459,9 +466,6 @@ async def override_levels_upload_form(
         raise HTTPException(status_code=400, detail=str(e))
 
     # 5) 지정 파일만 레벨 오버라이드 + 해당 파일만 인제스트
-    req = OverrideLevelsRequest(files=saved_names, level_for_tasks=lvmap, tasks=tlist)
+    req = OverrideLevelsRequest(files=target_tokens, level_for_tasks=lvmap, tasks=tlist)
     result = await override_levels_and_ingest(req)
-    return {"saved": saved_names, "ingest_result": result}
-
-
-# 중복 라우트 제거됨 (유연 파서 버전만 유지)
+    return {"saved": saved_original_names, "ingest_result": result}

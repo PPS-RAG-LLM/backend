@@ -20,7 +20,7 @@ from repository.rag_settings import get_rag_settings_row, set_rag_settings_row
 from repository.documents import (
     bulk_upsert_document_metadata,
     delete_documents_by_type_and_ids,
-    delete_documents_not_in_doc_ids,
+    get_document_by_source_path,
     insert_document_vectors,
     list_documents_by_type,
     upsert_document,
@@ -245,13 +245,6 @@ def _ext(value: Path | str) -> str:
     return Path(value).suffix.lower()
 
 
-def _relative_to(base: Path, target: Path) -> str:
-    try:
-        return target.relative_to(base).as_posix()
-    except ValueError:
-        return str(target)
-
-
 def _max_security_level(sec_map: Dict[str, int]) -> int:
     if not sec_map:
         return 1
@@ -428,19 +421,6 @@ def _build_doc_name_index() -> Dict[str, str]:
 
 
 # -------------------------------------------------
-# 인제스트 파라미터 설정
-# -------------------------------------------------
-def set_ingest_params(chunk_size: int | None = None, overlap: int | None = None):
-    # rag_settings 단일 소스로 저장
-    set_vector_settings(chunk_size=chunk_size, overlap=overlap)
-
-
-def get_ingest_params():
-    row = get_rag_settings_row()
-    return {"chunkSize": row["chunk_size"], "overlap": row["overlap"]}
-
-
-# -------------------------------------------------
 # Pydantic 스키마
 # -------------------------------------------------
 class RAGSearchRequest(BaseModel):
@@ -463,14 +443,165 @@ class SinglePDFIngestRequest(BaseModel):
 
 
 # ====== New helpers ======
-# def save_raw_file(filename: str, content: bytes) -> str:
-#     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-#     out = RAW_DATA_DIR / filename
-#     out.parent.mkdir(parents=True, exist_ok=True)
-#     out.write_bytes(content)
-#     return str(out)
+def save_raw_file(filename: str, content: bytes) -> str:
+    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    name = Path(filename or "uploaded").name or f"uploaded_{uuid.uuid4().hex}"
+    dst = RAW_DATA_DIR / name
+    if dst.exists():
+        stem, ext = dst.stem, dst.suffix
+        dst = RAW_DATA_DIR / f"{stem}_{int(time.time())}{ext}"
+    dst.write_bytes(content)
+    return str(dst.relative_to(RAW_DATA_DIR).as_posix())
 
 
+def _write_combined_text_file(
+    output_path: Path,
+    *,
+    text: str,
+    tables: List[Dict[str, Any]],
+    pages_text_dict: Dict[int, str],
+) -> None:
+    def _write_tables(handle, items):
+        for tbl in items:
+            table_text = (tbl.get("text") or "").strip()
+            if table_text:
+                handle.write(table_text)
+                handle.write("\n\n")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        if pages_text_dict:
+            pages_tables: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            for tbl in tables or []:
+                page_num = int(tbl.get("page", 0))
+                if page_num > 0:
+                    pages_tables[page_num].append(tbl)
+            ordered_pages = sorted({*pages_text_dict.keys(), *pages_tables.keys()})
+            if ordered_pages:
+                for idx, page_num in enumerate(ordered_pages):
+                    page_text = pages_text_dict.get(page_num, "")
+                    if page_text:
+                        handle.write(page_text)
+                        handle.write("\n\n")
+                    _write_tables(handle, pages_tables.get(page_num, []))
+                    if idx < len(ordered_pages) - 1:
+                        handle.write("\n---\n\n")
+            else:
+                if text.strip():
+                    handle.write(text)
+                    handle.write("\n\n")
+                _write_tables(handle, tables or [])
+        else:
+            if text.strip():
+                handle.write(text)
+                handle.write("\n\n")
+            _write_tables(handle, tables or [])
+
+async def process_saved_raw_files(rel_paths: List[str]) -> List[Dict[str, Any]]:
+    if not rel_paths:
+        return []
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _process_saved_raw_files_sync, rel_paths)
+
+def _process_saved_raw_files_sync(rel_paths: List[str]) -> List[Dict[str, Any]]:
+    level_rules = get_security_level_rules_all()
+    results: List[Dict[str, Any]] = []
+    for rel in rel_paths:
+        info = _process_single_raw_file(rel, level_rules)
+        if info:
+            results.append(info)
+    return results
+
+def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Optional[Dict[str, Any]]:
+    raw_path = (RAW_DATA_DIR / rel_path).resolve()
+    if not raw_path.exists():
+        logger.warning("[ProcessRaw] RAW 파일을 찾을 수 없습니다: %s", rel_path)
+        return None
+
+    try:
+        rel_from_raw = raw_path.relative_to(RAW_DATA_DIR)
+    except ValueError:
+        rel_from_raw = raw_path
+
+    file_ext = _ext(raw_path)
+    pages_text_dict: Dict[int, str] = {}
+    total_pages = 0
+
+    try:
+        if file_ext == ".pdf":
+            from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
+            text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(raw_path)
+        else:
+            from service.preprocessing.rag_preprocessing import extract_any
+            text, tables = extract_any(raw_path)
+    except Exception:
+        logger.exception("[ProcessRaw] 추출 실패: %s", raw_path)
+        return None
+
+    tables = tables or []
+    text = text or ""
+    combined_for_level = text + "\n\n" + "\n\n".join(t.get("text", "") for t in tables)
+    sec_map = {
+        task: determine_level_for_task(
+            combined_for_level,
+            level_rules.get(task, {"maxLevel": 1, "levels": {}}),
+        )
+        for task in TASK_TYPES
+    }
+    max_sec = max(sec_map.values()) if sec_map else 1
+    rel_text_path = Path(f"securityLevel{int(max_sec)}") / rel_from_raw.with_suffix(".txt")
+
+    try:
+        _write_combined_text_file(
+            EXTRACTED_TEXT_DIR / rel_text_path,
+            text=text,
+            tables=tables,
+            pages_text_dict=pages_text_dict,
+        )
+    except Exception:
+        logger.exception("[ProcessRaw] 통합 텍스트 저장 실패: %s", raw_path)
+        return None
+
+    from service.preprocessing.rag_preprocessing import _clean_text as clean_text
+
+    preview = (clean_text(text[:200].replace("\n", " ")) + "…") if text else ""
+    rel_source_path = Path(rel_path).as_posix()
+    source_entry = str(Path("row_data") / rel_source_path)
+    base_name, parsed_version = parse_doc_version(raw_path.stem)
+    version = int(parsed_version) if parsed_version else 0
+    extraction_info = {
+        "original_file": raw_path.name,
+        "text_length": len(text),
+        "table_count": len(tables),
+        "extracted_at": now_kst_string(),
+    }
+
+    existing = get_document_by_source_path(ADMIN_DOC_TYPE, source_entry)
+    doc_id = existing["doc_id"] if existing else generate_doc_id()
+
+    register_admin_document(
+        doc_id=doc_id,
+        filename=raw_path.name,
+        rel_text_path=rel_text_path.as_posix(),
+        rel_source_path=source_entry,
+        sec_map=sec_map,
+        version=int(version),
+        preview=preview,
+        tables=tables,
+        total_pages=total_pages,
+        pages=pages_text_dict if pages_text_dict else {},
+        source_ext=file_ext,
+        extraction_info=extraction_info,
+    )
+
+    return {
+        "doc_id": doc_id,
+        "filename": raw_path.name,
+        "source_path": source_entry,
+        "text_path": rel_text_path.as_posix(),
+        "security_levels": sec_map,
+    }
+    
 def save_raw_to_row_data(f):
     """Save FastAPI UploadFile to row_data and return relative path."""
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -992,6 +1123,8 @@ async def ingest_embeddings(
                     }
                 )
                 metadata_seen.add(idx_int)
+        if metadata_records: 
+            bulk_upsert_document_metadata(doc_id=doc_id, records=metadata_records)
 
         base_idx = len(chunks_with_page)
         for t_i, table in enumerate(tables):
@@ -1062,6 +1195,14 @@ async def ingest_embeddings(
             total_inserted += len(batch)
             batch.clear()
             batch_meta.clear()
+        
+        if vector_records:
+            insert_document_vectors(
+                doc_id=doc_id,
+                collection=collection_name,
+                embedding_version=str(model_key),
+                vectors=vector_records,
+            )
 
         for task in tasks:
             lvl = int(sec_map.get(task, 1))
@@ -2120,8 +2261,11 @@ async def override_levels_and_ingest(req: OverrideLevelsRequest):
         updated += 1
         target_tokens.append(doc_id)
 
+    settings = get_vector_settings()
+    model_key = settings.get("embeddingModel")
+
     res = await ingest_embeddings(
-        model_key=None,
+        model_key=model_key,
         target_tasks=target_tasks,
         collection_name=ADMIN_COLLECTION,
         file_keys_filter=target_tokens,

@@ -371,3 +371,20 @@ def delete_documents_not_in_doc_ids(doc_type: str, doc_ids: List[str]) -> int:
         return int(result.rowcount or 0)
 
 
+def get_document_by_source_path(
+    doc_type: str,
+    source_path: str,
+) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        stmt = (
+            select(Document)
+            .where(
+                Document.doc_type == doc_type,
+                Document.source_path == source_path,
+            )
+            .limit(1)
+        )
+        row = session.execute(stmt).scalar_one_or_none()
+        if not row:
+            return None
+        return _serialize_document(row)
