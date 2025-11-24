@@ -223,3 +223,172 @@ def chunk_text(
         start += step
     return chunks
 
+def split_for_varchar_bytes(
+    text: str,
+    hard_max_bytes: int = 32768,
+    soft_max_bytes: int = 30000,   # 여유 버퍼
+    table_mark: str = "[[TABLE",
+) -> list[str]:
+    """
+    VARCHAR 초과 방지: UTF-8 바이트 기준으로 안전 분할.
+    - 표 텍스트는 헤더([[TABLE ...]])를 첫 조각에만 포함.
+    - 이후 조각엔 [[TABLE_CONT i/n]] 마커를 부여.
+    - 개행 경계 우선(backtrack), 그래도 안되면 하드컷.
+    """
+    if not text:
+        return [""]
+
+    # 표 헤더 분리
+    header = ""
+    body = text
+    if text.startswith(table_mark):
+        head_end = text.find("]]")
+        if head_end != -1:
+            head_end += 2
+            if head_end < len(text) and text[head_end] == "\n":
+                head_end += 1
+            header, body = text[:head_end], text[head_end:]
+
+    def _split_body(b: str) -> list[str]:
+        out: list[str] = []
+        b_bytes = b.encode("utf-8")
+        n = len(b_bytes)
+        i = 0
+        while i < n:
+            j = min(i + soft_max_bytes, n)
+            # 개행 경계로 뒤로 물러나기
+            k = j
+            backtracked = False
+            # j부터 i까지 역방향으로 \n 바이트(0x0A) 탐색
+            while k > i and (j - k) < 2000:  # 최대 2KB만 백트랙
+                if b_bytes[k-1:k] == b"\n":
+                    backtracked = True
+                    break
+                k -= 1
+            if backtracked and (k - i) >= int(soft_max_bytes * 0.6):
+                cut = k
+            else:
+                cut = j
+
+            # 하드 컷(멀티바이트 경계 맞추기)
+            if cut - i > hard_max_bytes:
+                cut = i + hard_max_bytes
+
+            # UTF-8 안전 디코드: 경계가 문자를 반쯤 자를 수 있으니 넉넉히 조정
+            chunk = b_bytes[i:cut]
+            # 만약 디코드 에러가 나면 한 바이트씩 줄이며 안전 경계 찾기
+            while True:
+                try:
+                    s = chunk.decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    cut -= 1
+                    if cut <= i:
+                        # 최악의 경우 한 글자라도 디코드되게 한 바이트 앞당김
+                        cut = i + 1
+                    chunk = b_bytes[i:cut]
+            out.append(s)
+            i = cut
+        return out
+
+    if len(text.encode("utf-8")) <= hard_max_bytes:
+        return [text]
+
+    parts = _split_body(body)
+    if header:
+        total = len(parts)
+        result = []
+        for idx, c in enumerate(parts, start=1):
+            if idx == 1:
+                # 첫 조각은 헤더 + 본문
+                # 전체가 하드맥스를 넘지 않게 헤더와 합친 뒤 한번 더 자르기
+                first = header + c
+                if len(first.encode("utf-8")) <= hard_max_bytes:
+                    result.append(first)
+                else:
+                    # 너무 크면 헤더는 유지하고 c를 다시 잘라 붙임
+                    # (헤더가 길 때 매우 예외적)
+                    subparts = _split_body(c)
+                    if subparts:
+                        # 첫 조각은 헤더 + 첫 sub
+                        f = header + subparts[0]
+                        if len(f.encode("utf-8")) > hard_max_bytes:
+                            # 헤더 자체가 큰 극단: 헤더만 넣고 이후 CONT로 처리
+                            result.append(header[:0] + header)  # 그대로
+                            # 나머지는 CONT
+                            for sidx, sp in enumerate(subparts, start=1):
+                                tag = f"[[TABLE_CONT {sidx}/{len(subparts)}]]\n"
+                                result.append(tag + sp)
+                        else:
+                            result.append(f)
+                            # 나머지는 CONT
+                            for sidx, sp in enumerate(subparts[1:], start=2):
+                                tag = f"[[TABLE_CONT {sidx}/{len(subparts)}]]\n"
+                                result.append(tag + sp)
+                    else:
+                        result.append(header)  # 본문이 없으면 헤더만
+            else:
+                tag = f"[[TABLE_CONT {idx}/{total}]]\n"
+                # tag + c 가 하드맥스를 넘지 않도록 재자르기
+                rest = tag + c
+                if len(rest.encode("utf-8")) <= hard_max_bytes:
+                    result.append(rest)
+                else:
+                    subs = _split_body(c)
+                    for sidx, sp in enumerate(subs, start=1):
+                        subt = f"[[TABLE_CONT {idx}.{sidx}/{total}]]\n" + sp
+                        if len(subt.encode("utf-8")) <= hard_max_bytes:
+                            result.append(subt)
+                        else:
+                            # 그래도 넘으면 하드컷으로 마지막 방어
+                            bb = subt.encode("utf-8")[:hard_max_bytes]
+                            result.append(bb.decode("utf-8", errors="ignore"))
+        return result
+    else:
+        return parts
+
+def parse_doc_version(stem: str) -> Tuple[str, int]:
+    """
+    파일명(stem)에서 버전(타임스탬프 등)을 분리.
+    예: "doc_20231025" -> ("doc", 20231025)
+    """
+    if "_" in stem:
+        base, cand = stem.rsplit("_", 1)
+        if cand.isdigit() and len(cand) in (4, 8):
+            return base, int(cand)
+    return stem, 0
+
+def determine_level_for_task(text: str, task_rules: Dict) -> int:
+    """
+    텍스트 내 키워드를 기반으로 보안 레벨 결정.
+    task_rules: {"maxLevel": N, "levels": {"1": [...], "2": [...]}}
+    """
+    max_level = int(task_rules.get("maxLevel", 1))
+    levels = task_rules.get("levels", {})
+    sel = 1
+    # 상위 레벨 우선
+    for lvl in range(1, max_level + 1):
+        kws = levels.get(str(lvl), [])
+        for kw in kws:
+            if kw and kw in text:
+                sel = max(sel, lvl)
+    return sel
+
+def extract_insert_ids(result: Any) -> List[str]:
+    """
+    Milvus insert 결과에서 primary key 리스트를 추출한다.
+    다양한 리턴 타입(dict/InsertResult 등)을 모두 처리한다.
+    """
+    ids: Any = None
+    if isinstance(result, dict):
+        ids = (
+            result.get("ids")
+            or result.get("primary_keys")
+            or result.get("inserted_ids")
+        )
+    else:
+        ids = getattr(result, "primary_keys", None) or getattr(result, "ids", None)
+    if not ids:
+        return []
+    return [str(pk) for pk in ids]
+
