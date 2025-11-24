@@ -44,7 +44,7 @@ def _fetch_docs_by_ids(conn: sqlite3.Connection, doc_ids: List[str]) -> Dict[str
     qmarks = ",".join(["?"] * len(doc_ids))
     cur = conn.execute(
         f"""
-        SELECT doc_id, filename, storage_path AS docpath
+        SELECT doc_id, filename, source_path AS docpath
         FROM documents
         WHERE doc_type = ?
           AND doc_id IN ({qmarks})
@@ -57,7 +57,7 @@ def _fetch_docs_by_ids(conn: sqlite3.Connection, doc_ids: List[str]) -> Dict[str
 def _fetch_all_docs(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     cur = conn.execute(
         """
-        SELECT doc_id, filename, storage_path AS docpath
+        SELECT doc_id, filename, source_path AS docpath
         FROM documents
         WHERE doc_type = ?
         ORDER BY id DESC

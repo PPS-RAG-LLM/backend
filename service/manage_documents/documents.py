@@ -308,7 +308,6 @@ async def upload_document(
             doc_id=doc_id,
             doc_type=doc_type.value,
             filename=filename,
-            storage_path=str(doc_info_path),
             payload=doc_payload,
             workspace_id=target_workspace_id,
         )

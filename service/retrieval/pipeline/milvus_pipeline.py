@@ -10,12 +10,12 @@ logger = logger(__name__)
 
 TABLE_MARK = "[[TABLE"
 SnippetLoader = Callable[[str, int], str]
-
 DEFAULT_OUTPUT_FIELDS: Tuple[str, ...] = (
+    "pk",  # = vector_id
     "path",
     "chunk_idx",
     "task_type",
-    "security_level",
+    "security_level", 
     "doc_id",
     "text",
     "page",
@@ -37,19 +37,6 @@ def _iter_hits(raw_results: Sequence[Any]) -> Iterable[Tuple[Dict[str, Any], flo
         yield entity, score, ent_text
 
 
-def _resolve_snippet(
-    ent_text: Optional[str],
-    snippet_loader: SnippetLoader,
-    *,
-    path: str,
-    chunk_idx: int,
-    table_mark: str = TABLE_MARK,
-) -> str:
-    if isinstance(ent_text, str) and ent_text.startswith(table_mark):
-        return ent_text
-    return snippet_loader(path, chunk_idx)
-
-
 def build_dense_hits(
     raw_results: Sequence[Any],
     *,
@@ -62,6 +49,7 @@ def build_dense_hits(
         path = entity.get("path")
         if not path:
             continue
+        vector_id = entity.get("pk") or entity.get("vector_id")
         chunk_idx = int(entity.get("chunk_idx", 0) or 0)
         task_type = entity.get("task_type")
         security_level = int(entity.get("security_level", 1) or 1)
@@ -70,29 +58,16 @@ def build_dense_hits(
         snippet_source = "entity"
         snippet = str(ent_text or "").strip()
         if snippet and snippet.startswith(table_mark):
-            # table markdown 그대로 사용
-            pass
+            snippet_source = "entity"
         else:
-            if not snippet:
-                snippet_source = "store"
-                snippet = _resolve_snippet(
-                    ent_text,
-                    snippet_loader,
-                    path=str(path),
-                    chunk_idx=chunk_idx,
-                    table_mark=table_mark,
-                )
-            else:
-                snippet_source = "entity"
+            snippet_source = "entity" if snippet else "empty"
         logger.debug(
             "[Snippet] source=%s path=%s chunk=%s len=%s",
-            snippet_source,
-            path,
-            chunk_idx,
-            len(snippet or ""),
+            snippet_source, path, chunk_idx, len(snippet or ""),
         )
         hits.append(
             {
+                "vector_id": str(vector_id) if vector_id is not None else None,
                 "path": path,
                 "chunk_idx": chunk_idx,
                 "task_type": task_type,

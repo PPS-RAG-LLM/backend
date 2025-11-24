@@ -44,7 +44,7 @@ class Document(Base):
     )
     security_level = Column(Integer, nullable=True)
     filename = Column(Text, nullable=False)
-    storage_path = Column(Text, nullable=False)
+    storage_path = Column(Text, nullable=True) # TODO : MinIO 저장 경로 추가 시 사용
     source_path = Column(Text)
     payload = Column(JSON, nullable=False, default=dict)
     created_at = Column(
@@ -120,6 +120,7 @@ class DocumentVector(Base):
         nullable=False,
     )
     vector_id = Column(Text, nullable=False)
+    task_type = Column(Text, nullable=True) # admin일 경우에만 필요. (사용자 측은 필요없음)
     collection = Column(Text, nullable=False)
     embedding_version = Column(Text, nullable=False)
     page = Column(Integer)

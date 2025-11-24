@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import delete, desc, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from utils import logger, now_kst, now_kst_string
 from utils.database import get_session
-
+from sqlalchemy import func
 from storage.db_models import (
     Document,
     DocumentMetadata,
@@ -25,7 +25,6 @@ def _serialize_document(row: Document) -> Dict[str, Any]:
         "doc_type": row.doc_type,
         "filename": row.filename,
         "workspace_id": row.workspace_id,
-        "storage_path": row.storage_path,
         "source_path": row.source_path,
         "payload": row.payload or {},
         "security_level": row.security_level,
@@ -39,7 +38,6 @@ def upsert_document(
     doc_id: str,
     doc_type: str,
     filename: str,
-    storage_path: str,
     payload: Optional[Dict[str, Any]] = None,
     workspace_id: Optional[int] = None,
     security_level: Optional[int] = None,
@@ -54,7 +52,6 @@ def upsert_document(
             workspace_id=workspace_id,
             security_level=security_level,
             filename=filename,
-            storage_path=storage_path,
             source_path=source_path,
             payload=payload,
         )
@@ -65,7 +62,6 @@ def upsert_document(
                 "workspace_id": insert_stmt.excluded.workspace_id,
                 "security_level": insert_stmt.excluded.security_level,
                 "filename": insert_stmt.excluded.filename,
-                "storage_path": insert_stmt.excluded.storage_path,
                 "source_path": insert_stmt.excluded.source_path,
                 "payload": insert_stmt.excluded.payload,
             },
@@ -135,7 +131,6 @@ def insert_workspace_document(
         payload["workspace_metadata"] = metadata
 
         existing.filename = filename
-        existing.storage_path = docpath or existing.storage_path
         existing.workspace_id = int(workspace_id)
         existing.doc_type = DocumentType.WORKSPACE.value
         existing.payload = payload
@@ -161,6 +156,7 @@ def insert_document_vectors(
             {
                 "doc_id": doc_id,
                 "vector_id": str(item["vector_id"]),
+                "task_type": str(item["task_type"]),
                 "collection": collection,
                 "embedding_version": embedding_version,
                 "page": item.get("page"),
@@ -176,6 +172,7 @@ def insert_document_vectors(
             ],
             set_={
                 "collection": insert_stmt.excluded.collection,
+                "task_type": insert_stmt.excluded.task_type,
                 "embedding_version": insert_stmt.excluded.embedding_version,
                 "page": insert_stmt.excluded.page,
                 "chunk_index": insert_stmt.excluded.chunk_index,
@@ -184,6 +181,28 @@ def insert_document_vectors(
         result = session.execute(insert_stmt)
         session.commit()
         return int(result.rowcount or 0)
+
+
+def delete_document_vectors(
+    doc_id: str,
+    task_type: Optional[str] = None,
+) -> int:
+    """document_vectors에서 해당 doc_id(및 task_type)의 벡터를 삭제."""
+    with get_session() as session:
+        stmt = delete(DocumentVector).where(DocumentVector.doc_id == doc_id)
+        if task_type:
+            stmt = stmt.where(DocumentVector.task_type == task_type)
+        result = session.execute(stmt)
+        session.commit()
+        return int(result.rowcount or 0)
+
+
+def document_has_vectors(doc_id: str) -> bool:
+    """doc_id에 남아 있는 벡터가 있는지 확인."""
+    with get_session() as session:
+        stmt = select(func.count(DocumentVector.vector_id)).where(DocumentVector.doc_id == doc_id)
+        count = session.execute(stmt).scalar() or 0
+        return count > 0
 
 
 def list_doc_ids_by_workspace(workspace_id: int) -> List[Dict[str, Any]]:
@@ -216,7 +235,7 @@ def list_workspace_documents(workspace_id: int) -> List[Dict[str, Any]]:
             {
                 "doc_id": r.doc_id,
                 "filename": r.filename,
-                "docpath": r.storage_path or (r.payload or {}).get("doc_info_path"),
+                "docpath": (r.payload or {}).get("doc_info_path"),
                 "metadata": (r.payload or {}).get("workspace_metadata") or {},
             }
             for r in rows
@@ -388,3 +407,126 @@ def get_document_by_source_path(
         if not row:
             return None
         return _serialize_document(row)
+
+
+def get_list_indexed_files(collection_name: str, offset: int = 0, limit: int = 1000, task_type: Optional[str] = None):
+    with get_session() as session:
+        stmt = (
+            select(
+                DocumentVector.doc_id,
+                DocumentVector.task_type,
+                func.count(DocumentVector.vector_id).label("chunk_count"),
+            )
+            .where(DocumentVector.collection == collection_name)
+            .group_by(DocumentVector.doc_id, DocumentVector.task_type)
+            .offset(max(0, offset))
+            .limit(limit)
+        )
+        if task_type:
+            stmt = stmt.where(DocumentVector.task_type == task_type)
+        rows = session.execute(stmt).all()
+        return rows
+
+
+def purge_documents_by_collection(doc_types: Sequence[str]) -> Dict[str, int]:
+    """
+    전달된 doc_type 목록과 연결된 문서·메타데이터·벡터를 모두 제거한다.
+    doc_types가 비어 있으면 아무 작업도 수행하지 않는다.
+    """
+    if isinstance(doc_types, str):
+        doc_types = [doc_types]
+    doc_types = [dt for dt in doc_types if dt]
+    stats = {"vectors": 0, "metadata": 0, "documents": 0}
+
+    if not doc_types:
+        return stats
+
+    with get_session() as session:
+        admin_ids_stmt = select(Document.doc_id).where(Document.doc_type.in_(doc_types))
+
+        del_vectors = delete(DocumentVector).where(DocumentVector.doc_id.in_(admin_ids_stmt))
+        res_vec = session.execute(del_vectors)
+        stats["vectors"] = int(res_vec.rowcount or 0)
+
+        del_metadata = delete(DocumentMetadata).where(DocumentMetadata.doc_id.in_(admin_ids_stmt))
+        res_meta = session.execute(del_metadata)
+        stats["metadata"] = int(res_meta.rowcount or 0)
+
+        del_docs = delete(Document).where(Document.doc_type.in_(doc_types))
+        res_docs = session.execute(del_docs)
+        stats["documents"] = int(res_docs.rowcount or 0)
+
+        session.commit()
+
+    return stats
+
+
+
+def fetch_metadata_by_vector_ids(vector_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    vector_id 목록을 DocumentMetadata/DocumentVector 조합으로 조회해
+    doc_id·chunk_index·text 등을 돌려준다.
+    """
+    if not vector_ids:
+        return {}
+    with get_session() as session:
+        stmt = (
+            select(
+                DocumentVector.vector_id,
+                DocumentVector.doc_id,
+                DocumentVector.chunk_index,
+                DocumentMetadata.text,
+                DocumentMetadata.payload,
+            )
+            .join(
+                DocumentMetadata,
+                (DocumentMetadata.doc_id == DocumentVector.doc_id)
+                & (DocumentMetadata.chunk_index == DocumentVector.chunk_index),
+            )
+            .where(DocumentVector.vector_id.in_(vector_ids))
+        )
+        rows = session.execute(stmt).all()
+        return {
+            str(vector_id): {
+                "doc_id": doc_id,
+                "chunk_index": chunk_index,
+                "text": text or "",
+                "payload": payload or {},
+            }
+            for vector_id, doc_id, chunk_index, text, payload in rows
+        }
+
+
+def fetch_document_metadata_by_doc_ids(doc_ids: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    주어진 doc_id 목록에 대한 페이지/청크 메타데이터를 모두 조회해
+    {doc_id: [{chunk_index, page, text, payload}, ...]} 형태로 반환한다.
+    """
+    if not doc_ids:
+        return {}
+
+    with get_session() as session:
+        stmt = (
+            select(
+                DocumentMetadata.doc_id,
+                DocumentMetadata.chunk_index,
+                DocumentMetadata.page,
+                DocumentMetadata.text,
+                DocumentMetadata.payload,
+            )
+            .where(DocumentMetadata.doc_id.in_(doc_ids))
+            .order_by(DocumentMetadata.doc_id, DocumentMetadata.chunk_index)
+        )
+        rows = session.execute(stmt).all()
+
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for doc_id, chunk_idx, page, text, payload in rows:
+        result.setdefault(doc_id, []).append(
+            {
+                "chunk_index": int(chunk_idx),
+                "page": int(page or 0),
+                "text": text or "",
+                "payload": payload or {},
+            }
+        )
+    return result

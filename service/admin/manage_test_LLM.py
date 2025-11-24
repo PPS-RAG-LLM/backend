@@ -13,6 +13,7 @@ from repository.llm_test_session import get_test_session_by_sid, insert_test_ses
 from repository.documents import (
     delete_documents_by_type_and_ids,
     upsert_document,
+    fetch_metadata_by_vector_ids,
 )
 from storage.db_models import DocumentType
 from service.preprocessing.rag_preprocessing import ext, extract_any
@@ -22,6 +23,7 @@ from service.retrieval.reranker import rerank_snippets
 from service.vector_db import ensure_collection_and_index, get_milvus_client, run_dense_search, run_hybrid_search
 from functools import partial
 logger = logging.getLogger(__name__)
+
 
 # ===== 경로/세션 고정값 =====
 BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
@@ -80,7 +82,6 @@ def _record_llm_test_document(
         doc_id=doc_id,
         doc_type=LLM_TEST_DOC_TYPE,
         filename=filename,
-        storage_path=rel_text_path,
         source_path=source_path,
         security_level=_max_sec_level(sec_map),
         payload=payload,
@@ -634,16 +635,11 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
     candidate = max(embedding_candidates, final_results * 2)
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-    snippet_loader = partial(
-        load_snippet_from_store,
-        EXTRACTED_TEXT_DIR,
-        max_tokens=int(settings["chunkSize"]),
-        overlap=int(settings["overlap"]),
-    )
-    output_fields = ("path", "chunk_idx", "task_type", "security_level", "doc_id", "text")
+
+    output_fields = ("pk", "path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page")
 
     if search_type == "vector":
-        res_dense = run_dense_search(
+        raw_results = run_dense_search(
             client,
             collection_name=coll,
             query_vector=q_emb.tolist(),
@@ -651,9 +647,8 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
             filter_expr=filter_expr,
             output_fields=output_fields,
         )
-        hits_raw = build_dense_hits(res_dense, snippet_loader=snippet_loader)
     else:
-        res_hybrid = run_hybrid_search(
+        raw_results = run_hybrid_search(
             client,
             collection_name=coll,
             query_vector=q_emb.tolist(),
@@ -662,8 +657,20 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
             filter_expr=filter_expr,
             output_fields=output_fields,
         )
-        hits_raw = build_dense_hits(res_hybrid, snippet_loader=snippet_loader)
+    hits_raw = build_dense_hits(raw_results, snippet_loader=lambda _path, _idx: "")
 
+    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
+    meta_map = fetch_metadata_by_vector_ids(vector_ids)
+    for hit in hits_raw:
+        vid = str(hit.get("vector_id") or "")
+        meta = meta_map.get(vid)
+        if meta:
+            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
+            hit["chunk_idx"] = meta.get("chunk_index")
+            hit["text"] = meta.get("text")
+        else:
+            hit["snippet"] = ""
+            
     rerank_candidates = build_rerank_payload(hits_raw)
 
     if rerank_candidates:
@@ -844,8 +851,6 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
 
     all_rules = get_security_level_rules_all()
-    sess_txt_root = EXTRACTED_TEXT_DIR / "__sessions__" / sid
-    sess_txt_root.mkdir(parents=True, exist_ok=True)
 
     tasks = task_types or list(TASK_TYPES)
     total = 0
