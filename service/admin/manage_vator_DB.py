@@ -1122,7 +1122,8 @@ async def ingest_embeddings(
             # 1) 본문 조각 (페이지 정보 포함, 텍스트와 표 모두 포함)
             for page_num, idx, c in chunks_with_page:
                 # VARCHAR 한도 안전 분할(바이트 기준)
-                for part in _split_for_varchar_bytes(c):
+                parts = _split_for_varchar_bytes(c)
+                for sub_idx, part in enumerate(parts):
                     # 최종 방어(예외적으로 경계 잘림 실패 시)
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
@@ -1134,10 +1135,14 @@ async def ingest_embeddings(
                         logger.error(f"[Ingest] 벡터 차원 불일치: 예상={emb_dim}, 실제={len(vec)}, 텍스트='{part[:50]}...'")
                         continue  # 이 벡터는 건너뛰기
                     
+                    # chunk_idx에 서브 인덱스 추가 (중복 방지: 같은 chunk_idx를 가진 여러 part 구분)
+                    # 예: chunk_idx=5, sub_idx=0 -> 5000, sub_idx=1 -> 5001
+                    unique_chunk_idx = idx * 1000 + sub_idx if len(parts) > 1 else idx
+                    
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(idx),
+                        "chunk_idx": int(unique_chunk_idx),
                         "task_type": task,
                         "security_level": lvl,
                         "doc_id": str(doc_id),
@@ -1256,14 +1261,18 @@ async def ingest_single_pdf(req: SinglePDFIngestRequest):
 
         # 본문: VARCHAR 안전 분할
         for idx, c in enumerate(chunks):
-            for part in _split_for_varchar_bytes(c):
+            parts = _split_for_varchar_bytes(c)
+            for sub_idx, part in enumerate(parts):
                 if len(part.encode("utf-8")) > 32768:
                     part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
                 vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                # chunk_idx에 서브 인덱스 추가 (중복 방지: 같은 chunk_idx를 가진 여러 part 구분)
+                # 예: chunk_idx=5, sub_idx=0 -> 5000, sub_idx=1 -> 5001
+                unique_chunk_idx = idx * 1000 + sub_idx if len(parts) > 1 else idx
                 batch.append({
                     "embedding": vec.tolist(),
                     "path": str(rel_file.with_suffix(".txt")),
-                    "chunk_idx": int(idx),
+                    "chunk_idx": int(unique_chunk_idx),
                     "task_type": task,
                     "security_level": lvl,
                     "doc_id": str(doc_id),
@@ -1422,14 +1431,17 @@ async def ingest_specific_files_with_levels(
                 lvl = int(sec_map.get(t, 1))
 
                 for idx, c in enumerate(chunks):
-                    for part in _split_for_varchar_bytes(c):
+                    parts = _split_for_varchar_bytes(c)
+                    for sub_idx, part in enumerate(parts):
                         if len(part.encode("utf-8")) > 32768:
                             part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
                         vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                        # chunk_idx에 서브 인덱스 추가 (중복 방지: 같은 chunk_idx를 가진 여러 part 구분)
+                        unique_chunk_idx = idx * 1000 + sub_idx if len(parts) > 1 else idx
                         batch.append({
                             "embedding": vec.tolist(),
                             "path": str(rel_txt.as_posix()),
-                            "chunk_idx": int(idx),
+                            "chunk_idx": int(unique_chunk_idx),
                             "task_type": t,
                             "security_level": lvl,
                             "doc_id": str(doc_id),
@@ -2265,14 +2277,17 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
 
             # 본문: VARCHAR 안전 분할
             for idx, c in enumerate(chunks):
-                for part in _split_for_varchar_bytes(c):
+                parts = _split_for_varchar_bytes(c)
+                for sub_idx, part in enumerate(parts):
                     if len(part.encode("utf-8")) > 32768:
                         part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
                     vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
+                    # chunk_idx에 서브 인덱스 추가 (중복 방지: 같은 chunk_idx를 가진 여러 part 구분)
+                    unique_chunk_idx = idx * 1000 + sub_idx if len(parts) > 1 else idx
                     batch.append({
                         "embedding": vec.tolist(),
                         "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(idx),
+                        "chunk_idx": int(unique_chunk_idx),
                         "task_type": t,
                         "security_level": lvl,
                         "doc_id": str(doc_id),

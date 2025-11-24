@@ -1,4 +1,32 @@
 {
+  "securityLevel1/2025년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문(25년 GPU 사용자).pdf": {
+    "chars": 968,
+    "lines": 137,
+    "preview": "성장하는 함께하는 ICT, KAIT 한국정보통신진흥협회 수신자 년 고성능 컴퓨팅 지원 사업 참여 사용자 2025 경 유 ( ) 제  목 년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문 년 사용자 2025 (25 GPU ) 귀 사 및 기관의 무궁한 발전을 기원합니다 1. .  2. 우리 협회는 년 고성능 컴퓨팅 지원 사업의 성과 및 우수 활용사례…",
+    "security_levels": {
+      "doc_gen": 1,
+      "summary": 1,
+      "qna": 1
+    },
+    "doc_id": "2025년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문(25년 GPU 사용자)",
+    "version": 0,
+    "tables": [],
+    "pages": {
+      "1": "성장하는\n함께하는\nICT,\nKAIT\n한국정보통신진흥협회\n수신자\n년 고성능 컴퓨팅 지원 사업 참여 사용자\n2025\n경 유\n(\n)\n제  목\n년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문\n년\n사용자\n2025\n(25\nGPU\n)\n귀 사 및 기관의 무궁한 발전을 기원합니다\n1.\n.\n 2. 우리 협회는\n년 고성능 컴퓨팅 지원 사업의 성과 및 우수 활용사례 등을 발굴하고\n2025\n,\n사업 최종 실적을 점검하기위해 아래와 같이 성과조사 및 결과점검을 수행하오니\n적극 협조하여 주시기 바랍니다.\n가\n대상\n년 고성능 컴퓨팅 지원 사업에 참여한 기업기관\n\n.\n: 2025\n·\n나\n내용\n\n.\n성과조사\n     1)\n: 사업 만족도 조사 및 매출\n특허\n투자유치\n기술이전\n논문\n사업홍보\n,\n,\n,\n,\n,\n등 성과조사\n결과점검\n자원 활용 결과보고서\n성과 증빙자료 제출 및 점검\n     2)\n:\n,\n성과조사 및 결과보고서 제출이 의무화 되어 미 제출 시 다음 연도 사업 참여에 제한됨\n       *\n 다.\n기간\n\n: 2025. 11. 17.(월) ~ 11. 30.(일)\n라\n제출방법\n구글폼 제출\n\n.\n:\n마\n운영기관\n한국정보통신진흥협회\n\n.\n:\n바\n문의처\n\n.\n     1)\n산업기반팀\nAI\nkaitcloud@kait.or.kr (02-580-0216/02-580-0217)\n산업기반팀 장정아 사원\n     2) AI\n(02-580-0215)\n붙임\n년 고성능 컴퓨팅 지원 사업 성과조사서\n용\n부\n끝\n2025\n(GPU\n) 1\n.\n.",
+      "2": "한국정보통신진흥협회장\n대결\n전결 대결 11/17\n담\n당장정아\n팀장최재민\n팀장이지영\n팀장엄석준\n협\n조\n자\n감 사 자\n시행\n산업기반팀\nAI\n-744 (2025.11.17.)\n접수\n우\n06242\n서울 강남구 역삼로\n역삼동\n한국정보통신진흥협회 빌딩\n111 (\n,\n)\n층\n층\n6\n~12\n/ http://www.kait.or.kr\n전화\n02-580-0215\n전송\n/\n전자메일\n/\njunga@kait.or.kr\n/ 공개"
+    },
+    "total_pages": 2,
+    "sourceExt": ".pdf",
+    "saved_files": {
+      "text": "/home/wzxcv123/NIQ/jo/backend/storage/extracted_texts/securityLevel1/2025년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문(25년 GPU 사용자).txt"
+    },
+    "extraction_info": {
+      "original_file": "2025년 고성능 컴퓨팅 지원 사업 성과조사 및 결과점검 협조 공문(25년 GPU 사용자).pdf",
+      "text_length": 968,
+      "table_count": 0,
+      "extracted_at": "2025-11-24 17:14:43"
+    }
+  },
   "securityLevel3/81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf": {
     "chars": 9613,
     "lines": 861,
@@ -497,7 +525,7 @@
       "original_file": "81._부정청탁및금품등수수의신고사무처리에관한내규_20191128.pdf",
       "text_length": 9613,
       "table_count": 45,
-      "extracted_at": "2025-11-21 15:04:28"
+      "extracted_at": "2025-11-24 17:14:55"
     }
   },
   "securityLevel2/ARMS_313DEVGRP_SolutionProfile.pdf": {
@@ -686,7 +714,7 @@
       "original_file": "ARMS_313DEVGRP_SolutionProfile.pdf",
       "text_length": 17348,
       "table_count": 11,
-      "extracted_at": "2025-11-21 15:04:30"
+      "extracted_at": "2025-11-24 17:14:56"
     }
   },
   "securityLevel1/리눅스 마스터2급 2차 전체합.pdf": {
@@ -924,7 +952,7 @@
       "original_file": "리눅스 마스터2급 2차 전체합.pdf",
       "text_length": 37254,
       "table_count": 16,
-      "extracted_at": "2025-11-21 15:04:37"
+      "extracted_at": "2025-11-24 17:15:03"
     }
   },
   "securityLevel3/49._계약심의위원회설치및운영에관한내규_20191128.pdf": {
@@ -1019,7 +1047,32 @@
       "original_file": "49._계약심의위원회설치및운영에관한내규_20191128.pdf",
       "text_length": 5486,
       "table_count": 6,
-      "extracted_at": "2025-11-21 15:04:44"
+      "extracted_at": "2025-11-24 17:15:10"
+    }
+  },
+  "securityLevel2/[한국가스안전공사] 제안발표자료_V1.0_개발part.pptx": {
+    "chars": 5143,
+    "lines": 650,
+    "preview": "제안 발표자료  2025. 11  가스안전 AI 어드바이저 (생성형 AI 시스템) 구축  I  제안 배경 및 목적  주요사업 내용  사업 추진 전략  제안의 특장점  기대 효과  CHAPTER  사업개요  sLLM + RAG 구조의 질의응답·문서요약·번역 등 생성형 AI 기능 구현  내부망 전용으로 민감정보 유출 방지 및 폐쇄망 내 안전한 AI 서비스 운용…",
+    "security_levels": {
+      "doc_gen": 2,
+      "summary": 2,
+      "qna": 2
+    },
+    "doc_id": "[한국가스안전공사] 제안발표자료_V1.0_개발part",
+    "version": 0,
+    "tables": [],
+    "pages": {},
+    "total_pages": 0,
+    "sourceExt": ".pptx",
+    "saved_files": {
+      "text": "/home/wzxcv123/NIQ/jo/backend/storage/extracted_texts/securityLevel2/[한국가스안전공사] 제안발표자료_V1.0_개발part.txt"
+    },
+    "extraction_info": {
+      "original_file": "[한국가스안전공사] 제안발표자료_V1.0_개발part.pptx",
+      "text_length": 5143,
+      "table_count": 0,
+      "extracted_at": "2025-11-24 17:16:03"
     }
   },
   "securityLevel1/메타빌드 오픈소스 자료.pdf": {
@@ -1046,7 +1099,7 @@
       "original_file": "메타빌드 오픈소스 자료.pdf",
       "text_length": 817,
       "table_count": 0,
-      "extracted_at": "2025-11-21 15:04:44"
+      "extracted_at": "2025-11-24 17:16:04"
     }
   },
   "securityLevel2/보수규정_20250228.pdf": {
@@ -1186,7 +1239,32 @@
       "original_file": "보수규정_20250228.pdf",
       "text_length": 15808,
       "table_count": 10,
-      "extracted_at": "2025-11-21 15:04:46"
+      "extracted_at": "2025-11-24 17:16:06"
+    }
+  },
+  "securityLevel1/Black and Purple Gradient Trendy Digital Marketing Plan Presentation.pptx": {
+    "chars": 1055,
+    "lines": 148,
+    "preview": "사용자  RAG  확장자별 전처리 (PDF, TEXT, JSON, text, txt, mp3, wav..)  자동 문서 탐지 폴더내 변경이 일어나면 문서를 탐지 (Middleware)  제안 시스템  시스템 구성도  RAG+LLM으로 검색 정확도 향상, 조직/개인 정보 보안 강화  역할별/모듈별 구성으로 사용성 및 관리의 편의성 제공  고객 맟춤형 3종 서…",
+    "security_levels": {
+      "doc_gen": 1,
+      "summary": 1,
+      "qna": 1
+    },
+    "doc_id": "Black and Purple Gradient Trendy Digital Marketing Plan Presentation",
+    "version": 0,
+    "tables": [],
+    "pages": {},
+    "total_pages": 0,
+    "sourceExt": ".pptx",
+    "saved_files": {
+      "text": "/home/wzxcv123/NIQ/jo/backend/storage/extracted_texts/securityLevel1/Black and Purple Gradient Trendy Digital Marketing Plan Presentation.txt"
+    },
+    "extraction_info": {
+      "original_file": "Black and Purple Gradient Trendy Digital Marketing Plan Presentation.pptx",
+      "text_length": 1055,
+      "table_count": 0,
+      "extracted_at": "2025-11-24 17:16:17"
     }
   },
   "securityLevel1/2. FP111_고압가스 특정제조의 시설·기술·검사·감리·정밀안전검진 기준_250116.pdf": {
@@ -2062,7 +2140,7 @@
       "original_file": "2. FP111_고압가스 특정제조의 시설·기술·검사·감리·정밀안전검진 기준_250116.pdf",
       "text_length": 159729,
       "table_count": 69,
-      "extracted_at": "2025-11-21 15:05:00"
+      "extracted_at": "2025-11-24 17:16:30"
     }
   },
   "securityLevel3/부패신고_처리_및_신고자_보호_등에_관한_내규_20220905.pdf": {
@@ -2291,7 +2369,7 @@
       "original_file": "부패신고_처리_및_신고자_보호_등에_관한_내규_20220905.pdf",
       "text_length": 12693,
       "table_count": 19,
-      "extracted_at": "2025-11-21 15:05:16"
+      "extracted_at": "2025-11-24 17:16:45"
     }
   },
   "securityLevel1/2025년 2학기 운영체제 과제.pdf": {
@@ -2318,7 +2396,7 @@
       "original_file": "2025년 2학기 운영체제 과제.pdf",
       "text_length": 841,
       "table_count": 0,
-      "extracted_at": "2025-11-21 15:05:16"
+      "extracted_at": "2025-11-24 17:16:45"
     }
   },
   "securityLevel1/4. FP113_고압가스 냉동제조의 시설기술검사정밀안전검진 기준_240521.pdf": {
@@ -3563,7 +3641,7 @@
       "original_file": "4. FP113_고압가스 냉동제조의 시설기술검사정밀안전검진 기준_240521.pdf",
       "text_length": 185080,
       "table_count": 109,
-      "extracted_at": "2025-11-21 15:05:35"
+      "extracted_at": "2025-11-24 17:17:06"
     }
   },
   "securityLevel1/연장근무 신청방법.pdf": {
@@ -3595,7 +3673,7 @@
       "original_file": "연장근무 신청방법.pdf",
       "text_length": 810,
       "table_count": 0,
-      "extracted_at": "2025-11-21 15:05:35"
+      "extracted_at": "2025-11-24 17:17:06"
     }
   },
   "securityLevel1/35._문서관리규정_20191128.pdf": {
@@ -3804,7 +3882,7 @@
       "original_file": "35._문서관리규정_20191128.pdf",
       "text_length": 11822,
       "table_count": 17,
-      "extracted_at": "2025-11-21 15:05:53"
+      "extracted_at": "2025-11-24 17:17:23"
     }
   }
 }

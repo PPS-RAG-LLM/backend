@@ -24,12 +24,11 @@ def _clean_text(s: str | None) -> str:
 def _extract_any(path: Path) -> tuple[str, list[dict]]:
     """통합 문서 추출 라우터"""
     from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-    # from service.preprocessing.extension.txt_preprocessing import _extract_plain_text
+    from service.preprocessing.extension.txt_preprocessing import _extract_plain_text
     from service.preprocessing.extension.docx_preprocessing import _extract_docx
     from service.preprocessing.extension.pptx_preprocessing import _extract_pptx
     from service.preprocessing.extension.csv_preprocessing import _extract_csv
     from service.preprocessing.extension.excel_preprocessing import _extract_excel
-    from service.preprocessing.extension.doc_preprocessing import _extract_doc
     from service.preprocessing.extension.ppt_preprocessing import _extract_ppt
     
     ext = _ext(path)
@@ -47,10 +46,11 @@ def _extract_any(path: Path) -> tuple[str, list[dict]]:
         return _extract_csv(path)
     if ext in {".xlsx", ".xls"}:
         return _extract_excel(path)
-    if ext == ".doc":
-        return _extract_doc(path)
     if ext == ".ppt":
         return _extract_ppt(path)
+    # DOC 파일은 DOCX로 변환 후 처리 (docx_preprocessing에서 자동 변환)
+    if ext == ".doc":
+        return _extract_docx(path)
     # HWP 파일은 현재 지원하지 않음 (Windows 서버 필요)
     if ext == ".hwp":
         logger.warning(f"[Extract] HWP 파일은 현재 지원하지 않습니다: {path.name}")
