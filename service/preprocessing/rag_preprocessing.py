@@ -18,7 +18,6 @@ from utils.documents import generate_doc_id
 from service.retrieval.common import determine_level_for_task, parse_doc_version
 
 from service.preprocessing.extension.csv_preprocessing import _extract_csv
-from service.preprocessing.extension.doc_preprocessing import _extract_doc
 from service.preprocessing.extension.docx_preprocessing import _extract_docx
 from service.preprocessing.extension.excel_preprocessing import _extract_excel
 from service.preprocessing.extension.hwp_preprocessing import _extract_hwp
@@ -59,12 +58,15 @@ def extract_any(path: Path) -> tuple[str, list[dict]]:
         return _extract_csv(path)
     if file_ext in {".xlsx", ".xls"}:
         return _extract_excel(path)
-    if file_ext == ".doc":
-        return _extract_doc(path)
-    if file_ext == ".ppt":
+    if ext == ".ppt":
         return _extract_ppt(path)
-    # if file_ext == ".hwp":
-    #     return _extract_hwp(path)
+    # DOC 파일은 DOCX로 변환 후 처리 (docx_preprocessing에서 자동 변환)
+    if ext == ".doc":
+        return _extract_docx(path)
+    # HWP 파일은 현재 지원하지 않음 (Windows 서버 필요)
+    if ext == ".hwp":
+        logger.warning(f"[Extract] HWP 파일은 현재 지원하지 않습니다: {path.name}")
+        return "", []
     # 모르는 확장자는 텍스트로 시도
     return _extract_plain_text(path)
 
