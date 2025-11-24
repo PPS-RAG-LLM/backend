@@ -40,7 +40,6 @@ def _iter_hits(raw_results: Sequence[Any]) -> Iterable[Tuple[Dict[str, Any], flo
 def build_dense_hits(
     raw_results: Sequence[Any],
     *,
-    snippet_loader: SnippetLoader,
     table_mark: str = TABLE_MARK,
 ) -> List[Dict[str, Any]]:
     """덴스 검색 결과 리스트를 표준 dict 형태로 변환."""

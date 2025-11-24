@@ -14,17 +14,8 @@ from typing import Any, List, Optional
 from tqdm import tqdm  # type: ignore
 
 from repository.documents import bulk_upsert_document_metadata, delete_documents_not_in_doc_ids
-from service.admin.manage_vator_DB import (
-    ADMIN_DOC_TYPE,
-    RAW_DATA_DIR,
-    TASK_TYPES,
-    SUPPORTED_EXTS,
-    determine_level_for_task,
-    get_security_level_rules_all,
-    parse_doc_version,
-    register_admin_document,
-)
 from utils.documents import generate_doc_id
+from service.retrieval.common import determine_level_for_task, parse_doc_version
 
 from service.preprocessing.extension.csv_preprocessing import _extract_csv
 from service.preprocessing.extension.doc_preprocessing import _extract_doc
@@ -86,6 +77,14 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
     Returns:
         dict: 전처리 결과
     """
+    from service.admin.manage_vator_DB import (
+        ADMIN_DOC_TYPE,
+        RAW_DATA_DIR,
+        TASK_TYPES,
+        SUPPORTED_EXTS,
+        get_security_level_rules_all,
+        register_admin_document,
+    )
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # 규칙 로드

@@ -12,16 +12,18 @@ from config import config as app_config
 from repository.llm_test_session import get_test_session_by_sid, insert_test_session
 from repository.documents import (
     delete_documents_by_type_and_ids,
+    insert_document_vectors,
     upsert_document,
     fetch_metadata_by_vector_ids,
+    bulk_upsert_document_metadata,
 )
 from storage.db_models import DocumentType
-from service.preprocessing.rag_preprocessing import ext, extract_any
-from service.retrieval.common import hf_embed_text, chunk_text
-from service.retrieval.pipeline.milvus_pipeline import build_dense_hits, build_rerank_payload, load_snippet_from_store
+from service.retrieval.common import hf_embed_text
+from service.retrieval.ingestion import ingest_common
+from service.retrieval.pipeline.milvus_pipeline import DEFAULT_OUTPUT_FIELDS, build_dense_hits, build_rerank_payload
 from service.retrieval.reranker import rerank_snippets
 from service.vector_db import ensure_collection_and_index, get_milvus_client, run_dense_search, run_hybrid_search
-from functools import partial
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,7 +46,6 @@ VAL_DIR.mkdir(parents=True, exist_ok=True)              # TODO: DB로 마이그�
 TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
 SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 
-EXTRACTED_TEXT_DIR = _cfg_path("extracted_text_dir", "storage/extracted_texts")
 _SHARED_META = VAL_DIR / ".shared_session.json"         # TODO: DB로 마이그레이션
 VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
 
@@ -97,12 +98,10 @@ from service.admin.manage_admin_LLM import (
 )
 
 from service.admin.manage_vator_DB import (
-    determine_level_for_task,
     get_security_level_rules_all,         # (sid, dir) 생성
     get_vector_settings,            # sid -> meta
     RAGSearchRequest,
     parse_doc_version,
-    split_for_varchar_bytes,
 )
 from utils.model_load import _get_or_load_embedder_async
 from utils.time import now_kst_string
@@ -636,8 +635,6 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     candidate = max(embedding_candidates, final_results * 2)
     filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
 
-    output_fields = ("pk", "path", "chunk_idx", "task_type", "security_level", "doc_id", "text", "page")
-
     if search_type == "vector":
         raw_results = run_dense_search(
             client,
@@ -645,7 +642,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
             query_vector=q_emb.tolist(),
             limit=candidate,
             filter_expr=filter_expr,
-            output_fields=output_fields,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
         )
     else:
         raw_results = run_hybrid_search(
@@ -655,7 +652,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
             query_text=req.query,
             limit=candidate,
             filter_expr=filter_expr,
-            output_fields=output_fields,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
         )
     hits_raw = build_dense_hits(raw_results, snippet_loader=lambda _path, _idx: "")
 
@@ -839,132 +836,49 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
     if not meta:
         return {"error": "invalid sid"}
 
-    settings = get_vector_settings()
-    eff_model_key = settings["embeddingModel"]
-    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
-    emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
-
-    client = get_milvus_client()
     coll = meta.get("collection")
-    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=coll)
-
-    MAX_TOKENS, OVERLAP = int(settings["chunkSize"]), int(settings["overlap"])
-
+    settings = get_vector_settings()
     all_rules = get_security_level_rules_all()
-
     tasks = task_types or list(TASK_TYPES)
-    total = 0
 
-    for p in pdf_paths:
-        file_path = Path(str(p))
-        if ext(file_path) not in SUPPORTED_EXTS:
-            logger.warning(f"[test-ingest] Unsupported file type: {file_path}")
-            continue
-
-        try:
-            file_text, table_blocks_all = extract_any(file_path)
-        except Exception:
-            logger.exception("[test-ingest] read failed: %s", p)
-            continue
-
-        whole_for_level = file_text + "\n\n" + "\n\n".join(t.get("text","") for t in (table_blocks_all or []))
-        sec_map = {t: determine_level_for_task(whole_for_level, all_rules.get(t, {"maxLevel": 1, "levels": {}})) for t in TASK_TYPES}
-        max_sec = max(sec_map.values()) if sec_map else 1
-        sec_folder = f"securityLevel{int(max_sec)}"
-
-        rel_txt = Path("__sessions__") / sid / sec_folder / file_path.with_suffix(".txt").name
-        abs_txt = EXTRACTED_TEXT_DIR / rel_txt
-        abs_txt.parent.mkdir(parents=True, exist_ok=True)
-        abs_txt.write_text(file_text, encoding="utf-8")
-
-        stem = file_path.stem
-        base_doc_id, ver = parse_doc_version(stem)
-        doc_id = _session_doc_id(sid, base_doc_id)
-
-        try:
-            client.delete(coll, filter=f"doc_id == '{doc_id}' && version <= {int(ver)}")
-        except Exception:
-            pass
-
-        chunks = chunk_text(file_text, max_tokens=MAX_TOKENS, overlap=OVERLAP)  # pyright: ignore[reportUndefinedVariable]
-        batch: List[Dict] = []
-
-        for t in tasks:
-            lvl = int(sec_map.get(t, 1))
-
-            # 본문: VARCHAR 안전 분할
-            for idx, c in enumerate(chunks):
-                for part in split_for_varchar_bytes(c):
-                    if len(part.encode("utf-8")) > 32768:
-                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                    batch.append({
-                        "embedding": vec.tolist(),
-                        "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(idx),
-                        "task_type": t,
-                        "security_level": lvl,
-                        "doc_id": str(doc_id),
-                        "version": int(ver),
-                        "page": 0,
-                        "workspace_id": 0,
-                        "text": part,
-                    })
-                    if len(batch) >= 128:
-                        client.insert(collection_name=coll, data=batch)
-                        total += len(batch)
-                        batch = []
-
-            # 표: VARCHAR 안전 분할
-            base_idx = len(chunks)
-            for t_i, table in enumerate(table_blocks_all or []):
-                md = (table.get("text") or "").strip()
-                if not md:
-                    continue
-                page = int(table.get("page", 0))
-                bbox = table.get("bbox") or []
-                bbox_str = ",".join(str(x) for x in bbox) if bbox else ""
-                table_text = f"[[TABLE page={page} bbox={bbox_str}]]\n{md}"
-
-                for sub_j, part in enumerate(split_for_varchar_bytes(table_text)):
-                    if len(part.encode("utf-8")) > 32768:
-                        part = part.encode("utf-8")[:32768].decode("utf-8", errors="ignore")
-                    vec = hf_embed_text(tok, model, device, part, max_len=MAX_TOKENS)
-                    batch.append({
-                        "embedding": vec.tolist(),
-                        "path": str(rel_txt.as_posix()),
-                        "chunk_idx": int(base_idx + t_i * 1000 + sub_j),
-                        "task_type": t,
-                        "security_level": lvl,
-                        "doc_id": str(doc_id),
-                        "version": int(ver),
-                        "page": int(page),
-                        "workspace_id": 0,
-                        "text": part,
-                    })
-                    if len(batch) >= 128:
-                        client.insert(collection_name=coll, data=batch)
-                        total += len(batch)
-                        batch = []
-
-        if batch:
-            client.insert(collection_name=coll, data=batch)
-            total += len(batch)
-
+    def _doc_id_gen(base: str) -> str:
+        return _session_doc_id(sid, base)
+        
+    def _post_ingest(info: Dict):
+        # info has file, doc_id, version, levels, chunks, source_path
         _record_llm_test_document(
-            doc_id=doc_id,
-            filename=file_path.name,
+            doc_id=info["doc_id"],
+            filename=info["file"],
             sid=sid,
-            rel_text_path=str(rel_txt.as_posix()),
-            source_path=str(file_path),
-            sec_map=sec_map,
-            version=int(ver),
+            rel_text_path=str(Path(info["source_path"]).as_posix()), 
+            source_path=info["source_path"],
+            sec_map=info["levels"],
+            version=info["version"]
         )
 
-    try:
-        client.flush(coll)
-    except Exception:
-        pass
-    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=coll)
+    def _batch_callback(records: List[Dict[str, Any]], doc_id: str):
+        if not records:
+            return
+        try:
+            insert_document_vectors(
+                doc_id=doc_id,
+                collection=coll,
+                embedding_version=str(settings["embeddingModel"]),
+                vectors=records,
+            )
+        except Exception:
+            logger.exception(f"document_vectors 기록 실패(doc_id={doc_id})")
 
-    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": total}
+    res = await ingest_common(
+        inputs=pdf_paths,
+        collection_name=coll,
+        task_types=tasks,
+        settings=settings,
+        security_level_config=all_rules,
+        doc_id_generator=_doc_id_gen,
+        pre_ingest_callback=_post_ingest,
+        post_ingest_callback=_post_ingest,
+        batch_callback=_batch_callback,
+    )
+    
+    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": res["inserted_chunks"]}
