@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache
+.cache/
+*.cache
+unsloth_compiled_cache/
+
+# Volumes
+volumes/
+
+# Environment files
+.env
+.env.local
+
+# Documentation
+*.md
+STRUCTURE.md
+README.md
+
+# Test files
+test_*.py
+*_test.py
+tests/
+
