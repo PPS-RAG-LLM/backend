@@ -2,14 +2,14 @@
 from typing import Any, Dict, Generator, List
 
 from errors import BadRequestError
-from repository.embedding_model import get_active_embedding_model_name
+from repository.rag_settings import get_rag_settings_row
 from repository.workspace_chat import get_chat_history_by_thread_id
 from utils import logger
 from service.retrieval.unified import (
-    DEFAULT_SOURCES,
     extract_doc_ids_from_attachments,
     unified_search,
 )
+from storage.db_models import DocumentType
 from service.retrieval.adapters.base import RetrievalResult
 from .common import (
     build_user_message_with_context,
@@ -37,7 +37,8 @@ def _insert_rag_context(
     temp_doc_ids = extract_doc_ids_from_attachments(attachments)
 
     try:
-        model_key = get_active_embedding_model_name()
+        rag_settings = get_rag_settings_row()
+        model_key = rag_settings.get("embedding_key")
     except Exception as exc:  # pragma: no cover - 안전장치
         logger.warning("활성 임베딩 모델 조회 실패: %s", exc)
         model_key = None
@@ -164,9 +165,9 @@ def stream_chat_for_qna(
         temp_doc_ids, 
         thread_id
     )
-
 def _resolve_rag_sources(raw_sources: Any) -> tuple:
     """워크스페이스 설정에서 RAG 소스 배열을 안전하게 파싱."""
+    DEFAULT_SOURCES = [DocumentType.WORKSPACE.value, DocumentType.TEMP.value, DocumentType.ADMIN.value, DocumentType.LLM_TEST.value]
     if not raw_sources:
         return DEFAULT_SOURCES
 

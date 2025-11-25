@@ -75,7 +75,7 @@ INSERT INTO
         "embedding_key",
         "updated_at"
     )
-VALUES (1,'hybrid',512,64,'embedding_qwen3_0_6b','2025-08-13 13:54:55');
+VALUES (1,'hybrid',512,64,'qwen3_0_6b','2025-08-13 13:54:55');
 
 -- (선택) doc_gen 기본값을 하나로 제한하는 인덱스
 CREATE UNIQUE INDEX IF NOT EXISTS uq_system_prompt_doc_gen_default

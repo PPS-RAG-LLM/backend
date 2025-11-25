@@ -5,38 +5,34 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Literal, Any
 import json as _json
 
+from pymilvus.grpc_gen.common_pb2 import RequestTSO
+
 from service.admin.manage_vator_DB import (
-    ingest_specific_files_with_levels,
     TASK_TYPES,
     OverrideLevelsRequest,
+    delete_collection,
     override_levels_and_ingest,
     # 설정
     set_vector_settings,
     get_vector_settings,
     list_available_embedding_models,
-    # 인제스트 파라미터(청크/오버랩)  ← 추가
-    set_ingest_params,
-    get_ingest_params,
-    # 보안레벨(작업유형별)
-    set_security_level_rules_per_task,
     get_security_level_rules_all,
     upsert_security_level_for_task,
     get_security_level_rules_for_task,
     # 파이프라인
     ingest_embeddings,
-    ingest_single_pdf,
     execute_search,
     # 관리
     list_indexed_files,
     list_indexed_files_overview,
     delete_files_by_names,
-    delete_db,
-    # 타입
-    SinglePDFIngestRequest,
     # 파일 저장
     save_raw_file,
+    process_saved_raw_files,
 )
 from service.preprocessing.rag_preprocessing import extract_documents
+from storage.db_models import DocumentType
+from utils import logger
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -47,7 +43,7 @@ router = APIRouter(
         status.HTTP_404_NOT_FOUND: {"description": "Not found"},
     },
 )
-
+logger = logger(__name__)
 # ============================
 # Request/Response Models
 # ============================
@@ -85,8 +81,6 @@ class SecurityLevelsBody(BaseModel):
     doc_gen: TaskSecurityConfig
     summary: TaskSecurityConfig
     qna: TaskSecurityConfig
-
-
 
 
 class ExecuteBody(BaseModel):
@@ -233,40 +227,67 @@ async def get_security_levels(taskType: Optional[TaskLiteral] = None):
 # Pipeline
 # ============================
 
-@router.post("/admin/vector/upload-file", summary="2. 파일 업로드(row_data)")
-async def upload_raw_file(files: List[UploadFile] = File(...)):
-    saved_paths = []
-    for file in files:
-        content = await file.read()
-        saved = save_raw_file(file.filename, content)
-        saved_paths.append(saved)
-    return {"savedPaths": saved_paths, "count": len(saved_paths)}
+# @router.post("/admin/vector/upload-file", summary="2. 파일 업로드(row_data)") # TODO : MinIO 마이그레이션 필요
+# async def upload_raw_file(files: List[UploadFile] = File(...)):
+#     # 1) 파일 저장
+#     saved_original_names: List[str] = []
+#     saved_rel_paths : List[str] = []
+#     for f in files:
+#         # save_raw_file이 상대 경로를 돌려주도록 수정, 
+#         # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
+#         content = await f.read()
+#         rel_path = save_raw_file(f.filename, content)
+#         saved_original_names.append(f.filename)
+#         saved_rel_paths.append(rel_path)
+#     return {"savedPaths": saved_rel_paths, "count": len(saved_rel_paths)}
+
+# class ExtractBody(BaseModel):
+#     paths: Optional[List[str]] = None
+
+# @router.post("/admin/vector/extract")
+# async def rag_extract_endpoint(body: ExtractBody = Body(None)):
+#     target_paths = body.paths if body else None
+#     return await extract_documents(target_paths)
 
 
-@router.post("/admin/vector/extract",summary="3. [전처리 부분] row_data의 다양한 문서를 텍스트/표로 추출 + 작업유형별 보안레벨 산정(meta 반영)")
-async def rag_extract_endpoint(request: Request):
-    request.app.extra.get("logger", print)(f"[extract] from {request.client.host}")
-    return await extract_documents()
+# @router.post("/admin/vector/upload-all",summary="4. (설정된 청크/오버랩으로) 모든 작업유형 인제스트")
+# async def rag_ingest_endpoint(request: Request):
+#     s = get_vector_settings()
+#     request.app.extra.get("logger", print)(
+#         f"[ingest] from {request.client.host} (model={s['embeddingModel']}, searchType={s['searchType']}, chunkSize={s['chunkSize']}, overlap={s['overlap']})"
+#     )
+#     return await ingest_embeddings(
+#         model_key=s["embeddingModel"],
+#         max_token=int(s["chunkSize"]),
+#         overlab=int(s["overlap"]),
+#     )
 
+@router.post("/admin/vector/full-ingest", summary="전체 파일 추출 및 저장 인제스트") # TODO : MinIO 마이그레이션 필요
+async def rag_full_ingest(files: List[UploadFile] = File(...)):
+    # 1) RAW 저장
+    rel_paths = []
+    for f in files:
+        rel_paths.append(save_raw_file(f.filename, await f.read()))
 
-@router.post("/admin/vector/upload-all",summary="4. (설정된 청크/오버랩으로) 모든 작업유형 인제스트")
-async def rag_ingest_endpoint(request: Request):
-    s = get_vector_settings()
-    request.app.extra.get("logger", print)(
-        f"[ingest] from {request.client.host} (model={s['embeddingModel']}, searchType={s['searchType']}, chunkSize={s['chunkSize']}, overlap={s['overlap']})"
+    # 2) 추출
+    extract_result = await extract_documents(rel_paths)
+
+    # 3) 인제스트
+    settings = get_vector_settings()
+    processed_ids = extract_result.get("processed_doc_ids") or []
+
+    ingest_result = await ingest_embeddings(
+        model_key=settings["embeddingModel"],
+        max_token=int(settings["chunkSize"]),
+        overlab=int(settings["overlap"]),
+        file_keys_filter=processed_ids,
     )
-    return await ingest_embeddings(
-        model_key=s["embeddingModel"],  # 모든 TASK_TYPES 대상으로
-    )
 
-@router.post("/admin/vector/upload-one",summary="단일 PDF 인제스트(선택 작업유형 지정 가능)")
-async def rag_ingest_one_endpoint(body: SingleIngestBody = Body(...)):
-    req = SinglePDFIngestRequest(
-        pdf_path=body.pdfPath,
-        task_types=body.taskTypes,
-        workspace_id=body.workspaceId,
-    )
-    return await ingest_single_pdf(req)
+    return {
+        "uploaded": rel_paths,
+        "extract": extract_result,
+        "ingest": ingest_result,
+    }
 
 
 @router.post("/admin/vector/execute",summary="관리자 검색")
@@ -292,8 +313,7 @@ async def rag_search_endpoint(body: ExecuteBody):
 
 
 @router.post(
-    "/user/vector/execute",
-    summary="사용자 검색"
+    "/user/vector/execute", summary="사용자 검색"
 )
 async def user_rag_search_endpoint(body: ExecuteBody):
     model_key = get_vector_settings()["embeddingModel"]
@@ -342,21 +362,20 @@ async def delete_vector_files(body: DeleteFilesBody = Body(...)):
     return await delete_files_by_names(body.filesToDelete, task_type=body.taskType)
 
 
-@router.post(
-    "/admin/vector/delete",
-    summary="[POST] 파일 이름 목록(doc_id 스템) 기반 삭제. taskType 지정 시 해당 작업유형만 삭제"
-)
+@router.post("/admin/vector/delete", summary="[POST] 파일 이름 목록(doc_id 스템) 기반 삭제. taskType 지정 시 해당 작업유형만 삭제")
 async def delete_vector_files_post(body: DeleteFilesBody = Body(...)):
     return await delete_files_by_names(body.filesToDelete, task_type=body.taskType)
 
 
-@router.post(
-    "/admin/vector/delete-all",
-    summary="Milvus 서버 컬렉션 전체 삭제(초기화)"
-)
+@router.post("/admin/vector/delete-admin-collection", summary="Milvus 서버 Admin 컬렉션 삭제(초기화)")
+async def rag_delete_admin_collection_endpoint(request: Request):
+    logger.debug(f"[delete-admin-collection] from {request.client.host}")
+    return await delete_collection(collection_key=DocumentType.ADMIN.value)
+
+@router.post("/admin/vector/delete-all-collections", summary="Milvus 서버 전체 컬렉션 삭제(초기화)")
 async def rag_delete_db_endpoint(request: Request):
-    request.app.extra.get("logger", print)(f"[delete-all] from {request.client.host}")
-    return await delete_db()
+    logger.debug(f"[delete-all] from {request.client.host}")
+    return await delete_collection(collection_key=None)
 
 
 # 중복 import 제거 및 상단으로 승격됨
@@ -443,15 +462,20 @@ async def override_levels_upload_form(
     summary_level: Optional[str] = Form(None),
     doc_gen_level: Optional[str] = Form(None),
 ):
-    # 1) 파일 저장
-    saved_names = []
+    # # 1) 파일 저장
+    saved_original_names: List[str] = []
+    saved_rel_paths : List[str] = []
     for f in files:
+        # save_raw_file이 상대 경로를 돌려주도록 수정, 
+        # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
         content = await f.read()
-        save_raw_file(f.filename, content)
-        saved_names.append(f.filename)
+        rel_path = save_raw_file(f.filename, content)
+        saved_original_names.append(f.filename)
+        saved_rel_paths.append(rel_path)
 
-    # 2) 새 파일만 포함되도록 추출(전체 재추출이긴 하지만 META에 신규 포함)
-    await extract_documents()
+    processed_docs = await process_saved_raw_files(saved_rel_paths)
+    target_tokens = [doc["doc_id"] for doc in processed_docs] or saved_original_names
+    logger.debug(f"🎯 [API] target_tokens: {target_tokens}")
 
     # 3) task 목록
     tlist = None
@@ -465,9 +489,6 @@ async def override_levels_upload_form(
         raise HTTPException(status_code=400, detail=str(e))
 
     # 5) 지정 파일만 레벨 오버라이드 + 해당 파일만 인제스트
-    req = OverrideLevelsRequest(files=saved_names, level_for_tasks=lvmap, tasks=tlist)
+    req = OverrideLevelsRequest(files=target_tokens, level_for_tasks=lvmap, tasks=tlist)
     result = await override_levels_and_ingest(req)
-    return {"saved": saved_names, "ingest_result": result}
-
-
-# 중복 라우트 제거됨 (유연 파서 버전만 유지)
+    return {"saved": saved_original_names, "ingest_result": result}

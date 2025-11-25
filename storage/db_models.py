@@ -1,4 +1,6 @@
 from __future__ import annotations
+from enum import Enum
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -9,58 +11,120 @@ from sqlalchemy import (
     text,
     UniqueConstraint,
     Float,
-    Index
+    Index,
+    JSON,
 )
 from sqlalchemy.orm import relationship
 from utils.database import Base
 
 
-class WorkspaceDocument(Base):
-    __tablename__ = "workspace_documents"
+class DocumentType(str, Enum):
+    """문서가 저장되는 영역(관리자, 워크스페이스, 임시 첨부, LLM 테스트)을 구분하는 열거형입니다."""
+    ADMIN = "ADMIN_DOCS"
+    WORKSPACE = "WS_DOCS"
+    TEMP = "TEMP_ATTACH"
+    LLM_TEST = "LLM_TEST"
+
+
+class Document(Base):
+    """원본 문서 메타데이터(식별자, 유형, 저장 경로, 보안 등)를 보관하고 다른 테이블의 기준이 되는 마스터 레코드입니다."""
+    __tablename__ = "documents"
+    __table_args__ = (
+        Index("documents_doc_type_idx", "doc_type"),
+        Index("documents_workspace_idx", "workspace_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     doc_id = Column(Text, nullable=False, unique=True)
-    filename = Column(Text, nullable=False)
-    docpath = Column(Text, nullable=False)
+    doc_type = Column(Text, nullable=False)
     workspace_id = Column(
         Integer,
         ForeignKey("workspaces.id", ondelete="CASCADE", onupdate="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
-    metadata_json = Column("metadata", Text)
+    security_level = Column(Integer, nullable=True)
+    filename = Column(Text, nullable=False)
+    storage_path = Column(Text, nullable=True) # TODO : MinIO 저장 경로 추가 시 사용
+    source_path = Column(Text)
+    payload = Column(JSON, nullable=False, default=dict)
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
     updated_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
-    pinned = Column(Boolean, server_default=text("false"))
-    watched = Column(Boolean, server_default=text("false"))
-
-    # 관계 정의
+    metadata_entries = relationship(
+        "DocumentMetadata",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
     vectors = relationship(
         "DocumentVector", back_populates="document", cascade="all, delete-orphan"
     )
     workspace = relationship("Workspace", back_populates="documents")
 
 
+
+class DocumentMetadata(Base):
+    """문서의 페이지·청크별 메타데이터와 원문 텍스트(검색 스니펫용)를 저장하는 테이블입니다."""
+    __tablename__ = "document_metadata"
+    __table_args__ = (
+        UniqueConstraint(
+            "doc_id",
+            "page",
+            "chunk_index",
+            name="document_metadata_doc_page_chunk_key",
+        ),
+        Index("document_metadata_doc_idx", "doc_id"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(
+        Text,
+        ForeignKey("documents.doc_id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+    )
+    page = Column(Integer, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at = Column(
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
+    text = Column(Text, nullable=False)
+    document = relationship("Document", back_populates="metadata_entries")
+
+
+
 class DocumentVector(Base):
+    """문서 청크의 임베딩 벡터를 저장하고, Milvus 컬렉션/버전/페이지/청크 인덱스를 함께 추적합니다."""
     __tablename__ = "document_vectors"
     __table_args__ = (
         UniqueConstraint(
             "doc_id", "vector_id", name="document_vectors_doc_id_vector_id_key"
         ),
+        Index("document_vectors_collection_idx", "collection"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     doc_id = Column(
         Text,
-        ForeignKey(
-            "workspace_documents.doc_id", ondelete="CASCADE", onupdate="CASCADE"
-        ),
+        ForeignKey("documents.doc_id", ondelete="CASCADE", onupdate="CASCADE"),
         nullable=False,
     )
     vector_id = Column(Text, nullable=False)
+    task_type = Column(Text, nullable=True) # admin일 경우에만 필요. (사용자 측은 필요없음)
+    collection = Column(Text, nullable=False)
+    embedding_version = Column(Text, nullable=False)
+    page = Column(Integer)
+    chunk_index = Column(Integer)
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
@@ -68,8 +132,26 @@ class DocumentVector(Base):
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
 
-    # 관계 정의
-    document = relationship("WorkspaceDocument", back_populates="vectors")
+    document = relationship("Document", back_populates="vectors")
+
+class LlmTestSession(Base):
+    """LLM 테스트용 세션 메타데이터"""
+
+    __tablename__ = "llm_test_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sid = Column(Text, nullable=False, unique=True)
+    directory = Column(Text, nullable=False)
+    collection = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at = Column(
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+        nullable=False,
+    )
 
 
 class User(Base):
@@ -150,7 +232,7 @@ class Workspace(Base):
     vector_search_mode = Column(Text, nullable=False, server_default=text("'hybrid'"))
 
     # 관계 정의
-    documents = relationship("WorkspaceDocument", back_populates="workspace")
+    documents = relationship("Document", back_populates="workspace")
     chats = relationship("WorkspaceChat", back_populates="workspace")
     threads = relationship("WorkspaceThread", back_populates="workspace")
     workspace_users = relationship("WorkspaceUser", back_populates="workspace")
@@ -288,21 +370,18 @@ class LlmPromptMapping(Base):
         back_populates="llm_mappings",
     )
 
-class EmbeddingModel(Base):
-    __tablename__ = "embedding_models"
+# class EmbeddingModel(Base):
+#     __tablename__ = "embedding_models"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(Text, nullable=False, unique=True)
-    provider = Column(Text)
-    model_path = Column(Text)
-    is_active = Column(Integer, nullable=False, server_default=text("0"))
-    activated_at = Column(DateTime)
-    created_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
-    )
-
-
-# 추가 테이블들 (schema.sql의 고급 기능 포함)
+#     id = Column(Integer, primary_key=True, autoincrement=True)
+#     name = Column(Text, nullable=False, unique=True)
+#     provider = Column(Text)
+#     model_path = Column(Text)
+#     is_active = Column(Integer, nullable=False, server_default=text("0"))
+#     activated_at = Column(DateTime)
+#     created_at = Column(
+#         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+#     )
 
 
 class RagSettings(Base):
@@ -317,11 +396,13 @@ class RagSettings(Base):
     chunk_size = Column(Integer, nullable=False, server_default=text("512"))
     overlap = Column(Integer, nullable=False, server_default=text("64"))
     embedding_key = Column(
-        Text, nullable=False, server_default=text("'embedding_bge_m3'")
+        Text, nullable=False, server_default=text("unknown_model")
     )
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
+
+
 
 
 class SecurityLevelConfigTask(Base):

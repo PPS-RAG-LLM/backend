@@ -18,7 +18,7 @@ cachetools==6.1.0
 certifi==2025.8.3
 chardet==5.2.0
 charset-normalizer==3.4.3
-click==8.2.1
+click==8.0.1
 coloredlogs==15.0.1
 comm
 debugpy==1.8.16
@@ -120,8 +120,7 @@ pyflakes==3.2.0
 Pygments
 PyJWT==2.10.1
 pylint
-pymilvus==2.6.0b0
-pymilvus.model==0.3.2
+pymilvus==2.6.3
 PyMuPDF==1.26.3
 python-dateutil
 python-dotenv==1.1.1
@@ -134,7 +133,7 @@ PyYAML==6.0.2
 pyzmq==27.0.2
 referencing==0.36.2
 regex==2025.9.1
-requests==2.32.5
+requests==2.31.0
 rope==1.14.0
 rpds-py==0.27.0
 ruff==0.12.12
@@ -183,3 +182,5 @@ zipp
 av==16.0.1
 qwen-vl-utils==0.0.14
 tabula==1.0.5
+milvus-cli==1.0.2
+tabulate==0.8.9

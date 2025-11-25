@@ -10,7 +10,7 @@ from service.users.workspace import (
     update_workspace as update_workspace_service,
     upload_and_embed_document, update_workspace_name_service,
 )
-from service.users.documents.list_documents import list_local_documents_for_workspace
+from service.manage_documents import list_local_documents_for_workspace
 from typing import Dict, List, Any
 from errors import BadRequestError
 from utils import logger, validate_category

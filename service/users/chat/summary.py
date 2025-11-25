@@ -9,7 +9,7 @@ from .common import (
     resolve_runner,
     stream_and_persist,
 )
-from ..documents.full_document_loader import get_full_documents_texts
+from service.manage_documents import get_full_documents_texts
 
 logger = logger(__name__)
 

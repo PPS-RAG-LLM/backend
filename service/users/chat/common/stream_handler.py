@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Generator
 from utils import logger
 from utils.llms.registry import Streamer
 from repository.workspace_chat import insert_chat_history
-from repository.documents import delete_document_vectors_by_doc_ids
+from service.manage_documents.documents import delete_documents_by_ids
 import json
 import time
 
@@ -92,9 +92,9 @@ def stream_and_persist(
     logger.debug(f"CHAT_ID : {chat_id}")
     try:
         if temp_doc_ids:
-            delete_document_vectors_by_doc_ids(temp_doc_ids)
+            delete_documents_by_ids(temp_doc_ids)
     except Exception as exc:
-        logger.error(f"vector cleanup failed: {exc}")
+        logger.error(f"temp doc cleanup failed: {exc}")
         
     yield f"__CHAT_ID__: {chat_id}"
 

@@ -1,0 +1,56 @@
+"""워크스페이스 문서 검색 어댑터."""
+
+from __future__ import annotations
+
+from typing import List, Optional
+
+from utils import logger
+
+from repository.documents import list_doc_ids_by_workspace
+from service.retrieval.adapters.base import RetrievalResult
+from service.retrieval.adapters.temp_attatchments import TempAttachmentsVectorAdapter
+from service.vector_db.milvus_store import resolve_collection
+from storage.db_models import DocumentType
+
+logger = logger(__name__)
+
+
+class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
+    """documents 테이블에서 워크스페이스 문서로 등록된 항목을 Milvus에서 검색한다."""
+
+    def __init__(self) -> None:
+        super().__init__(source="workspace")
+        self.collection_name = resolve_collection(DocumentType.WORKSPACE.value)
+
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        workspace_id: int,
+        threshold: float = 0.0,
+        mode: str = "hybrid",
+        model_key: Optional[str] = None, # [수정] model_key 추가
+    ) -> List[RetrievalResult]:
+        if not workspace_id:
+            return []
+
+        rows = list_doc_ids_by_workspace(int(workspace_id)) or []
+        doc_ids = [
+            str(row["doc_id"]) if isinstance(row, dict) else str(row)
+            for row in rows
+            if row
+        ]
+        if not doc_ids:
+            logger.info("[WorkspaceAdapter] no documents for workspace_id=%s", workspace_id)
+            return []
+
+        return super().search(
+            query,
+            top_k,
+            doc_ids=doc_ids,
+            threshold=threshold,
+            mode=mode,
+            workspace_id=workspace_id,
+            model_key=model_key
+        )
