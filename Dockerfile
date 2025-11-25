@@ -42,7 +42,7 @@ ENV PYTHONPATH="/app:$PYTHONPATH"
 # GPU 설정 (기본값: GPU 1번 사용)
 # CUDA_VISIBLE_DEVICES를 설정하여 사용할 GPU를 지정합니다
 # docker run 시 -e CUDA_VISIBLE_DEVICES=0 등으로 변경 가능합니다
-ENV CUDA_VISIBLE_DEVICES=1
+# ENV CUDA_VISIBLE_DEVICES=all
 
 # 포트 노출
 # FastAPI 애플리케이션에서 사용할 포트를 노출합니다
