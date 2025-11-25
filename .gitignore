@@ -297,6 +297,8 @@ NOTE.md
 # DB files
 storage/pps_rag.db
 storage/*.db
+storage/*.db-wal
+storage/*.db-shm
 
 # Milvus files
 volumes/
