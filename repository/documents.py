@@ -156,7 +156,7 @@ def insert_document_vectors(
             {
                 "doc_id": doc_id,
                 "vector_id": str(item["vector_id"]),
-                "task_type": str(item["task_type"]),
+                "task_type": str(item.get("task_type", "")),
                 "collection": collection,
                 "embedding_version": embedding_version,
                 "page": item.get("page"),
