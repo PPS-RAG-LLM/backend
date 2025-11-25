@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
+from service.retrieval.pipeline import DEFAULT_OUTPUT_FIELDS
 from utils import logger
 
 from repository.documents import get_documents_by_ids
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
-from service.retrieval.common import embed_text
+from service.retrieval.common import embed_text, hf_embed_text
 from service.vector_db.milvus_store import (
     get_milvus_client,
     resolve_collection,
@@ -16,6 +17,7 @@ from service.vector_db.milvus_store import (
     run_hybrid_search,
 )
 from storage.db_models import DocumentType
+from utils.model_load import _get_or_load_embedder
 
 logger = logger(__name__)
 
@@ -36,14 +38,26 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
         threshold: float = 0.0,
         mode: str = "hybrid",
         workspace_id: Optional[int] = None,
+        model_key: Optional[str] = None,
     ) -> List[RetrievalResult]:
         if not doc_ids:
             return []
+        if model_key:
+            try:
+                tok, model, device = _get_or_load_embedder(model_key)
+                query_vec = hf_embed_text(tok, model, device, query).tolist()
+            except Exception as e:
+                logger.warning(f"[TempAttachments] Failed to load model {model_key}, fallback to default: {e}")
+                query_vec = embed_text(query).tolist()
+        else:
+            query_vec = embed_text(query).tolist()
 
-        query_vec = embed_text(query).tolist()
         filter_expr = self._build_filter_expr(doc_ids=doc_ids, workspace_id=workspace_id)
         client = get_milvus_client()
-        output_fields = ["doc_id", "chunk_idx", "page", "text", "workspace_id"]
+        if workspace_id:
+            output_fields = list(DEFAULT_OUTPUT_FIELDS) + ["workspace_id"]
+        else:
+            output_fields = list(DEFAULT_OUTPUT_FIELDS)
 
         if mode == "hybrid":
             raw_hits = run_hybrid_search(

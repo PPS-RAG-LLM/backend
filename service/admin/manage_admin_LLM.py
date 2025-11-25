@@ -4,21 +4,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import time
 import gc
 import logging
-import importlib
-import re
-from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from glob import glob
-
 from pydantic import BaseModel, Field
 from utils.database import get_db as _get_db
-
-import torch  # device_map='auto' 사용 시 필요
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 try:
     from peft import PeftModel
@@ -27,6 +20,7 @@ except Exception:
 import socket  # ← 추가
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 import shutil
+from config import config as app_config
 
 # 예외 삼켜서 로깅만 하는 안전 래퍼
 def _mark_loaded(model_name: str):
@@ -63,30 +57,17 @@ _DEFAULT_TOPK: int = 5
 # ===== Constants =====
 # Backend root (상대 경로 기준 루트)
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
-SERVICE_ROOT = BASE_BACKEND / "service"
-# 신규 표준 저장소: ./service/storage/models
-STORAGE_ROOT = SERVICE_ROOT / "storage" / "models"
 
 # 레거시 위치(호환용): ./storage/models
-LEGACY_STORAGE_ROOT = BASE_BACKEND / "storage" / "models"
-
+LLM_MODEL_DIR = Path(app_config.get("llm_models_path", "storage/models")).resolve()
+LLM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 # DB 경로(환경변수로 오버라이드 가능)
-os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
-DB_PATH = os.getenv("COREIQ_DB")
+DB_PATH = Path(app_config["database"]["path"])
 
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qna
 
 RAG_TOPK_CACHE_KEY = "rag_topk"
 
-# 허용 루트 가드
-_ALLOWED_ROOTS = [
-    # 서비스 표준
-    str((BASE_BACKEND / "service" / "storage" / "models").resolve()),
-    # 레거시
-    str((BASE_BACKEND / "storage" / "models").resolve()),
-    # 컨테이너 마운트(있다면)
-    "/storage/models",
-]
 
 # ===== Pydantic models (변수명/스키마 고정) =====
 class TopKSettingsBody(BaseModel):
@@ -235,32 +216,6 @@ def _connect() -> sqlite3.Connection:
 #         conn.close()
 
 
-def _normalize_model_path_input(p: str) -> str:
-    s = (p or "").strip().replace("\\","/")
-    if not s:
-        return s
-    prefixes = (
-        "storage/models/",
-        "./storage/models/",
-        "/home/work/CoreIQ/backend/storage/models/",
-    )
-    for pref in prefixes:
-        if s.startswith(pref):
-            s = s[len(pref):]
-            break
-    if "/storage/models/" in s:
-        s = s.split("/storage/models/", 1)[1]
-    return s.strip("/")
-
-
-def _sanitize_name(name: str) -> str:
-    return (name or "").strip().replace("-", "_").replace("/", "_")
-
-
-def _std_rel_path_for_name(model_name: str) -> str:
-    # DB에 저장될 규칙 경로 (반드시 ./ 로 시작)
-    return f"./service/storage/models/local_{_sanitize_name(model_name)}"
-
 
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
     try:
@@ -276,11 +231,6 @@ def _db_set_active_by_path(rel_path: str, active: bool) -> None:
         except Exception:
             pass
 
-
-
-
-
-# no-op: initialization is handled in main.py via init_db()
 
 
 # ===== 새로운 로딩 로직 (일원화) =====
@@ -456,12 +406,6 @@ def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional
 
 
 # ---------- 활성 프롬프트: 사용자 선택 저장/조회 ----------
-def get_active_prompt(category: str, subtask: Optional[str]) -> Dict[str, Any]: 
-    key = _active_prompt_cache_key(category, subtask) 
-    data = _get_cache(key) 
-    info = json.loads(data) if data else None 
-    return {"category": _norm_category(category), "subtask": _subtask_key(subtask) or None, "active": info}
-
 
 def get_prompt(prompt_id: int) -> Dict[str, Any]: 
     tmpl, variables = _fetch_prompt_full(prompt_id) 
@@ -647,20 +591,20 @@ def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
         return {"loaded": False, "message": "unexpected error", "modelName": model_name}
 
 
-def _ensure_models_from_fs(category: str) -> None:
-    """
-    STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qna|doc_gen|summary)과 충돌을 피하기 위해
-    여기서는 DB에 쓰지 않는다. 베이스 모델 등록은 insert-base API로만 수행한다.
-    """
-    return
+# def _ensure_models_from_fs(category: str) -> None:
+#     """
+#     STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qna|doc_gen|summary)과 충돌을 피하기 위해
+#     여기서는 DB에 쓰지 않는다. 베이스 모델 등록은 insert-base API로만 수행한다.
+#     """
+#     return
 
 
-def _to_rel(p: str) -> str:
-    """Return `p` as a path relative to backend root if possible, to keep DB records portable."""
-    try:
-        return os.path.relpath(p, str(BASE_BACKEND))
-    except Exception:
-        return p
+# def _to_rel(p: str) -> str:
+#     """Return `p` as a path relative to backend root if possible, to keep DB records portable."""
+#     try:
+#         return os.path.relpath(p, str(BASE_BACKEND))
+#     except Exception:
+#         return p
 
 
 def _lookup_model_by_name(model_name: str) -> Optional[sqlite3.Row]:
@@ -705,12 +649,12 @@ class _ModelManager:
 
     def _resolve_candidate(self, name_or_path: str) -> str:
         # Prefer local storage folder under STORAGE_ROOT if it looks like a model dir
-        fs_path = str(STORAGE_ROOT / name_or_path)
+        fs_path = str(LLM_MODEL_DIR / name_or_path)
         try:
             if os.path.isfile(os.path.join(fs_path, "config.json")):
                 return fs_path
             # ← 레거시 경로도 체크
-            legacy = str(LEGACY_STORAGE_ROOT / name_or_path)
+            legacy = str(LLM_MODEL_DIR / name_or_path)
             if os.path.isfile(os.path.join(legacy, "config.json")):
                 return legacy
         except Exception:
@@ -826,28 +770,7 @@ def _resolve_model_fs_path(name_or_path: str) -> str:
     """
     try:
         s = (name_or_path or "").strip().replace("\\", "/")
-        # 규칙 경로 후보 (service/local_<name>)
-        rule_abs = STORAGE_ROOT / f"local_{_sanitize_name(_strip_category_suffix(os.path.basename(s)))}"
-        if (rule_abs / "config.json").is_file():
-            return _canon_storage_path(str(rule_abs))
-
-        # ./service/... 상대처리
-        if s.startswith("./service/"):
-            cand = (BASE_BACKEND / s.lstrip("./"))
-            if (cand / "config.json").is_file():
-                return _canon_storage_path(str(cand))
-
-        # ./storage/... 상대처리(레거시)
-        if s.startswith("./storage/"):
-            cand = (BASE_BACKEND / s.lstrip("./"))
-            if (cand / "config.json").is_file():
-                return _canon_storage_path(str(cand))
-
-        # 이름만 온 경우: service → legacy
-        cand = STORAGE_ROOT / os.path.basename(s)
-        if (cand / "config.json").is_file():
-            return _canon_storage_path(str(cand))
-        cand = LEGACY_STORAGE_ROOT / os.path.basename(s)
+        cand = LLM_MODEL_DIR / os.path.basename(s)
         if (cand / "config.json").is_file():
             return _canon_storage_path(str(cand))
 
@@ -976,13 +899,7 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
 
     # Handle standardized relative paths like ./service/storage/models/...
     if val.startswith("./"):
-        abs_p = (BASE_BACKEND / val.lstrip("./"))
-        if (abs_p / "config.json").is_file():
-            return _canon_storage_path(str(abs_p))
-        std_abs = STORAGE_ROOT / f"local_{_sanitize_name(model_name)}"
-        if (std_abs / "config.json").is_file():
-            return _canon_storage_path(str(std_abs))
-        leg = LEGACY_STORAGE_ROOT / os.path.basename(val)
+        leg = LLM_MODEL_DIR / os.path.basename(val)
         if (leg / "config.json").is_file():
             return _canon_storage_path(str(leg))
         return None
@@ -998,30 +915,13 @@ def _strip_category_suffix(name: str) -> str:
             return name[: -len(suf)]
     return name
 
-def _infer_category_from_name(name: str) -> Optional[str]:
-    n = (name or "").lower()
-    if n.endswith(("_summary", "-summary")):
-        return "summary"
-    if n.endswith(("_qna", "-qna")):
-        return "qna"
-    if n.endswith(("_doc_gen", "-doc_gen")):
-        return "doc_gen"
-    return None
 
 def _to_rel_under_storage_root(p: str) -> str:
     """ 상대 경로 반환 """
     try:
         p = str(p)
-        # 새 표준(root=SERVICE_ROOT)
         try:
-            rp = os.path.relpath(p, str(STORAGE_ROOT))
-            if rp not in (".", ""):
-                return f"./service/storage/models/{rp}".replace("\\", "/")
-        except Exception:
-            pass
-        # 레거시(root=LEGACY_STORAGE_ROOT)
-        try:
-            rp = os.path.relpath(p, str(LEGACY_STORAGE_ROOT))
+            rp = os.path.relpath(p, str(LLM_MODEL_DIR))
             if rp not in (".", ""):
                 return f"./storage/models/{rp}".replace("\\", "/")
         except Exception:
@@ -1048,13 +948,9 @@ def _resolve_model_path_for_name(model_name: str) -> Optional[str]:
         if p2 and os.path.isfile(os.path.join(p2, "config.json")):
             return p2
     # 3) STORAGE_ROOT/exact
-    cand = STORAGE_ROOT / model_name
+    cand =  LLM_MODEL_DIR / model_name
     if (cand / "config.json").is_file():
         return str(cand)
-    # 4) STORAGE_ROOT/base-name
-    cand2 = STORAGE_ROOT / base
-    if (cand2 / "config.json").is_file():
-        return str(cand2)
     return None
 
 def _preload_via_adapters(model_name: str) -> bool:
@@ -1099,7 +995,7 @@ def _preload_via_adapters(model_name: str) -> bool:
         # 3-b) Qwen 계열도 전용 로더로 (utils의 lru_cache에 적재)
         elif lower.startswith("qwen"):
             try:
-                from utils.llms.huggingface.qwen_7b import load_qwen_instruct_7b
+                from utils.llms.huggingface.qwen import load_qwen_instruct_7b
                 load_qwen_instruct_7b(adapter_path)  # ← utils lru_cache 채움
             except Exception:
                 logging.getLogger(__name__).exception("qwen preload failed")
@@ -1167,80 +1063,6 @@ def _unload_via_adapters(model_name: str) -> bool:
 # External script helpers (download / training)
 # ================================================================
 
-
-
-
-def _run_command(cmd: list[str]) -> Tuple[int, str]:
-    """Run a shell command and capture (returncode, stdout+stderr)."""
-    import subprocess, shlex
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    out, _ = proc.communicate()
-    return proc.returncode, out
-
-
-# ===== Public service functions =====
-
-# def insert_base_model(body: InsertBaseModelBody) -> Dict[str, Any]:
-#     """
-#     기본 모델 등록(단일 레코드):
-#       - DB model_path는 항상 './service/storage/models/local_<name>' 로 저장
-#       - 폴더 실제 유무는 별도(경고만 표시). 로드는 _resolve 로 판단.
-#     """
-#     _migrate_llm_models_if_needed()
-#     base_name = body.name.strip()
-#     rel_folder = _std_rel_path_for_name(base_name)  # 규칙 강제
-
-#     # 파일 존재 점검(둘 다 확인: 신규 표준 / 레거시)
-#     abs_new = STORAGE_ROOT / f"local_{_sanitize_name(base_name)}"
-#     cfg_ok = (abs_new / "config.json").is_file()
-#     if not cfg_ok:
-#         abs_old = LEGACY_STORAGE_ROOT / base_name
-#         cfg_ok = (abs_old / "config.json").is_file()
-
-#     conn = _connect(); cur = conn.cursor()
-#     try:
-#         cur.execute("SELECT id FROM llm_models WHERE name=?", (base_name,))
-#         row = cur.fetchone()
-#         if row:
-#             cur.execute(
-#                 """
-#                 UPDATE llm_models
-#                    SET provider=?, model_path=?, category='all', subcategory=NULL, type='base', is_active=1
-#                  WHERE id=?
-#                 """,
-#                 (body.provider, rel_folder, int(row[0]))
-#             )
-#             mdl_id = int(row[0]); existed = True
-#         else:
-#             cur.execute(
-#                 """
-#                 INSERT INTO llm_models(provider,name,revision,model_path,category,subcategory,type,is_default,is_active)
-#                 VALUES(?,?,?,?, 'all', NULL, 'base', 0, 1)
-#                 """,
-#                 (body.provider, base_name, 0, rel_folder)
-#             )
-#             mdl_id = int(cur.lastrowid); existed = False
-#         conn.commit()
-#     finally:
-#         conn.close()
-
-#     note = "ok" if cfg_ok else "경고: 실제 모델 폴더(config.json) 미확인"
-#     return {"success": True, "inserted": [{"id": mdl_id, "name": base_name, "category":"all", "model_path": rel_folder, "exists": existed}], "pathChecked": cfg_ok, "note": note}
-
-
-
-
-
-# moved to service/admin/manage_test_LLM.py
-
-
-# ===== Service functions (구현) =====
-# def set_topk_settings(topk: int) -> Dict[str, Any]:
-#     global _DEFAULT_TOPK  # noqa: PLW0603
-#     _DEFAULT_TOPK = int(topk)
-#     _set_cache(RAG_TOPK_CACHE_KEY, _json({"topK": _DEFAULT_TOPK}), "llm_admin")
-#     return {"success": True}
 
 def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
@@ -1558,8 +1380,6 @@ def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]
 
 
 
-
-
 # ==== (추가) LORA/QLORA 베이스/어댑터 경로 인식 강화 ====
 
 def _db_get_model_record(model_name: str) -> Optional[sqlite3.Row]:
@@ -1714,21 +1534,22 @@ def get_selected_model(q):
 
 def _is_under_allowed_roots(path_str: str) -> bool:
     try:
-        rp = str(Path(path_str).resolve())
+        # 입력받은 경로와 허용 루트를 모두 절대 경로로 변환
+        target = Path(path_str).resolve()
+        root = LLM_MODEL_DIR.resolve()
+        # target이 root와 같거나, root의 하위 경로인지 확인
+        if hasattr(target, "is_relative_to"):
+            return target.is_relative_to(root)
+        # Python 3.8 이하 호환용 (문자열 비교)
+        return str(target).startswith(str(root))
     except Exception:
         return False
-    for root in _ALLOWED_ROOTS:
-        try:
-            if rp == str(Path(root).resolve()) or rp.startswith(str(Path(root).resolve()) + os.sep):
-                return True
-        except Exception:
-            continue
-    return False
 
 def _table_exists(conn, table: str) -> bool:
     cur = conn.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
     return cur.fetchone() is not None
+
 def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     """
     DB model_path를 기준으로 실제 삭제 후보 경로들을 모두 수집.
@@ -1754,10 +1575,8 @@ def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     # 2) 베이스네임 기준 표준/레거시/마운트
     base = os.path.basename(s.rstrip("/"))
     if base:
-        std = (BASE_BACKEND / "service" / "storage" / "models" / base).resolve()
-        leg = (BASE_BACKEND / "storage" / "models" / base).resolve()
-        mnt = Path("/storage/models") / base
-        for p in (std, leg, mnt):
+        std = (LLM_MODEL_DIR / base).resolve()
+        for p in std:
             try:
                 out.append(str(p.resolve()))
             except Exception:

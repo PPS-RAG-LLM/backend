@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from utils import logger
 
@@ -30,6 +30,7 @@ class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
         workspace_id: int,
         threshold: float = 0.0,
         mode: str = "hybrid",
+        model_key: Optional[str] = None, # [수정] model_key 추가
     ) -> List[RetrievalResult]:
         if not workspace_id:
             return []
@@ -51,4 +52,5 @@ class WorkspaceDocsAdapter(TempAttachmentsVectorAdapter):
             threshold=threshold,
             mode=mode,
             workspace_id=workspace_id,
+            model_key=model_key
         )

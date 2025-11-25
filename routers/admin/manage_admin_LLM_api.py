@@ -1,4 +1,5 @@
 # routers/admin/manage_admin_LLM_api.py
+from typing import Optional
 from fastapi import APIRouter, Query
 
 from service.admin.manage_admin_LLM import (
@@ -7,7 +8,6 @@ from service.admin.manage_admin_LLM import (
     load_model,
     list_prompts,
     unload_model,
-    _infer_category_from_name,
     delete_model_full, 
     DeleteModelBody,
 )
@@ -18,6 +18,16 @@ router = APIRouter(
     responses={200: {"description": "Success"}},
 )
 
+def _infer_category_from_name(name: str) -> Optional[str]:
+    n = (name or "").lower()
+    if n.endswith(("_summary", "-summary")):
+        return "summary"
+    if n.endswith(("_qna", "-qna")):
+        return "qna"
+    if n.endswith(("_doc_gen", "-doc_gen")):
+        return "doc_gen"
+    return None
+    
 # === 모델 관련 ===
 
 @router.get(

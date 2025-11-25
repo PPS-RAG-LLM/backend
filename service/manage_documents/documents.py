@@ -396,7 +396,6 @@ async def upload_document(
                 "chunk_index": rec["chunk_index"],
             }
         )
-
     try:
         if vector_records:
             insert_document_vectors(

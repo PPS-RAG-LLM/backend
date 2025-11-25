@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 from config import config as app_config
 from repository.rag_settings import get_rag_settings_row, set_rag_settings_row
 from repository.documents import (
-    bulk_upsert_document_metadata,
     delete_document_vectors,
     delete_documents_by_type_and_ids,
     document_has_vectors,
@@ -32,7 +31,6 @@ from utils.database import get_session
 from utils.documents import generate_doc_id
 from storage.db_models import (
     DocumentType,
-    DocumentVector,
     RagSettings,
     SecurityLevelConfigTask,
     SecurityLevelKeywordsTask,
@@ -97,6 +95,7 @@ MULTISPACE_LINE_END_RE = re.compile(r"[ \t]+\n")
 NEWLINES_RE = re.compile(r"\n{3,}")
 ADMIN_DOC_TYPE = DocumentType.ADMIN.value
 
+######
 
 def _ext(value: Path | str) -> str:
     """Path helper returning lowercase suffix."""
@@ -971,75 +970,23 @@ async def ingest_specific_files_with_levels(
         "inserted_chunks": int(res.get("inserted_chunks", 0)),
     }
 
-async def search_documents(req: RAGSearchRequest, 
-                            search_type_override: Optional[str] = None,
-                            rerank_top_n: Optional[int] = None) -> Dict:
-    t0 = time.perf_counter()
-    print(f"🔍 [Search] 검색 시작: query='{req.query}', topK={req.top_k}, rerank_topN={rerank_top_n}, task={req.task_type}")
+
+# -------------------------------------------------
+# 검색 / 리랭킹 / 중복제거 분리 함수
+# -------------------------------------------------
+
+def apply_reranking(hits: List[Dict[str, Any]], query: str, top_n: int = 5) -> List[Dict[str, Any]]:
+    """
+    검색된 후보군(hits)에 대해 Reranking을 수행하고 점수 순으로 정렬하여 반환합니다.
+    """
+    if not hits:
+        return []
+
+    rerank_candidates = build_rerank_payload(hits)
     
-    if req.task_type not in TASK_TYPES:
-        return {
-            "error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"
-        }
-
-    settings = get_vector_settings()
-    model_key = req.model or settings["embeddingModel"]
-    raw_st = (search_type_override or settings.get("searchType") or "").lower()
-    # alias normalization: 'semantic'/'sementic' -> 'vector'; default 'hybrid' if empty
-    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
-
-    tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = hf_embed_text(tok, model, device, req.query)
-    client = get_milvus_client()
-    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=ADMIN_COLLECTION)
-
-    if ADMIN_COLLECTION not in client.list_collections():
-        return {"error": "컬렉션이 없습니다. 먼저 데이터 저장(인제스트)을을 수행하세요."}
-
-    # 공통 파라미터
-    embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
-    final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
-    candidate = max(embedding_candidates, final_results * 2)  # 충분한 후보 확보
-    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-  
-    # === 분기: 검색 방식 ===
-    if search_type == "vector":
-        raw_results = run_dense_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            limit=candidate,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    else:
-        raw_results = run_hybrid_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            query_text=req.query,
-            limit=candidate,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    hits_raw = build_dense_hits(raw_results, snippet_loader=lambda _path, _idx: "")
-
-    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
-    meta_map = fetch_metadata_by_vector_ids(vector_ids)
-    for hit in hits_raw:
-        vid = str(hit.get("vector_id") or "")
-        meta = meta_map.get(vid)
-        if meta:
-            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
-            hit["chunk_idx"] = meta.get("chunk_index")
-            hit["text"] = meta.get("text")
-        else:
-            hit["snippet"] = ""
-            
-    rerank_candidates = build_rerank_payload(hits_raw)
-
+    # 후보가 있으면 리랭킹 수행
     if rerank_candidates:
-        reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
+        reranked = rerank_snippets(rerank_candidates, query=query, top_n=top_n)
         hits_sorted = []
         for res in reranked:
             original = res.metadata or {}
@@ -1055,23 +1002,24 @@ async def search_documents(req: RAGSearchRequest,
                     "snippet": res.text,
                 }
             )
-    else:
-        hits_sorted = sorted(
-            hits_raw,
-            key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
-            reverse=True,
-        )[:final_results]
+        return hits_sorted
     
-    # 리랭크 후 중복 제거
-    # 1) snippet_text 기준: 동일한 내용의 스니펫은 하나만 (최고 점수만 유지, doc_id 무관)
-    # 2) (doc_id, chunk_idx) 기준: 같은 문서의 같은 청크는 하나만 (chunk_idx 중복 방지)
-    # 문서당 제한 없음 - rerank_topN만큼 모두 반환
-    seen_by_snippet: dict[str, dict] = {}  # snippet_text -> hit (최고 점수만 유지)
-    seen_by_chunk: dict[tuple[str, int], dict] = {}  # (doc_id, chunk_idx) -> hit
+    # 리랭크 후보가 없거나 실패 시 기존 점수 정렬 (Fallback)
+    return sorted(
+        hits,
+        key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
+        reverse=True,
+    )[:top_n]
+
+
+def deduplicate_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    리랭크된 결과에서 스니펫 텍스트 및 문서 청크 기준 중복을 제거합니다.
+    """
+    seen_by_snippet: dict[str, dict] = {}
+    seen_by_chunk: dict[tuple[str, int], dict] = {}
     
-    original_count = len(hits_sorted)
-    
-    for hit in hits_sorted:
+    for hit in hits:
         doc_id = hit.get("doc_id", "")
         chunk_idx = int(hit.get("chunk_idx", 0))
         snippet = hit.get("snippet", "").strip()
@@ -1081,71 +1029,150 @@ async def search_documents(req: RAGSearchRequest,
         
         chunk_key = (doc_id, chunk_idx)
         
-        # 1) snippet_text 중복 체크 - 동일한 내용이면 중복 (다른 문서/청크여도)
+        # 1) snippet_text 중복 체크
         if snippet in seen_by_snippet:
-            # 동일한 스니펫이 이미 있으면 더 높은 점수로 교체
             existing = seen_by_snippet[snippet]
+            # 점수가 더 높으면 교체
             if hit.get("score", 0.0) > existing.get("score", 0.0):
-                # 기존 항목의 chunk_key도 제거
-                old_doc_id = existing.get("doc_id", "")
-                old_chunk_idx = int(existing.get("chunk_idx", 0))
-                old_chunk_key = (old_doc_id, old_chunk_idx)
-                if old_chunk_key in seen_by_chunk:
-                    del seen_by_chunk[old_chunk_key]
-                # 새 항목으로 교체
+                old_key = (existing.get("doc_id", ""), int(existing.get("chunk_idx", 0)))
+                if old_key in seen_by_chunk:
+                    del seen_by_chunk[old_key]
                 seen_by_snippet[snippet] = hit
                 seen_by_chunk[chunk_key] = hit
-            continue  # 중복이므로 스킵
-        
-        # 2) (doc_id, chunk_idx) 중복 체크 - 같은 문서의 같은 청크는 하나만
+            continue
+
+        # 2) chunk_key 중복 체크
         if chunk_key in seen_by_chunk:
-            # 같은 (doc_id, chunk_idx)가 이미 있으면 더 높은 점수로 교체
             existing = seen_by_chunk[chunk_key]
             if hit.get("score", 0.0) > existing.get("score", 0.0):
-                # 기존 항목의 snippet도 제거
                 old_snippet = existing.get("snippet", "").strip()
-                if old_snippet in seen_by_snippet and seen_by_snippet[old_snippet] == existing:
+                if old_snippet in seen_by_snippet:
                     del seen_by_snippet[old_snippet]
-                # 새 항목으로 교체
                 seen_by_chunk[chunk_key] = hit
                 seen_by_snippet[snippet] = hit
-            continue  # 중복이므로 스킵
+            continue
         
-        # 새로운 항목 추가
+        # 중복 아님 -> 등록
         seen_by_snippet[snippet] = hit
         seen_by_chunk[chunk_key] = hit
-    
-    # 중복 제거된 결과를 점수 순으로 정렬하고 rerank_topN만큼만 반환
-    deduplicated = sorted(seen_by_snippet.values(), key=lambda x: x.get("score", 0.0), reverse=True)
-    hits_sorted = deduplicated[:final_results]
-    
-    logger.info(f"🔍 [Deduplication] 중복 제거 완료: {len(hits_sorted)}개 결과 (원본: {original_count}개, 제거: {original_count - len(hits_sorted)}개)")
+        
+    # 점수 내림차순 정렬 반환
+    return sorted(seen_by_snippet.values(), key=lambda x: x.get("score", 0.0), reverse=True)
 
-    # 리랭크 결과 로그 출력
-    if hits_sorted:
-        top_hit = hits_sorted[0]
-        logger.info(f"✨ [Rerank] 완료! 최고 점수: {top_hit.get('score', 0):.4f}")
-        logger.info(f"🏆 [Rerank] 최고 스니펫 (doc_id: {top_hit.get('doc_id', 'unknown')}): {top_hit.get('snippet', '')[:100]}...")
 
-    # 프롬프트 컨텍스트 생성
+async def search_vector_candidates(
+    req: RAGSearchRequest, 
+    search_type_override: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    [Pure Search] 
+    Milvus에서 벡터/하이브리드 검색만 수행하고 메타데이터를 매핑하여 반환합니다.
+    (Reranking 및 Deduplication을 수행하지 않음 -> 통합 검색 등에서 활용)
+    """
+    t0 = time.perf_counter()
+    
+    if req.task_type not in TASK_TYPES:
+        return {"hits": [], "error": f"invalid task_type: {req.task_type}"}
+
+    settings = get_vector_settings()
+    model_key = req.model or settings["embeddingModel"]
+    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
+
+    tok, model, device = await _get_or_load_embedder_async(model_key)
+    q_emb = hf_embed_text(tok, model, device, req.query)
+    client = get_milvus_client()
+    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=ADMIN_COLLECTION)
+
+    if ADMIN_COLLECTION not in client.list_collections():
+        return {"hits": [], "settings_used": {"model": model_key, "searchType": search_type}, "elapsed_sec": 0.0}
+
+    # 후보군 검색 (Rerank 전이므로 top_k보다 넉넉하게 가져옴)
+    candidate_limit = int(req.top_k) * 2 
+    # 최소 10개, 최대 100개 정도로 제한하는 것이 좋으나 여기선 req.top_k 기반 설정
+    if candidate_limit < 10: candidate_limit = 10
+
+    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
+
+    if search_type == "vector":
+        raw_results = run_dense_search(
+            client,
+            collection_name=ADMIN_COLLECTION,
+            query_vector=q_emb.tolist(),
+            limit=candidate_limit,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+    else:
+        raw_results = run_hybrid_search(
+            client,
+            collection_name=ADMIN_COLLECTION,
+            query_vector=q_emb.tolist(),
+            query_text=req.query,
+            limit=candidate_limit,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+    
+    hits_raw = build_dense_hits(raw_results)
+    
+    # 메타데이터(텍스트 등) Fetch
+    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
+    meta_map = fetch_metadata_by_vector_ids(vector_ids)
+    
+    valid_hits = []
+    for hit in hits_raw:
+        vid = str(hit.get("vector_id") or "")
+        meta = meta_map.get(vid)
+        if meta:
+            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
+            hit["chunk_idx"] = meta.get("chunk_index")
+            hit["snippet"] = meta.get("text")
+            hit["path"] = meta.get("source_path", hit.get("path"))
+            valid_hits.append(hit)
+
+    elapsed = round(time.perf_counter() - t0, 4)
+    return {
+        "hits": valid_hits,
+        "settings_used": {"model": model_key, "searchType": search_type},
+        "elapsed_sec": elapsed
+    }
+
+
+async def search_documents(req: RAGSearchRequest, 
+                            search_type_override: Optional[str] = None,
+                            rerank_top_n: Optional[int] = None) -> Dict:
+    """
+    [Legacy/Direct Search]
+    검색 -> 리랭킹 -> 중복제거 과정을 모두 수행하여 최종 결과를 반환합니다.
+    """
+    # 1. 순수 검색 (Candidates)
+    search_res = await search_vector_candidates(req, search_type_override)
+    hits_raw = search_res.get("hits", [])
+    
+    # 2. 리랭킹 (Rerank)
+    final_results = int(rerank_top_n) if rerank_top_n is not None else 5
+    hits_reranked = apply_reranking(hits_raw, req.query, top_n=final_results)
+    
+    # 3. 중복 제거 (Dedup)
+    hits_sorted = deduplicate_hits(hits_reranked)
+    
+    # 결과 포맷팅 (Prompt 생성 등)
     context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
     prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
 
-    elapsed = round(time.perf_counter() - t0, 4)
-
-    # query_logs 삭제: INSERT 제거
     return {
-        "elapsed_sec": elapsed,
-        "settings_used": {"model": model_key, "searchType": search_type},
+        "elapsed_sec": search_res["elapsed_sec"],
+        "settings_used": search_res["settings_used"],
         "hits": [
             {
                 "score": float(h["score"]),
-                "path": h["path"],
+                "path": h.get("path"),
                 "chunk_idx": int(h["chunk_idx"]),
                 "task_type": h["task_type"],
                 "security_level": int(h["security_level"]),
                 "doc_id": h.get("doc_id"),
-                "page": int(h.get("page", 0)),  # 페이지 정보 추가
+                "page": int(h.get("page", 0)),
                 "snippet": h["snippet"],
             }
             for h in hits_sorted
@@ -1156,8 +1183,8 @@ async def search_documents(req: RAGSearchRequest,
 
 async def execute_search(
     question: str,
-    top_k: int = 20,   # 임베딩 후보 개수
-    rerank_top_n: int = 5,    # 최종 반환 개수  
+    top_k: int = 20,
+    rerank_top_n: int = 5,
     security_level: int = 1,
     source_filter: Optional[List[str]] = None,
     task_type: str = "qna",
@@ -1172,15 +1199,15 @@ async def execute_search(
         task_type=task_type,
         model=model_key,
     )
-    logger.info(f"📞 [ExecuteSearch] search_documents 호출 전: req 생성 완료")
+    # search_documents 내부에서 search_vector_candidates -> apply_reranking -> deduplicate_hits 순차 실행
     res = await search_documents(req, search_type_override=search_type, rerank_top_n=rerank_top_n)
-    logger.info(f"📞 [ExecuteSearch] search_documents 호출 후: 결과 hits 수={len(res.get('hits', []))}")
-    # Build check_file BEFORE optional source_filter so it reflects original candidates
+    
+    # ... (이하 소스 필터링 및 체크 파일 생성 로직 유지)
     check_files: List[str] = []
-    logger.debug(f"\n###########################\nres: {res}")
+    # ... existing code ...
     try:
         for h in res.get("hits", []):
-            # Prefer doc_id when available; fallback to path-derived filename
+             # ... existing code ...
             doc_id_val = h.get("doc_id")
             if doc_id_val:
                 check_files.append(f"{str(doc_id_val)}.pdf")
@@ -1197,7 +1224,6 @@ async def execute_search(
 
     res["check_file"] = sorted(list(set(check_files)))
     return res
-
 
 
 # -------------------------------------------------

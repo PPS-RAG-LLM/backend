@@ -5,21 +5,29 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from service.admin.manage_vator_DB import execute_search  # type: ignore
+from service.admin.manage_vator_DB import search_vector_candidates, RAGSearchRequest # type: ignore
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
 
 
-def _run_execute_search(**kwargs: Any) -> Dict[str, Any]:
-    """manage_vator_DB.execute_search 는 async이므로 동기 코드에서 호출할 수 있도록 helper 제공."""
+def _run_search_candidates(**kwargs: Any) -> Dict[str, Any]:
+    """async search_vector_candidates를 동기적으로 실행"""
+    req = RAGSearchRequest(
+        query=kwargs["question"],
+        top_k=kwargs["top_k"],
+        user_level=kwargs["security_level"],
+        task_type=kwargs["task_type"],
+        model=kwargs.get("model_key"),
+    )
+    search_type = kwargs.get("search_type")
+    
     try:
-        return asyncio.run(execute_search(**kwargs))
+        return asyncio.run(search_vector_candidates(req, search_type_override=search_type))
     except RuntimeError:
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(execute_search(**kwargs))
+            return loop.run_until_complete(search_vector_candidates(req, search_type_override=search_type))
         finally:
             loop.close()
-
 
 class AdminDocsAdapter(BaseRetrievalAdapter):
     """Milvus Server 검색 래퍼."""
@@ -39,25 +47,11 @@ class AdminDocsAdapter(BaseRetrievalAdapter):
         rerank_top_n: Optional[int] = None,
         source_filter: Optional[List[str]] = None,
     ) -> List[RetrievalResult]:
-        """
-        Milvus 글로벌 검색 실행.
-
-        Args:
-            query: 사용자 질문
-            top_k: embedding 후보 개수
-            security_level: 사용자 보안 레벨
-            task_type: 작업 유형(doc_gen|summary|qna)
-            search_type: vector/hybrid/bm25
-            model_key: 임베딩 모델 키
-            rerank_top_n: 최종 반환 개수 (없으면 top_k 사용)
-            source_filter: 파일명 필터
-        """
-        response = _run_execute_search(
+        # [변경] search_vector_candidates 호출 (리랭킹 X)
+        response = _run_search_candidates(
             question=query,
-            top_k=10,
-            rerank_top_n=rerank_top_n or top_k, # TODO : 사용자 부분 리랭킹 중복사용 제거 (속도최적화)
+            top_k=top_k, # 후보군 넉넉히
             security_level=int(security_level), 
-            source_filter=source_filter,
             task_type=task_type,
             model_key=model_key,
             search_type=search_type,
@@ -73,7 +67,7 @@ class AdminDocsAdapter(BaseRetrievalAdapter):
                     doc_id=hit.get("doc_id"),
                     title=str(hit.get("doc_id") or hit.get("path") or "Milvus"),
                     text=snippet,
-                    score=float(hit.get("score", 0.0)),
+                    score=float(hit.get("score_fused", hit.get("score_vec", 0.0))), # 리랭크 전 점수 사용
                     chunk_index=hit.get("chunk_idx"),
                     page=hit.get("page"),
                     metadata={
@@ -83,5 +77,5 @@ class AdminDocsAdapter(BaseRetrievalAdapter):
                     },
                 )
             )
-        return results[: top_k or len(results)]
-
+        # 리랭킹은 unified.py에서 수행되므로 여기서는 후보군 그대로 반환
+        return results 

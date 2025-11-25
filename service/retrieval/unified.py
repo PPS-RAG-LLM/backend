@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from service.retrieval.adapters.base import RetrievalResult
 from service.retrieval.adapters.temp_attatchments import TempAttachmentsVectorAdapter
 from service.retrieval.adapters.admin_docs import AdminDocsAdapter
@@ -24,7 +23,7 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
         query: 사용자 질문
         config: 검색 설정 (workspace_id, attachments, security_level 등)
     """
-    LOGGER.info(f"🔍 [UnifiedSearch] config: {config}")
+    LOGGER.info(f"[UnifiedSearch] config: {config}")
 
     top_k = int(config.get("top_k"))
     threshold = float(config.get("threshold") or 0.0)
@@ -44,80 +43,93 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
 
     results: List[RetrievalResult] = []
 
-    if "WS_DOCS" in sources and config.get("workspace_id"):
-        adapter = WorkspaceDocsAdapter()
-        workspace_hits = adapter.search(
-            query,
-            top_k,
-            workspace_id=int(config["workspace_id"]),
-            threshold=threshold,
-            mode=str(config.get("search_type") or "hybrid"),
-        )
-        LOGGER.info("[UnifiedSearch] workspace hits=%s", len(workspace_hits))
-        results.extend(workspace_hits)
-    elif "workspace" in sources:
-        LOGGER.info("[UnifiedSearch] workspace source enabled but workspace_id missing")
+    with ThreadPoolExecutor() as executor: # 비동기 실행을 위해 ThreadPoolExecutor 사용
+        future_to_source = {}
 
-    if "TEMP_ATTACH" in sources:
-        attachment_doc_ids = extract_doc_ids_from_attachments(config.get("attachments"))
-        if attachment_doc_ids:
-            adapter = TempAttachmentsVectorAdapter()
-            local_hits = adapter.search(
+        # 1. Workspace Docs
+        if "WS_DOCS" in sources and config.get("workspace_id"):
+            adapter = WorkspaceDocsAdapter()
+            future = executor.submit(
+                adapter.search,
                 query,
                 top_k,
-                doc_ids=attachment_doc_ids,
+                workspace_id=int(config["workspace_id"]),
                 threshold=threshold,
                 mode=str(config.get("search_type") or "hybrid"),
+                model_key=config.get("model_key"),
             )
-            LOGGER.info(
-                "[UnifiedSearch] local hits=%s (doc_ids=%s)",
-                len(local_hits),
-                attachment_doc_ids,
+            future_to_source[future] = "WS_DOCS"
+        elif "workspace" in sources:
+            LOGGER.info("[UnifiedSearch] workspace source enabled but workspace_id missing")
+
+        # 2. Temp Attachments
+        if "TEMP_ATTACH" in sources:
+            attachment_doc_ids = extract_doc_ids_from_attachments(config.get("attachments"))
+            if attachment_doc_ids:
+                adapter = TempAttachmentsVectorAdapter()
+                future = executor.submit(
+                    adapter.search,
+                    query,
+                    top_k,
+                    doc_ids=attachment_doc_ids,
+                    threshold=threshold,
+                    mode=str(config.get("search_type") or "hybrid"),
+                    model_key=config.get("model_key"),
+                )
+                future_to_source[future] = "TEMP_ATTACH"
+            else:
+                LOGGER.info("[UnifiedSearch] local source enabled but no attachment doc_ids")
+
+        # 3. Admin Docs
+        if "ADMIN_DOCS" in sources:
+            sec_level = int(config.get("security_level") or 1)
+            adapter = AdminDocsAdapter()
+            future = executor.submit(
+                adapter.search,
+                query,
+                top_k,
+                security_level=sec_level,
+                task_type=str(config.get("task_type") or "qna"),
+                search_type=config.get("search_type"),
+                model_key=config.get("model_key"),
+                rerank_top_n=rerank_top_n,
             )
-            results.extend(local_hits)
-        else:
-            LOGGER.info("[UnifiedSearch] local source enabled but no attachment doc_ids")
+            future_to_source[future] = "ADMIN_DOCS"
 
-    if "ADMIN_DOCS" in sources:
-        sec_level = int(config.get("security_level") or 1)
-        adapter = AdminDocsAdapter()
+        # 4. LLM Test (Admin Docs reuse)
+        if "LLM_TEST" in sources:
+            sec_level = int(config.get("security_level") or 1)
+            adapter = AdminDocsAdapter()
+            future = executor.submit(
+                adapter.search,
+                query,
+                top_k,
+                security_level=sec_level,
+                task_type=str(config.get("task_type") or "qna"),
+                search_type=config.get("search_type"),
+                model_key=config.get("model_key"),
+                rerank_top_n=rerank_top_n,
+            )
+            future_to_source[future] = "LLM_TEST"
 
-        LOGGER.info("\n\nsearch_type: %s", config.get("search_type"))
-        milvus_hits = adapter.search(
-            query,
-            top_k,
-            security_level=sec_level,
-            task_type=str(config.get("task_type") or "qna"),
-            search_type=config.get("search_type"),
-            model_key=config.get("model_key"),
-            rerank_top_n=rerank_top_n,
-        )
-        LOGGER.info("[UnifiedSearch] milvus hits=%s", len(milvus_hits))
-        results.extend(milvus_hits)
-
-    if "LLM_TEST" in sources:
-        sec_level = int(config.get("security_level") or 1)
-        adapter = AdminDocsAdapter()
-
-        LOGGER.info("\n\nsearch_type: %s", config.get("search_type"))
-        milvus_hits = adapter.search(
-            query,
-            top_k,
-            security_level=sec_level,
-            task_type=str(config.get("task_type") or "qna"),
-            search_type=config.get("search_type"),
-            model_key=config.get("model_key"),
-            rerank_top_n=rerank_top_n,
-        )
-        LOGGER.info("[UnifiedSearch] milvus hits=%s", len(milvus_hits))
-        results.extend(milvus_hits)
-
+        # Collect results
+        for future in as_completed(future_to_source):
+            source_name = future_to_source[future]
+            try:
+                hits = future.result()
+                LOGGER.info(f"[UnifiedSearch] {source_name} hits={len(hits)}")
+                results.extend(hits)
+            except Exception as exc:
+                LOGGER.error(f"[UnifiedSearch] {source_name} search failed: {exc}")
+                
     if not results:
         LOGGER.info("[UnifiedSearch] no hits from any sources")
         return []
 
     merged = _deduplicate(results)
     LOGGER.info("[UnifiedSearch] merged hits=%s", len(merged))
+
+    # Global Reranking (Single Pass)
     if enable_rerank and len(merged) > 1:
         reranked = rerank_snippets(merged, query=query, top_n=rerank_top_n)
         return reranked

@@ -45,8 +45,8 @@ def build_dense_hits(
     """덴스 검색 결과 리스트를 표준 dict 형태로 변환."""
     hits: List[Dict[str, Any]] = []
     for entity, score, ent_text in _iter_hits(raw_results) or []:
-        path = entity.get("path")
-        if not path:
+        doc_id = entity.get("doc_id")
+        if not doc_id:
             continue
         vector_id = entity.get("pk") or entity.get("vector_id")
         chunk_idx = int(entity.get("chunk_idx", 0) or 0)
@@ -61,17 +61,16 @@ def build_dense_hits(
         else:
             snippet_source = "entity" if snippet else "empty"
         logger.debug(
-            "[Snippet] source=%s path=%s chunk=%s len=%s",
-            snippet_source, path, chunk_idx, len(snippet or ""),
+            "[Snippet] source=%s doc_id=%s  vector_id=%s chunk=%s len=%s",
+            snippet_source, doc_id, vector_id, chunk_idx, len(snippet or ""),
         )
         hits.append(
             {
-                "vector_id": str(vector_id) if vector_id is not None else None,
-                "path": path,
+                "vector_id": vector_id,
+                "doc_id": doc_id,
                 "chunk_idx": chunk_idx,
                 "task_type": task_type,
                 "security_level": security_level,
-                "doc_id": doc_id,
                 "page": page,
                 "score_vec": float(score),
                 "score_sparse": 0.0,
