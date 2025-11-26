@@ -28,6 +28,9 @@ env/
 Dockerfile
 .dockerignore
 
+
+# models
+*/models/
 # Logs
 *.log
 

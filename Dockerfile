@@ -37,7 +37,7 @@ COPY . .
 # uv 환경을 활성화하고 Python 경로 설정
 # uv로 설치한 패키지들이 사용 가능하도록 환경 변수를 설정합니다
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app:$PYTHONPATH"
+ENV PYTHONPATH="/app"
 
 # GPU 설정 (기본값: GPU 1번 사용)
 # CUDA_VISIBLE_DEVICES를 설정하여 사용할 GPU를 지정합니다
