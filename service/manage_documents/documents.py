@@ -21,6 +21,7 @@ from repository.documents import (
     fetch_document_vectors,
     insert_document_vectors,
     insert_workspace_document,
+    # insert_workspace_document,
     list_doc_ids_by_workspace,
     upsert_document,
 )
@@ -182,18 +183,19 @@ async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
 
 # 아래는 여러 파일 업로드 지원 함수
 async def upload_documents(
-    *,
     user_id: int,
     files: List[UploadFile],
+    raw_paths: List[str],
     add_to_workspaces: Optional[str],
 ) -> Dict[str, Any]:
     documents: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
-    for f in files:
+    for i, f in enumerate(files):
         try:
             res = await upload_document(
                 user_id=user_id,
                 file=f,
+                raw_path=raw_paths[i],
                 add_to_workspaces=add_to_workspaces,
             )
             if res and res.get("documents"):
@@ -211,9 +213,9 @@ async def upload_documents(
     }
 
 async def upload_document(
-    *,
     user_id: int,
     file: UploadFile,
+    raw_path: str,
     add_to_workspaces: Optional[str],
 ) -> Dict[str, Any]:
     """
@@ -244,26 +246,6 @@ async def upload_document(
     )
 
     doc_id = str(uuid.uuid4())
-    doc_info_name = make_safe_filename(filename, doc_id, "json")
-    doc_info_path = DOC_INFO_DIR / doc_info_name
-    doc_info_path.parent.mkdir(parents=True, exist_ok=True)
-    doc_info_json = {
-        "id": doc_id,
-        "url": "",
-        "title": filename,
-        "docAuthor": meta.get("docAuthor") or "Unknown",
-        "description": meta.get("description") or "Unknown",
-        "docSource": meta.get("docSource") or "Unknown",
-        "chunkSource": filename,
-        "published": now_str,
-        "wordCount": word_count,
-        "token_count_estimate": token_est,
-        "pageContent": combined_text,
-    }
-    doc_info_path.write_text(
-        json.dumps(doc_info_json, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
     try:
         chunk_records = _build_chunk_records(page_texts)
     except Exception as exc:
@@ -293,8 +275,8 @@ async def upload_document(
 
     doc_type = DocumentType.WORKSPACE if target_workspace_id is not None else DocumentType.TEMP
     doc_payload: Dict[str, Any] = {
-        "docAuthor": doc_info_json["docAuthor"],
-        "doc_info_path": str(doc_info_path),
+        "description": meta.get("description"),
+        "docAuthor": meta.get("docAuthor"),
         "uploaded_at": now_str,
     }
     if doc_type is DocumentType.TEMP:
@@ -310,6 +292,7 @@ async def upload_document(
             filename=filename,
             payload=doc_payload,
             workspace_id=target_workspace_id,
+            source_path=raw_path,
         )
         bulk_upsert_document_metadata(
             doc_id=doc_id,
@@ -319,6 +302,7 @@ async def upload_document(
                     "chunk_index": rec["chunk_index"],
                     "text": rec["text"],
                     "payload": {
+                        "path": raw_path,
                         "title": filename,
                         "published": now_str,
                     },
@@ -345,14 +329,14 @@ async def upload_document(
         milvus_rows.append(
             {
                 "embedding": vec,
-                "path": f"documents-info/{doc_info_name}",
+                "path": raw_path,
                 "chunk_idx": int(rec["chunk_index"]),
                 "task_type": "qna",
                 "security_level": 0,
                 "doc_id": doc_id,
                 "version": 1,
                 "page": int(rec["page"]),
-                "workspace_id": int(workspace_id or 0),
+                "workspace_id": target_workspace_id if target_workspace_id is not None else 0,
                 "text": rec["text"],
             }
         )
@@ -413,7 +397,6 @@ async def upload_document(
             insert_workspace_document(
                 doc_id=doc_id,
                 filename=filename,
-                docpath=str(doc_info_path),
                 workspace_id=target_workspace_id,
                 metadata={
                     "chunks": len(chunk_records),
@@ -430,14 +413,13 @@ async def upload_document(
         "error": None,
         "documents": [
             {
-                "location": f"documents-info/{doc_info_name}",
-                "name": doc_info_name,
-                "url": "",
+                "docId": doc_id,
+                "url": "", # 이미지 업로드일 경우
+                "location": raw_path,
                 "title": filename,
-                "docAuthor": doc_info_json["docAuthor"],
-                "description": doc_info_json["description"],
-                "docSource": doc_info_json["docSource"],
-                "chunkSource": filename,
+                "docAuthor": meta.get("docAuthor"),
+                "description": meta.get("description"),
+                "docSource": meta.get("docSource"),
                 "published": now_str,
                 "wordCount": word_count,
                 "token_count_estimate": token_est,
