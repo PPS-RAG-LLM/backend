@@ -59,6 +59,14 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
         else:
             output_fields = list(DEFAULT_OUTPUT_FIELDS)
 
+        logger.debug(f"FILTER_EXPR: {filter_expr}")
+        logger.debug(f"OUTPUT_FIELDS: {output_fields}")
+        logger.debug(f"QUERY: {query}")
+        logger.debug(f"QUERY_VEC: {query_vec[:100]}")
+        logger.debug(f"LIMIT: {top_k}")
+        logger.debug(f"COLLECTION_NAME: {self.collection_name}")
+        logger.debug(f"CLIENT: {client}")
+
         if mode == "hybrid":
             raw_hits = run_hybrid_search(
                 client,
@@ -69,6 +77,8 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
                 filter_expr=filter_expr,
                 output_fields=output_fields,
             )
+            # [수정] RRF Ranker 사용 시 점수가 매우 낮으므로(0.0~0.03 등) threshold 적용 제외
+            return self._normalize_hits(raw_hits, threshold=0.0)[: max(1, top_k)]
         else:
             raw_hits = run_dense_search(
                 client,
@@ -78,8 +88,7 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
                 filter_expr=filter_expr,
                 output_fields=output_fields,
             )
-
-        return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
+            return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
 
     def _build_filter_expr(
         self, *, doc_ids: List[str], workspace_id: Optional[int]
