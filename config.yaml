@@ -57,8 +57,7 @@ llm_models_path: storage/models
 retrieval:
   paths:
     storage_dir: storage
-    user_data_root: storage/user_data
-    raw_data_dir: storage/user_data/row_data
+    user_data_root: storage/raw_files 
     resources_dir: service/admin/resources
     model_root_dir: storage/embedding-models
     rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B

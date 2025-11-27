@@ -288,6 +288,7 @@ $RECYCLE.BIN/
 # !resources/*
 /service/admin/resources/
 /storage/user_data/
+/storage/raw_files/
 *.onnx
 *.safetensors
 *.bin
