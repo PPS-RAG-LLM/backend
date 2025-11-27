@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티에서 import)"""
-    from service.preprocessing.extension.utils import _clean_text as _clean_text_util
-    return _clean_text_util(s)
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 
 def _df_to_markdown(df, max_rows=500) -> str:
@@ -26,7 +26,7 @@ def _df_to_markdown(df, max_rows=500) -> str:
     return "\n".join(lines)
 
 
-def _extract_csv(fp: Path) -> tuple[str, list[dict]]:
+def extract_csv(fp: Path) -> tuple[str, list[dict]]:
     """CSV 파일 추출"""
     try:
         import pandas as pd

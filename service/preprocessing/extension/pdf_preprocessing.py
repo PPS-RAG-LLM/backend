@@ -12,8 +12,6 @@ from typing import Dict
 
 logger = logging.getLogger(__name__)
 
-# now_kst_string은 utils.time에서 import
-from utils.time import now_kst_string
 
 # 텍스트 정리용 정규식
 ZERO_WIDTH_RE = re.compile(r'[\u200B-\u200D\u2060\uFEFF]')
@@ -21,25 +19,10 @@ CONTROL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')  # \t,\n은 유지
 MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
 NEWLINES_RE = re.compile(r'\n{3,}')
 
-
-def ext(p: Path) -> str:
-    """파일 확장자 반환 (소문자)"""
-    return p.suffix.lower()
-
-
 def _clean_text(s: str | None) -> str:
-    """PDF 특수문자 제거 및 텍스트 정규화"""
-    if not s:
-        return ""
-    s = unicodedata.normalize("NFKC", s)
-    # 흔한 공백/불릿/문장부호 정리
-    s = s.replace("\xa0", " ").replace("\u2022", "•").replace("\u2212", "-")
-    s = ZERO_WIDTH_RE.sub("", s)
-    s = CONTROL_RE.sub("", s)
-    s = MULTISPACE_LINE_END_RE.sub("\n", s)
-    s = NEWLINES_RE.sub("\n\n", s)
-    return s.strip()
-
+    """텍스트 정규화 (공통 유틸리티에서 import)"""
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 def _df_to_markdown_repeat_header(df, max_rows=500) -> str:
     """
@@ -91,7 +74,7 @@ def _markdown_repeat_header(md: str) -> str:
     return "\n".join(out)
 
 
-def _extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int, str], int]:
+def extract_pdf_with_tables(pdf_path: Path) -> tuple[str, list[dict], Dict[int, str], int]:
     """
     PDF에서 본문 텍스트는 PyMuPDF로 추출하고,
     표는 PyMuPDF find_tables()와 Tabula로 추출해 마크다운 테이블로 반환한다.

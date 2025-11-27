@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티에서 import)"""
-    from service.preprocessing.extension.utils import _clean_text as _clean_text_util
-    return _clean_text_util(s)
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 
 def _extract_hyperlink(paragraph) -> str:
@@ -231,7 +231,7 @@ def _convert_doc_to_docx(src: Path) -> Path | None:
         return None
 
 
-def _extract_docx(fp: Path) -> tuple[str, list[dict]]:
+def extract_docx(fp: Path) -> tuple[str, list[dict]]:
     """DOCX 파일 추출 (고도화된 버전)
     DOC 파일이 들어오면 자동으로 DOCX로 변환 후 처리합니다.
     

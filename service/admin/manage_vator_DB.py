@@ -27,6 +27,7 @@ from repository.documents import (
     upsert_document,
     fetch_document_metadata_by_doc_ids, 
 )
+from service.preprocessing.rag_preprocessing import ext
 from utils.database import get_session
 from utils.documents import generate_doc_id
 from storage.db_models import (
@@ -73,11 +74,9 @@ _RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
 _RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
 _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
 
-
 def _cfg_path(key: str, fallback: str) -> Path:
     value = _RETRIEVAL_PATHS.get(key, fallback)
     return (PROJECT_ROOT / Path(value)).resolve()
-
 
 RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/user_data/row_data")
 MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
@@ -97,10 +96,6 @@ ADMIN_DOC_TYPE = DocumentType.ADMIN.value
 
 ######
 
-def _ext(value: Path | str) -> str:
-    """Path helper returning lowercase suffix."""
-    return Path(value).suffix.lower()
-
 
 def _max_security_level(sec_map: Dict[str, int]) -> int:
     if not sec_map:
@@ -113,34 +108,6 @@ def _max_security_level(sec_map: Dict[str, int]) -> int:
         except Exception:
             continue
     return max(parsed or [1])
-
-
-def _build_admin_payload(
-    *,
-    sec_map: Dict[str, int],
-    version: int,
-    preview: str,
-    tables: List[Dict[str, Any]],
-    total_pages: int,
-    saved_files: Dict[str, str],
-    pages: Dict[str, Any],
-    source_ext: str,
-    extraction_info: Dict[str, Any],
-    rel_key: str,
-) -> Dict[str, Any]:
-    return {
-        "security_levels": sec_map,
-        "version": int(version),
-        "preview": preview,
-        "tables": tables or [],
-        "total_pages": int(total_pages or 0),
-        "saved_files": saved_files,
-        "pages": pages or {},
-        "source_ext": source_ext,
-        "doc_rel_key": rel_key,
-        "extraction_info": extraction_info,
-    }
-
 
 def register_admin_document(
     *,
@@ -157,18 +124,20 @@ def register_admin_document(
     source_ext: str,
     extraction_info: Dict[str, Any],
 ) -> None:
-    payload = _build_admin_payload(
-        sec_map=sec_map,
-        version=version,
-        preview=preview,
-        tables=tables,
-        total_pages=total_pages,
-        saved_files={"text": rel_text_path, "source": rel_source_path},
-        pages=pages,
-        source_ext=source_ext,
-        extraction_info=extraction_info,
-        rel_key=rel_source_path,
-    )
+
+    payload = {
+        "security_levels": sec_map,
+        "version": int(version),
+        "preview": preview,
+        "tables": tables or [],
+        "total_pages": int(total_pages or 0),
+        "saved_files": {"text": rel_text_path, "source": rel_source_path},
+        "pages": pages or {},
+        "source_ext": source_ext,
+        "doc_rel_key": rel_source_path,
+        "extraction_info": extraction_info,
+    }
+
     upsert_document(
         doc_id=doc_id,
         doc_type=ADMIN_DOC_TYPE,
@@ -261,66 +230,52 @@ class RAGSearchRequest(BaseModel):
     task_type: str = Field(..., description="doc_gen | summary | qna")
     model: Optional[str] = None  # 내부적으로 settings에서 로드
 
-
-
 # -------------------------------------------------
 # SQLite 유틸
 # -------------------------------------------------
 
-# ====== New helpers ======
-def save_raw_file(filename: str, content: bytes) -> str:
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    name = Path(filename or "uploaded").name or f"uploaded_{uuid.uuid4().hex}"
-    dst = RAW_DATA_DIR / name
-    if dst.exists():
-        stem, ext = dst.stem, dst.suffix
-        dst = RAW_DATA_DIR / f"{stem}_{int(time.time())}{ext}"
-    dst.write_bytes(content)
-    return str(dst.relative_to(RAW_DATA_DIR).as_posix())
+# def _write_combined_text_file(
+#     output_path: Path,
+#     *,
+#     text: str,
+#     tables: List[Dict[str, Any]],
+#     pages_text_dict: Dict[int, str],
+# ) -> None:
+#     def _write_tables(handle, items):
+#         for tbl in items:
+#             table_text = (tbl.get("text") or "").strip()
+#             if table_text:
+#                 handle.write(table_text)
+#                 handle.write("\n\n")
 
-
-def _write_combined_text_file(
-    output_path: Path,
-    *,
-    text: str,
-    tables: List[Dict[str, Any]],
-    pages_text_dict: Dict[int, str],
-) -> None:
-    def _write_tables(handle, items):
-        for tbl in items:
-            table_text = (tbl.get("text") or "").strip()
-            if table_text:
-                handle.write(table_text)
-                handle.write("\n\n")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        if pages_text_dict:
-            pages_tables: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-            for tbl in tables or []:
-                page_num = int(tbl.get("page", 0))
-                if page_num > 0:
-                    pages_tables[page_num].append(tbl)
-            ordered_pages = sorted({*pages_text_dict.keys(), *pages_tables.keys()})
-            if ordered_pages:
-                for idx, page_num in enumerate(ordered_pages):
-                    page_text = pages_text_dict.get(page_num, "")
-                    if page_text:
-                        handle.write(page_text)
-                        handle.write("\n\n")
-                    _write_tables(handle, pages_tables.get(page_num, []))
-                    if idx < len(ordered_pages) - 1:
-                        handle.write("\n---\n\n")
-            else:
-                if text.strip():
-                    handle.write(text)
-                    handle.write("\n\n")
-                _write_tables(handle, tables or [])
-        else:
-            if text.strip():
-                handle.write(text)
-                handle.write("\n\n")
-            _write_tables(handle, tables or [])
+#     output_path.parent.mkdir(parents=True, exist_ok=True)
+#     with output_path.open("w", encoding="utf-8") as handle:
+#         if pages_text_dict:
+#             pages_tables: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+#             for tbl in tables or []:
+#                 page_num = int(tbl.get("page", 0))
+#                 if page_num > 0:
+#                     pages_tables[page_num].append(tbl)
+#             ordered_pages = sorted({*pages_text_dict.keys(), *pages_tables.keys()})
+#             if ordered_pages:
+#                 for idx, page_num in enumerate(ordered_pages):
+#                     page_text = pages_text_dict.get(page_num, "")
+#                     if page_text:
+#                         handle.write(page_text)
+#                         handle.write("\n\n")
+#                     _write_tables(handle, pages_tables.get(page_num, []))
+#                     if idx < len(ordered_pages) - 1:
+#                         handle.write("\n---\n\n")
+#             else:
+#                 if text.strip():
+#                     handle.write(text)
+#                     handle.write("\n\n")
+#                 _write_tables(handle, tables or [])
+#         else:
+#             if text.strip():
+#                 handle.write(text)
+#                 handle.write("\n\n")
+#             _write_tables(handle, tables or [])
 
 async def process_saved_raw_files(rel_paths: List[str]) -> List[Dict[str, Any]]:
     if not rel_paths:
@@ -348,7 +303,7 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
     except ValueError:
         rel_from_raw = raw_path
 
-    file_ext = _ext(raw_path)
+    file_ext = ext(raw_path)
     pages_text_dict: Dict[int, str] = {}
     total_pages = 0
 
@@ -1172,7 +1127,6 @@ async def execute_search(
     
     # ... (이하 소스 필터링 및 체크 파일 생성 로직 유지)
     check_files: List[str] = []
-    # ... existing code ...
     try:
         for h in res.get("hits", []):
              # ... existing code ...

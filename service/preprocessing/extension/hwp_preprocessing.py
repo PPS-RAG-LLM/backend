@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (pdf_preprocessing에서 import)"""
-    from service.preprocessing.extension.pdf_preprocessing import _clean_text as _clean_text_pdf
-    return _clean_text_pdf(s)
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 
 def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
@@ -31,7 +31,7 @@ def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
         return None
 
 
-def _extract_hwp(fp: Path) -> Tuple[str, list[dict]]:
+def extract_hwp(fp: Path) -> Tuple[str, list[dict]]:
     """HWP 파일 추출 (다단계 폴백)
     순서: python-hwp(API) -> hwp5txt(CLI) -> LibreOffice 변환(docx) -> olefile(구버전 시도)
     반환: (본문텍스트, 표리스트[])

@@ -14,12 +14,7 @@ MULTISPACE_LINE_END_RE = re.compile(r'[ \t]+\n')
 NEWLINES_RE = re.compile(r'\n{3,}')
 
 
-def _ext(p: Path) -> str:
-    """파일 확장자 반환 (소문자)"""
-    return p.suffix.lower()
-
-
-def _clean_text(s: str | None) -> str:
+def clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티)"""
     if not s:
         return ""

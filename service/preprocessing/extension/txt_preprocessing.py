@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티에서 import)"""
-    from service.preprocessing.extension.utils import _clean_text as _clean_text_util
-    return _clean_text_util(s)
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 
-def _extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
+def extract_plain_text(fp: Path) -> tuple[str, list[dict]]:
     """TXT/MD 파일 추출"""
     try:
         text = fp.read_text(encoding="utf-8", errors="ignore")

@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 def _clean_text(s: str | None) -> str:
     """텍스트 정규화 (공통 유틸리티에서 import)"""
-    from service.preprocessing.extension.utils import _clean_text as _clean_text_util
-    return _clean_text_util(s)
+    from service.preprocessing.extension.utils import clean_text as clean_text_util
+    return clean_text_util(s)
 
 
 def _convert_pptx_to_ppt(src: Path) -> Path | None:
@@ -112,7 +112,7 @@ def _convert_pptx_to_ppt(src: Path) -> Path | None:
         return None
 
 
-def _extract_pptx(fp: Path) -> tuple[str, list[dict]]:
+def extract_pptx(fp: Path) -> tuple[str, list[dict]]:
     """PPTX 파일 추출 (PPT로 변환 후 처리)
     PPTX 파일이 들어오면 자동으로 PPT로 변환 후, PPT를 PPTX로 다시 변환하여 파싱합니다.
     

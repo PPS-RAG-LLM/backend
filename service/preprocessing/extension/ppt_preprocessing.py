@@ -25,7 +25,7 @@ def _convert_via_libreoffice(src: Path, target_ext: str) -> Optional[Path]:
         return None
 
 
-def _extract_ppt(fp: Path) -> tuple[str, list[dict]]:
+def extract_ppt(fp: Path) -> tuple[str, list[dict]]:
     """PPT 파일 추출 (LibreOffice 변환 시도)"""
     conv = _convert_via_libreoffice(fp, "pptx")
     if conv and conv.exists():
