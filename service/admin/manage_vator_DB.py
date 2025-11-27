@@ -430,38 +430,6 @@ def warmup_active_embedder(logger_func=print):
     except Exception as e:
         logger_func(f"[warmup] 로딩 실패(지연 로딩으로 복구 예정): {e}")
 
-
-def _update_vector_settings(
-    search_type: Optional[str] = None,
-    chunk_size: Optional[int] = None,
-    overlap: Optional[int] = None,
-):
-    """레거시 API 호환: rag_settings(싱글톤) 업데이트"""
-    cur = get_rag_settings_row()
-    new_search = (search_type or cur["search_type"]).lower()
-    if new_search == "vector":
-        new_search = "semantic"
-    if new_search not in {"hybrid", "semantic", "bm25"}:
-        raise ValueError(
-            "unsupported searchType; allowed: 'hybrid','semantic','bm25' (or 'vector' alias)"
-        )
-    new_chunk = int(chunk_size if chunk_size is not None else cur["chunk_size"])
-    new_overlap = int(overlap if overlap is not None else cur["overlap"])
-    if new_chunk <= 0 or new_overlap < 0 or new_overlap >= new_chunk:
-        raise ValueError("invalid chunk/overlap (chunk>0, 0 <= overlap < chunk)")
-
-    with get_session() as session:
-        s = session.query(RagSettings).filter(RagSettings.id == 1).first()
-        if not s:
-            s = RagSettings(id=1)
-            session.add(s)
-        s.search_type = new_search
-        s.chunk_size = new_chunk
-        s.overlap = new_overlap
-        s.updated_at = now_kst()
-        session.commit()
-
-
 # ---------------- Vector Settings ----------------
 def set_vector_settings(embed_model_key: Optional[str] = None,
                         search_type: Optional[str] = None,
