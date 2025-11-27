@@ -27,12 +27,12 @@ from service.admin.manage_vator_DB import (
     list_indexed_files_overview,
     delete_files_by_names,
     # 파일 저장
-    save_raw_file,
     process_saved_raw_files,
 )
 from service.preprocessing.rag_preprocessing import extract_documents
 from storage.db_models import DocumentType
 from utils import logger
+from utils.documents import save_raw_file
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -227,62 +227,25 @@ async def get_security_levels(taskType: Optional[TaskLiteral] = None):
 # Pipeline
 # ============================
 
-# @router.post("/admin/vector/upload-file", summary="2. 파일 업로드(row_data)") # TODO : MinIO 마이그레이션 필요
-# async def upload_raw_file(files: List[UploadFile] = File(...)):
-#     # 1) 파일 저장
-#     saved_original_names: List[str] = []
-#     saved_rel_paths : List[str] = []
-#     for f in files:
-#         # save_raw_file이 상대 경로를 돌려주도록 수정, 
-#         # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
-#         content = await f.read()
-#         rel_path = save_raw_file(f.filename, content)
-#         saved_original_names.append(f.filename)
-#         saved_rel_paths.append(rel_path)
-#     return {"savedPaths": saved_rel_paths, "count": len(saved_rel_paths)}
-
-# class ExtractBody(BaseModel):
-#     paths: Optional[List[str]] = None
-
-# @router.post("/admin/vector/extract")
-# async def rag_extract_endpoint(body: ExtractBody = Body(None)):
-#     target_paths = body.paths if body else None
-#     return await extract_documents(target_paths)
-
-
-# @router.post("/admin/vector/upload-all",summary="4. (설정된 청크/오버랩으로) 모든 작업유형 인제스트")
-# async def rag_ingest_endpoint(request: Request):
-#     s = get_vector_settings()
-#     request.app.extra.get("logger", print)(
-#         f"[ingest] from {request.client.host} (model={s['embeddingModel']}, searchType={s['searchType']}, chunkSize={s['chunkSize']}, overlap={s['overlap']})"
-#     )
-#     return await ingest_embeddings(
-#         model_key=s["embeddingModel"],
-#         max_token=int(s["chunkSize"]),
-#         overlab=int(s["overlap"]),
-#     )
-
 @router.post("/admin/vector/full-ingest", summary="전체 파일 추출 및 저장 인제스트") # TODO : MinIO 마이그레이션 필요
 async def rag_full_ingest(files: List[UploadFile] = File(...)):
     # 1) RAW 저장
     rel_paths = []
     for f in files:
-        rel_paths.append(save_raw_file(f.filename, await f.read()))
+        rel_paths.append(save_raw_file(f.filename, folder="row_data", content=await f.read()))
 
-    # 2) 추출
     extract_result = await extract_documents(rel_paths)
-
     # 3) 인제스트
     settings = get_vector_settings()
-    processed_ids = extract_result.get("processed_doc_ids") or []
+
+    # 2) 추출
 
     ingest_result = await ingest_embeddings(
         model_key=settings["embeddingModel"],
         max_token=int(settings["chunkSize"]),
         overlab=int(settings["overlap"]),
-        file_keys_filter=processed_ids,
     )
-
+    logger.debug(f"\n\n[API] ingest_result: {ingest_result}\n\n")
     return {
         "uploaded": rel_paths,
         "extract": extract_result,
@@ -469,7 +432,7 @@ async def override_levels_upload_form(
         # save_raw_file이 상대 경로를 돌려주도록 수정, 
         # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
         content = await f.read()
-        rel_path = save_raw_file(f.filename, content)
+        rel_path = save_raw_file(f.filename, folder="row_data", content=content)
         saved_original_names.append(f.filename)
         saved_rel_paths.append(rel_path)
 
