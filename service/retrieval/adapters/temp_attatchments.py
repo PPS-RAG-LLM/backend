@@ -88,7 +88,7 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
                 filter_expr=filter_expr,
                 output_fields=output_fields,
             )
-            return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
+        return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
 
     def _build_filter_expr(
         self, *, doc_ids: List[str], workspace_id: Optional[int]
