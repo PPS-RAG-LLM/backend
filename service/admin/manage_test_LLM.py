@@ -19,10 +19,11 @@ from repository.documents import (
     fetch_metadata_by_vector_ids,
 )
 from repository.prompt_templates.common import repo_find_default_template
+from service.retrieval.admin_search import RAGSearchRequest
 from storage.db_models import DocumentType
 from service.retrieval.common import hf_embed_text
 from service.retrieval.ingestion import ingest_common
-from service.retrieval.pipeline.milvus_pipeline import DEFAULT_OUTPUT_FIELDS, build_dense_hits, build_rerank_payload
+from service.retrieval.pipeline import DEFAULT_OUTPUT_FIELDS, build_dense_hits, build_rerank_payload
 from service.retrieval.reranker import rerank_snippets
 from service.vector_db import ensure_collection_and_index, get_milvus_client, run_dense_search, run_hybrid_search
 
@@ -91,11 +92,9 @@ from service.admin.manage_admin_LLM import (
 
 from service.admin.manage_vator_DB import (
     get_security_level_rules_all,         # (sid, dir) 생성
-    get_vector_settings,            # sid -> meta
-    RAGSearchRequest,
     parse_doc_version,
 )
-from utils.model_load import _get_or_load_embedder_async
+from utils.model_load import get_or_load_embedder_async, get_vector_settings
 from utils.time import now_kst_string
 
 # ===== (옵션) 모델 스트리머 (가능 시 스트림, 실패 시 _simple_generate 폴백) =====
@@ -492,7 +491,7 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     raw_st = (search_type_override or settings.get("searchType") or "").lower()
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
-    tok, model, device = await _get_or_load_embedder_async(model_key)
+    tok, model, device = await get_or_load_embedder_async(model_key)
     q_emb = hf_embed_text(tok, model, device, req.query)
 
     client = get_milvus_client()

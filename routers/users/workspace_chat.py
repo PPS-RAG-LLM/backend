@@ -22,6 +22,7 @@ class Attachment(BaseModel):
     name: str  # 파일명
     mime: str  # image/png, image/jpeg, application/pdf, etc.
     contentString: str  # data:image/png;base64,...
+    docId: Optional[str] = None # 문서 ID
 
 
 class StreamChatRequest(BaseModel):

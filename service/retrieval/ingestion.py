@@ -15,7 +15,7 @@ from service.retrieval.common import (
     split_for_varchar_bytes,
 )
 from service.vector_db import ensure_collection_and_index, get_milvus_client
-from utils.model_load import _get_or_load_embedder_async
+from utils.model_load import get_or_load_embedder_async
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ async def ingest_common(
         return {"error": "No inputs provided"}
 
     eff_model_key = settings["embeddingModel"]
-    tok, model, device = await _get_or_load_embedder_async(eff_model_key)
+    tok, model, device = await get_or_load_embedder_async(eff_model_key)
     emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 
     client = get_milvus_client()

@@ -1,0 +1,22 @@
+{
+    'workspace_id': 1, 
+    'attachments': [
+        {
+            'name': 'ᄋ마ᄑᄅᄋ행_E-ticket.pdf', 
+           'mime': 'application/pdf', 
+            'contentString': 'user_raw_datᄋ마ᄑᄅᄋᄒ_E-ticket_1764237762.pdf', 
+            'docId': '656650db-104d-4e10-8b0e-028bc8eb7a71'
+        }
+    ], 
+    'security_level': 2, 
+    'top_k': 14, 
+    'threshold': 0.25,'
+    'sources': [
+        'WS_DOCS', 'TEMP_ATTACH', 'ADMIN_DOCS', 'LLM_TEST'
+    ], 
+    'enable_rerank': True, 
+    'rerank_top_n': 4, 
+    'task_type': 'qna', 
+    'search_type': 'hybrid', 
+    'model_key': 'qwen3_0_6b'
+}

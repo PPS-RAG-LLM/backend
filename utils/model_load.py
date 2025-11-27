@@ -108,14 +108,33 @@ def get_model_manager():
     return _MODEL_MANAGER
 
 
-def _invalidate_embedder_cache() -> None:
+def invalidate_embedder_cache() -> None:
     global _EMBED_CACHE, _EMBED_ACTIVE_KEY
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
         _EMBED_ACTIVE_KEY = None
 
+def get_vector_settings() -> Dict:
+    # rag_settings 는 검색 타입/청크/오버랩만 신뢰
+    try:
+        row = get_rag_settings_row()
+    except Exception:
+        logger.error("get_rag_settings_row 실패")
+        return {
+            "embeddingModel": "unknown",
+            "searchType": "hybrid",
+            "chunkSize": 512,
+            "overlap": 64,
+        }
+    return {
+        "embeddingModel": row.get("embedding_key"),                        # ← rag_settings.embedding_key는 무시
+        "searchType": row.get("search_type", "hybrid"),
+        "chunkSize": int(row.get("chunk_size", 512)),
+        "overlap": int(row.get("overlap", 64)),
+    }
 
-async def _get_or_load_embedder_async(model_key: str, preload: bool = False):
+
+async def get_or_load_embedder_async(model_key: str, preload: bool = False):
     """
     비동기 래퍼: blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
     이벤트 루프 블로킹 방지

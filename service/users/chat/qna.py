@@ -35,6 +35,7 @@ def _insert_rag_context(
     threshold = float(ws.get("similarity_threshold") or 0.0)
     attachments = body.get("attachments")
     temp_doc_ids = extract_doc_ids_from_attachments(attachments)
+    logger.debug(f"TEMP_DOC_IDS: {temp_doc_ids}")
 
     try:
         rag_settings = get_rag_settings_row()
@@ -59,6 +60,17 @@ def _insert_rag_context(
         "search_type": ws.get("vector_search_mode"),
         "model_key": model_key,
     }
+    logger.debug(f"CONFIG.attachments: {attachments}")
+    logger.debug(f"CONFIG.temp_doc_ids: {temp_doc_ids}")
+    logger.debug(f"CONFIG.sources_config: {sources_config}")
+    logger.debug(f"CONFIG.security_level: {security_level}")
+    logger.debug(f"CONFIG.top_k: {top_k}")
+    logger.debug(f"CONFIG.threshold: {threshold}")
+    logger.debug(f"CONFIG.enable_rerank: {ws.get('enable_rerank', True)}")
+    logger.debug(f"CONFIG.rerank_top_n: {top_k}")
+    logger.debug(f"CONFIG.task_type: {ws.get('task_type', 'qna')}")
+    logger.debug(f"CONFIG.search_type: {ws.get('vector_search_mode')}")
+    logger.debug(f"CONFIG.model_key: {model_key}")
 
     try:
         results = unified_search(body["message"], config)

@@ -28,6 +28,7 @@ from repository.documents import (
     fetch_document_metadata_by_doc_ids, 
 )
 from service.preprocessing.rag_preprocessing import ext
+from service.retrieval.admin_search import RAGSearchRequest, apply_reranking, deduplicate_hits
 from utils.database import get_session
 from utils.documents import generate_doc_id
 from storage.db_models import (
@@ -47,7 +48,7 @@ from service.retrieval.common import (
     extract_insert_ids,
     hf_embed_text, 
     parse_doc_version, 
-    determine_level_for_task, 
+    determine_level_for_task,
 )
 from service.retrieval.ingestion import ingest_common
 from service.retrieval.pipeline import (
@@ -55,11 +56,11 @@ from service.retrieval.pipeline import (
     build_dense_hits,
     build_rerank_payload,
 )
-from service.retrieval.reranker import rerank_snippets
 from utils.model_load import (
     _get_or_load_embedder,
-    _get_or_load_embedder_async,
-    _invalidate_embedder_cache,
+    get_or_load_embedder_async,
+    get_vector_settings,
+    invalidate_embedder_cache,
 )
 from utils import now_kst, now_kst_string, logger
 logger = logger(__name__)
@@ -220,15 +221,6 @@ def _build_doc_name_index() -> Dict[str, str]:
         for token in _doc_name_tokens(doc):
             index.setdefault(token, doc_id)
     return index
-# -------------------------------------------------
-# Pydantic 스키마
-# -------------------------------------------------
-class RAGSearchRequest(BaseModel):
-    query: str
-    top_k: int = Field(5, gt=0)
-    user_level: int = Field(1, ge=1)
-    task_type: str = Field(..., description="doc_gen | summary | qna")
-    model: Optional[str] = None  # 내부적으로 settings에서 로드
 
 # -------------------------------------------------
 # SQLite 유틸
@@ -419,7 +411,7 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         if milvus_has_data(client, collection_name=ADMIN_COLLECTION):
             raise RuntimeError("Milvus 컬렉션에 기존 데이터가 남아있습니다. 먼저 /v1/admin/vector/delete-all 을 호출해 초기화하세요.")
         set_rag_settings_row(new_search=new_st, new_chunk=new_cs, new_overlap=new_ov, new_key=new_key)
-        _invalidate_embedder_cache()
+        invalidate_embedder_cache()
 
     with get_session() as session:
         s = session.query(RagSettings).filter(RagSettings.id == 1).first()
@@ -442,24 +434,7 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
     return get_vector_settings()
 
 
-def get_vector_settings() -> Dict:
-    # rag_settings 는 검색 타입/청크/오버랩만 신뢰
-    try:
-        row = get_rag_settings_row()
-    except Exception:
-        logger.error("get_rag_settings_row 실패")
-        return {
-            "embeddingModel": "unknown",
-            "searchType": "hybrid",
-            "chunkSize": 512,
-            "overlap": 64,
-        }
-    return {
-        "embeddingModel": row.get("embedding_key"),                        # ← rag_settings.embedding_key는 무시
-        "searchType": row.get("search_type", "hybrid"),
-        "chunkSize": int(row.get("chunk_size", 512)),
-        "overlap": int(row.get("overlap", 64)),
-    }
+
 
 
 def list_available_embedding_models() -> List[str]:
@@ -692,7 +667,7 @@ async def ingest_embeddings(
     - 표는 [[TABLE ...]] 머리글 유지, 이어지는 조각은 [[TABLE_CONT i/n]] 마커로 연속성 표시
     - file_keys_filter 전달 시 doc_id/파일명/스토리지 경로가 일치하는 문서만 인제스트
     """
-    tok, model, device = await _get_or_load_embedder_async(model_key)
+    tok, model, device = await get_or_load_embedder_async(model_key)
     probe_vec = hf_embed_text(tok, model, device, "probe")
     emb_dim = int(probe_vec.shape[0])
     logger.info("[Ingest] 임베딩 모델: %s, 벡터 차원: %s", model_key, emb_dim)
@@ -894,174 +869,6 @@ async def ingest_specific_files_with_levels(
     }
 
 
-# -------------------------------------------------
-# 검색 / 리랭킹 / 중복제거 분리 함수
-# -------------------------------------------------
-
-def apply_reranking(hits: List[Dict[str, Any]], query: str, top_n: int = 5) -> List[Dict[str, Any]]:
-    """
-    검색된 후보군(hits)에 대해 Reranking을 수행하고 점수 순으로 정렬하여 반환합니다.
-    """
-    if not hits:
-        return []
-
-    rerank_candidates = build_rerank_payload(hits)
-    
-    # 후보가 있으면 리랭킹 수행
-    if rerank_candidates:
-        reranked = rerank_snippets(rerank_candidates, query=query, top_n=top_n)
-        hits_sorted = []
-        for res in reranked:
-            original = res.metadata or {}
-            hits_sorted.append(
-                {
-                    "score": float(res.score),
-                    "path": original.get("path"),
-                    "chunk_idx": int(original.get("chunk_idx", 0)),
-                    "task_type": original.get("task_type"),
-                    "security_level": int(original.get("security_level", 1)),
-                    "doc_id": original.get("doc_id"),
-                    "page": int(original.get("page", 0)),
-                    "snippet": res.text,
-                }
-            )
-        return hits_sorted
-    
-    # 리랭크 후보가 없거나 실패 시 기존 점수 정렬 (Fallback)
-    return sorted(
-        hits,
-        key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
-        reverse=True,
-    )[:top_n]
-
-
-def deduplicate_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    리랭크된 결과에서 스니펫 텍스트 및 문서 청크 기준 중복을 제거합니다.
-    """
-    seen_by_snippet: dict[str, dict] = {}
-    seen_by_chunk: dict[tuple[str, int], dict] = {}
-    
-    for hit in hits:
-        doc_id = hit.get("doc_id", "")
-        chunk_idx = int(hit.get("chunk_idx", 0))
-        snippet = hit.get("snippet", "").strip()
-        
-        if not snippet:
-            continue
-        
-        chunk_key = (doc_id, chunk_idx)
-        
-        # 1) snippet_text 중복 체크
-        if snippet in seen_by_snippet:
-            existing = seen_by_snippet[snippet]
-            # 점수가 더 높으면 교체
-            if hit.get("score", 0.0) > existing.get("score", 0.0):
-                old_key = (existing.get("doc_id", ""), int(existing.get("chunk_idx", 0)))
-                if old_key in seen_by_chunk:
-                    del seen_by_chunk[old_key]
-                seen_by_snippet[snippet] = hit
-                seen_by_chunk[chunk_key] = hit
-            continue
-
-        # 2) chunk_key 중복 체크
-        if chunk_key in seen_by_chunk:
-            existing = seen_by_chunk[chunk_key]
-            if hit.get("score", 0.0) > existing.get("score", 0.0):
-                old_snippet = existing.get("snippet", "").strip()
-                if old_snippet in seen_by_snippet:
-                    del seen_by_snippet[old_snippet]
-                seen_by_chunk[chunk_key] = hit
-                seen_by_snippet[snippet] = hit
-            continue
-        
-        # 중복 아님 -> 등록
-        seen_by_snippet[snippet] = hit
-        seen_by_chunk[chunk_key] = hit
-        
-    # 점수 내림차순 정렬 반환
-    return sorted(seen_by_snippet.values(), key=lambda x: x.get("score", 0.0), reverse=True)
-
-
-async def search_vector_candidates(
-    req: RAGSearchRequest, 
-    search_type_override: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    [Pure Search] 
-    Milvus에서 벡터/하이브리드 검색만 수행하고 메타데이터를 매핑하여 반환합니다.
-    (Reranking 및 Deduplication을 수행하지 않음 -> 통합 검색 등에서 활용)
-    """
-    t0 = time.perf_counter()
-    
-    if req.task_type not in TASK_TYPES:
-        return {"hits": [], "error": f"invalid task_type: {req.task_type}"}
-
-    settings = get_vector_settings()
-    model_key = req.model or settings["embeddingModel"]
-    raw_st = (search_type_override or settings.get("searchType") or "").lower()
-    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
-
-    tok, model, device = await _get_or_load_embedder_async(model_key)
-    q_emb = hf_embed_text(tok, model, device, req.query)
-    client = get_milvus_client()
-    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=ADMIN_COLLECTION)
-
-    if ADMIN_COLLECTION not in client.list_collections():
-        return {"hits": [], "settings_used": {"model": model_key, "searchType": search_type}, "elapsed_sec": 0.0}
-
-    # 후보군 검색 (Rerank 전이므로 top_k보다 넉넉하게 가져옴)
-    candidate_limit = int(req.top_k) * 2 
-    # 최소 10개, 최대 100개 정도로 제한하는 것이 좋으나 여기선 req.top_k 기반 설정
-    if candidate_limit < 10: candidate_limit = 10
-
-    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-
-    if search_type == "vector":
-        raw_results = run_dense_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            limit=candidate_limit,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    else:
-        raw_results = run_hybrid_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            query_text=req.query,
-            limit=candidate_limit,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    
-    hits_raw = build_dense_hits(raw_results)
-    
-    # 메타데이터(텍스트 등) Fetch
-    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
-    meta_map = fetch_metadata_by_vector_ids(vector_ids)
-    
-    valid_hits = []
-    for hit in hits_raw:
-        vid = str(hit.get("vector_id") or "")
-        meta = meta_map.get(vid)
-        if meta:
-            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
-            hit["chunk_idx"] = meta.get("chunk_index")
-            hit["snippet"] = meta.get("text")
-            hit["path"] = meta.get("source_path", hit.get("path"))
-            valid_hits.append(hit)
-
-    elapsed = round(time.perf_counter() - t0, 4)
-    return {
-        "hits": valid_hits,
-        "settings_used": {"model": model_key, "searchType": search_type},
-        "elapsed_sec": elapsed
-    }
-
-
 async def search_documents(req: RAGSearchRequest, 
                             search_type_override: Optional[str] = None,
                             rerank_top_n: Optional[int] = None) -> Dict:
@@ -1154,7 +961,7 @@ async def execute_search(
 
 async def delete_collection(collection_key: str | None = None):
     COLLECTIONS = app_config["retrieval"]["milvus"]["collections"]
-    _invalidate_embedder_cache()
+    invalidate_embedder_cache()
     client = get_milvus_client()
     targets = []
 
@@ -1430,4 +1237,82 @@ async def override_levels_and_ingest(req: OverrideLevelsRequest):
         "updated_meta_entries": updated,
         "inserted_chunks": int(res.get("inserted_chunks", 0)),
         "target_count": len(target_tokens),
+    }
+
+async def search_vector_candidates(
+    req: RAGSearchRequest, 
+    search_type_override: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    [Pure Search] 
+    Milvus에서 벡터/하이브리드 검색만 수행하고 메타데이터를 매핑하여 반환합니다.
+    (Reranking 및 Deduplication을 수행하지 않음 -> 통합 검색 등에서 활용)
+    """
+    t0 = time.perf_counter()
+    
+    if req.task_type not in TASK_TYPES:
+        return {"hits": [], "error": f"invalid task_type: {req.task_type}"}
+
+    settings = get_vector_settings()
+    model_key = req.model or settings["embeddingModel"]
+    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
+
+    tok, model, device = await get_or_load_embedder_async(model_key)
+    q_emb = hf_embed_text(tok, model, device, req.query)
+    client = get_milvus_client()
+    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=ADMIN_COLLECTION)
+
+    if ADMIN_COLLECTION not in client.list_collections():
+        return {"hits": [], "settings_used": {"model": model_key, "searchType": search_type}, "elapsed_sec": 0.0}
+
+    # 후보군 검색 (Rerank 전이므로 top_k보다 넉넉하게 가져옴)
+    candidate_limit = int(req.top_k) * 2 
+    # 최소 10개, 최대 100개 정도로 제한하는 것이 좋으나 여기선 req.top_k 기반 설정
+    if candidate_limit < 10: candidate_limit = 10
+
+    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
+
+    if search_type == "vector":
+        raw_results = run_dense_search(
+            client,
+            collection_name=ADMIN_COLLECTION,
+            query_vector=q_emb.tolist(),
+            limit=candidate_limit,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+    else:
+        raw_results = run_hybrid_search(
+            client,
+            collection_name=ADMIN_COLLECTION,
+            query_vector=q_emb.tolist(),
+            query_text=req.query,
+            limit=candidate_limit,
+            filter_expr=filter_expr,
+            output_fields=DEFAULT_OUTPUT_FIELDS,
+        )
+    
+    hits_raw = build_dense_hits(raw_results)
+    
+    # 메타데이터(텍스트 등) Fetch
+    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
+    meta_map = fetch_metadata_by_vector_ids(vector_ids)
+    
+    valid_hits = []
+    for hit in hits_raw:
+        vid = str(hit.get("vector_id") or "")
+        meta = meta_map.get(vid)
+        if meta:
+            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
+            hit["chunk_idx"] = meta.get("chunk_index")
+            hit["snippet"] = meta.get("text")
+            hit["path"] = meta.get("source_path", hit.get("path"))
+            valid_hits.append(hit)
+
+    elapsed = round(time.perf_counter() - t0, 4)
+    return {
+        "hits": valid_hits,
+        "settings_used": {"model": model_key, "searchType": search_type},
+        "elapsed_sec": elapsed
     }

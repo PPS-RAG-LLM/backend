@@ -14,7 +14,6 @@ from service.admin.manage_vator_DB import (
     override_levels_and_ingest,
     # 설정
     set_vector_settings,
-    get_vector_settings,
     list_available_embedding_models,
     get_security_level_rules_all,
     upsert_security_level_for_task,
@@ -33,6 +32,7 @@ from service.preprocessing.rag_preprocessing import extract_documents
 from storage.db_models import DocumentType
 from utils import logger
 from utils.documents import save_raw_file
+from utils.model_load import get_vector_settings
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],

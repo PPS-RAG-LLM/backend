@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from service.admin.manage_vator_DB import search_vector_candidates, RAGSearchRequest # type: ignore
+from service.admin.manage_vator_DB import search_vector_candidates # type: ignore
+from service.retrieval.admin_search import RAGSearchRequest
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
 
 
