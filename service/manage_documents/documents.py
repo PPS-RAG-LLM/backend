@@ -340,6 +340,7 @@ async def upload_document(
                 "text": rec["text"],
             }
         )
+    logger.info(f"###############\n\n\worksapce_id: {workspace_id}\n\n\n###############")
 
     try:
         insert_result = client.insert(collection_name=collection_name, data=milvus_rows)
