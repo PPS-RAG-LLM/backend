@@ -21,7 +21,6 @@ from repository.documents import (
     fetch_document_vectors,
     insert_document_vectors,
     insert_workspace_document,
-    # insert_workspace_document,
     list_doc_ids_by_workspace,
     upsert_document,
 )
@@ -398,6 +397,7 @@ async def upload_document(
             insert_workspace_document(
                 doc_id=doc_id,
                 filename=filename,
+                docpath=raw_path,
                 workspace_id=target_workspace_id,
                 metadata={
                     "chunks": len(chunk_records),
