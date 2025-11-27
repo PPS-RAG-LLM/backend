@@ -78,7 +78,7 @@ def _cfg_path(key: str, fallback: str) -> Path:
     value = _RETRIEVAL_PATHS.get(key, fallback)
     return (PROJECT_ROOT / Path(value)).resolve()
 
-RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/user_data/row_data")
+RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/raw_files/")
 MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
 VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
 
@@ -335,7 +335,7 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
 
     preview = (clean_text(text[:200].replace("\n", " ")) + "…") if text else ""
     rel_source_path = Path(rel_path).as_posix()
-    source_entry = str(Path("row_data") / rel_source_path)
+    source_entry = str(Path("admin_raw_data") / rel_source_path)
     _, parsed_version = parse_doc_version(raw_path.stem)
     version = int(parsed_version) if parsed_version else 0
     extraction_info = {

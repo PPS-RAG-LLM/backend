@@ -82,7 +82,6 @@ def _record_llm_test_document(
     )
 # ===== 외부 의존 (기존 모듈 재사용) =====
 from service.admin.manage_admin_LLM import (
-    _connect,
     _lookup_model_by_name,
     _fill_template,
     _fetch_prompt_full,
