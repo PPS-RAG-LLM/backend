@@ -4,6 +4,7 @@ from utils import logger
 from pydantic import BaseModel
 from typing import List
 from service.manage_documents import upload_documents, delete_documents_by_ids
+from utils.documents import save_raw_file
 
 logger = logger(__name__)
 router = APIRouter(tags=["Document"], prefix="/v1/document")
@@ -18,9 +19,16 @@ async def upload_endpoint(
     logger.info(
         f"upload_endpoint: user_id={user_id}, files={len(files)}, addToWorkspaces={addToWorkspaces}"
     )
+    rel_paths = [] # RAW 저장
+    for f in files:
+        data = await f.read()
+        rel_paths.append(save_raw_file(f.filename, folder="user_raw_data", content=data))
+        await f.seek(0)
+        
     return await upload_documents(
         user_id=user_id,
         files=files,
+        raw_paths=rel_paths,
         add_to_workspaces=addToWorkspaces,
     )
 
