@@ -21,7 +21,7 @@ def _resolve_model_root() -> Path:
         "model_root_dir", _USER_DOCS_CFG.get("embedding_model_dir", "storage/embedding-models")
     )
     rel = Path(path_value)
-    base = rel if rel.is_absolute() else (PROJECT_ROOT / rel)
+    base = (PROJECT_ROOT / rel)
     return base.resolve()
 
 
@@ -78,6 +78,10 @@ def _load_hf_embedder_tuple(model_key: str) -> Tuple[Any, Any, Any]:
     from service.retrieval.common import get_or_load_hf_embedder
 
     _, model_dir = resolve_model_input(model_key)
+    if not model_dir.exists():
+        # fallback or error
+        pass
+
     return get_or_load_hf_embedder(str(model_dir))
 
 
@@ -103,44 +107,28 @@ def get_model_manager():
     """지연 로딩으로 MODEL_MANAGER 가져오기"""
     global _MODEL_MANAGER
     if _MODEL_MANAGER is None:
-        from service.admin.manage_admin_LLM import _MODEL_MANAGER as MGR
-        _MODEL_MANAGER = MGR
+        from utils.llms.registry import ModelManager
+        _MODEL_MANAGER = ModelManager()
     return _MODEL_MANAGER
 
 
 def invalidate_embedder_cache() -> None:
-    global _EMBED_CACHE, _EMBED_ACTIVE_KEY
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
         _EMBED_ACTIVE_KEY = None
 
-def get_vector_settings() -> Dict:
-    # rag_settings 는 검색 타입/청크/오버랩만 신뢰
-    try:
-        row = get_rag_settings_row()
-    except Exception:
-        logger.error("get_rag_settings_row 실패")
-        return {
-            "embeddingModel": "unknown",
-            "searchType": "hybrid",
-            "chunkSize": 512,
-            "overlap": 64,
-        }
-    return {
-        "embeddingModel": row.get("embedding_key"),                        # ← rag_settings.embedding_key는 무시
-        "searchType": row.get("search_type", "hybrid"),
-        "chunkSize": int(row.get("chunk_size", 512)),
-        "overlap": int(row.get("overlap", 64)),
-    }
-
 
 async def get_or_load_embedder_async(model_key: str, preload: bool = False):
     """
-    비동기 래퍼: blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
-    이벤트 루프 블로킹 방지
+    비동기 환경에서 임베딩 모델(토크나이저, 모델, 디바이스) 로드를 쓰레드풀로 수행.
     """
     loop = asyncio.get_running_loop()
-    # blocking 함수(_get_or_load_embedder)를 스레드풀에서 실행
+
+    # 캐시가 이미 있으면 즉시 반환 (동기 체크)
+    with _EMBED_LOCK:
+        if _EMBED_ACTIVE_KEY == model_key and model_key in _EMBED_CACHE:
+            return _EMBED_CACHE[model_key]
+
     return await loop.run_in_executor(None, _get_or_load_embedder, model_key, preload)
 
 
@@ -163,3 +151,4 @@ def _get_or_load_embedder(model_key: str, preload: bool = False):
         _EMBED_CACHE[model_key] = (tok, model, device)
         _EMBED_ACTIVE_KEY = model_key
         return _EMBED_CACHE[model_key]
+

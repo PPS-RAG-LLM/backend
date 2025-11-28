@@ -57,9 +57,7 @@ from service.retrieval.pipeline import (
     build_rerank_payload,
 )
 from utils.model_load import (
-    _get_or_load_embedder,
     get_or_load_embedder_async,
-    get_vector_settings,
     invalidate_embedder_cache,
 )
 from utils import now_kst, now_kst_string, logger
@@ -80,8 +78,8 @@ def _cfg_path(key: str, fallback: str) -> Path:
     return (PROJECT_ROOT / Path(value)).resolve()
 
 RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/raw_files/")
-MODEL_ROOT_DIR = _cfg_path("model_root_dir", "storage/embedding-models")
 VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
+MODEL_ROOT_DIR = Path(app_config.get("models_dir", {}).get("embedding_model_path", "storage/embedding-models"))
 
 DATABASE_CFG = app_config.get("database", {}) or {}
 SQLITE_DB_PATH = (PROJECT_ROOT / Path(DATABASE_CFG.get("path", "storage/pps_rag.db"))).resolve()
@@ -364,18 +362,6 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
         "version": int(version),
     }
     
-def warmup_active_embedder(logger_func=print):
-    """
-    서버 기동 시 호출용(선택). 활성 모델 키를 조회해 캐시를 채움.
-    실패해도 서비스는 실제 사용 시 지연 로딩으로 복구됨.
-    """
-    try:
-        key = get_rag_settings_row().get("embedding_key")
-        logger_func(f"[warmup] 활성 임베딩 모델: {key}. 로딩 시도...")
-        _get_or_load_embedder(key, preload=True)
-        logger_func(f"[warmup] 로딩 완료: {key}")
-    except Exception as e:
-        logger_func(f"[warmup] 로딩 실패(지연 로딩으로 복구 예정): {e}")
 
 # ---------------- Vector Settings ----------------
 def set_vector_settings(embed_model_key: Optional[str] = None,
@@ -387,10 +373,10 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
     - 임베딩 모델 변경 시 기존 데이터 존재하면 차단, 활성 모델 갱신 및 캐시 무효화
     - search_type/청크/오버랩은 rag_settings에만 반영
     """
-    cur = get_vector_settings()
-    key_now = cur.get("embeddingModel")
-    st_now = (cur.get("searchType") or "hybrid").lower()
-    cs_now = int(cur.get("chunkSize") or 512)
+    cur = get_rag_settings_row()
+    key_now = cur.get("embedding_key")
+    st_now = (cur.get("search_type") or "hybrid").lower()
+    cs_now = int(cur.get("chunk_size") or 512)
     ov_now = int(cur.get("overlap") or 64)
 
     new_key = embed_model_key or key_now
@@ -431,10 +417,14 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         s.updated_at = now_kst()
         session.commit()
 
-    return get_vector_settings()
-
-
-
+    # Refresh and return in API format
+    updated = get_rag_settings_row()
+    return {
+        "embeddingModel": updated.get("embedding_key"),
+        "searchType": updated.get("search_type", "hybrid"),
+        "chunkSize": int(updated.get("chunk_size", 512)),
+        "overlap": int(updated.get("overlap", 64)),
+    }
 
 
 def list_available_embedding_models() -> List[str]:
@@ -456,6 +446,7 @@ def list_available_embedding_models() -> List[str]:
             models.append(model_name)
     
     return sorted(models)
+
 
 # ------------- Security Level (per task) ---------
 def _parse_at_string_to_keywords(value: str) -> List[str]:
@@ -831,7 +822,7 @@ async def ingest_specific_files_with_levels(
         return {"error": "저장/유효성 검사 후 남은 파일이 없습니다."}
 
     # [Refactor] ingest_common을 사용하여 로직 간소화
-    settings = get_vector_settings()
+    settings = get_rag_settings_row()
     coll_eff = collection_name or ADMIN_COLLECTION
 
     # Callback to handle vector insertion (equivalent to insert_document_vectors)
@@ -842,7 +833,7 @@ async def ingest_specific_files_with_levels(
             insert_document_vectors(
                 doc_id=doc_id,
                 collection=coll_eff,
-                embedding_version=settings["embeddingModel"],
+                embedding_version=settings["embedding_key"],
                 vectors=records,
             )
         except Exception:
@@ -1222,8 +1213,8 @@ async def override_levels_and_ingest(req: OverrideLevelsRequest):
         updated += 1
         target_tokens.append(doc_id)
 
-    settings = get_vector_settings()
-    model_key = settings.get("embeddingModel")
+    settings = get_rag_settings_row()
+    model_key = settings.get("embedding_key")
 
     res = await ingest_embeddings(
         model_key=model_key,
@@ -1253,9 +1244,9 @@ async def search_vector_candidates(
     if req.task_type not in TASK_TYPES:
         return {"hits": [], "error": f"invalid task_type: {req.task_type}"}
 
-    settings = get_vector_settings()
-    model_key = req.model or settings["embeddingModel"]
-    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    settings = get_rag_settings_row()
+    model_key = req.model or settings["embedding_key"]
+    raw_st = (search_type_override or settings.get("search_type") or "").lower()
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await get_or_load_embedder_async(model_key)

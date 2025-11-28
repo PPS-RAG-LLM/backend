@@ -7,48 +7,40 @@ from pathlib import Path
 import json
 from config import config
 
-DOC_INFO_DIR = Path(config["user_documents"]["doc_info_dir"])
-
-def _safe_read_json(path: Path) -> Dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
 
 def _guess_mime_from_title_or_name(title: str, fallback_name: str) -> str:
     # title(원본 파일명) 우선, 없으면 documents-info 파일명 사용
-    name = (title or "").strip() or (fallback_name or "").strip()
-    mimetype, _ = guess_type(name)
-    return mimetype or "application/octet-stream"
+    target = title or fallback_name
+    mime, _ = guess_type(target)
+    return mime or "application/octet-stream"
 
-def _resolve_docinfo_path(stored_path: str) -> Path:
-    p = Path(stored_path)
-    if p.exists():
-        return p
-    # 상대경로 또는 베이스만 다른 경우: 폴백으로 documents-info 폴더 + basename
-    return DOC_INFO_DIR / Path(stored_path).name
 
-def _build_local_file_item(docinfo_path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # documents-info JSON의 기본 필드
-    doc_id   = str(payload.get("id") or "").strip()
-    title    = (payload.get("title") or "").strip()
-    url      = (payload.get("url") or "").strip()
-    name     = docinfo_path.name
-    mime     = _guess_mime_from_title_or_name(title, name)
+def _build_db_file_item(doc_row: Dict[str, Any]) -> Dict[str, Any]:
+    """DB 조회 결과(doc_row)를 프론트엔드 응답 스키마로 변환"""
+    doc_id = str(doc_row.get("doc_id") or "").strip()
+    filename = str(doc_row.get("filename") or "").strip()
+    source_path = str(doc_row.get("source_path") or "").strip()
+    
+    # docpath는 실제 경로 혹은 가상의 식별자일 수 있음
+    # 여기서는 filename을 title/name으로 사용
+    
+    mime = _guess_mime_from_title_or_name(filename, source_path)
+    
     return {
-        "name": name,
+        "name": filename or Path(source_path).name or "unknown",
         "type": mime,
         "id": doc_id,
-        "url": url,                 # 현재 업로드 로직은 빈 문자열일 수 있음
-        "title": title or name,
-        "cached": False,
+        "url": "",  # S3/Presigned URL 등이 있다면 여기서 처리
+        "title": filename,
+        "cached": True,  # DB에 있으면 cached로 간주
     }
+
 
 def list_local_documents_for_workspace(user_id: int, slug: str) -> Dict[str, Any]:
     """
     워크스페이스 슬러그로 등록된 문서 목록을 반환한다.
-    - DB(documents)에서 doc_id/filename/docpath를 조회
-    - docpath로 documents-info JSON을 읽어 응답 스키마로 매핑
+    - 기존: 파일시스템(documents-info JSON) 조회
+    - 변경: DB(documents, workspace_documents) 조회
     """
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     if not workspace_id:
@@ -58,22 +50,7 @@ def list_local_documents_for_workspace(user_id: int, slug: str) -> Dict[str, Any
 
     items: List[Dict[str, Any]] = []
     for r in rows:
-        docpath = str(r.get("docpath") or "").strip()
-        if not docpath:
-            continue
-        p = _resolve_docinfo_path(docpath)
-        if not p.exists():
-            # 파일이 삭제되었을 수 있음 → 최소 정보만 반환
-            items.append({
-                "name": Path(docpath).name,
-                #"type": "application/pdf", # TODO : 파일 타입 추가
-                "id": str(r.get("doc_id") or "").strip(),
-                "url": "",
-                "title": r.get("filename"),
-                "cached": False,
-            })
-            continue
-        payload = _safe_read_json(p)
-        items.append(_build_local_file_item(p, payload))
+        # DB 레코드 기반 아이템 생성
+        items.append(_build_db_file_item(r))
 
     return {"localFiles": items}

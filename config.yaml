@@ -47,20 +47,18 @@ workspace:
   similarity_threshold: 0.25
   temperature: 0.7
 
-user_documents:
-  doc_info_dir: storage/documents/documents-info
-  vector_cache_dir: storage/documents/vector-cache
-  embedding_model_dir: storage/embedding-models
-
-llm_models_path: storage/models
+models_dir:
+  llm_models_path: storage/models
+  embedding_model_path: storage/embedding-models
+  rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
+# model_root_dir: storage/embedding-models
 
 retrieval:
+  temp_ttl_hours: 12
   paths:
     storage_dir: storage
-    user_data_root: storage/raw_files 
+    user_data_root: storage/raw_files # 사용자 "/user_raw_data" & "/admin_raw_data" 저장 경로
     resources_dir: service/admin/resources
-    model_root_dir: storage/embedding-models
-    rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
     val_session_root: storage/val_data
   milvus:
     uri: http://localhost:19530

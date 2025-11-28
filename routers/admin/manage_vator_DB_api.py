@@ -32,7 +32,6 @@ from service.preprocessing.rag_preprocessing import extract_documents
 from storage.db_models import DocumentType
 from utils import logger
 from utils.documents import save_raw_file
-from utils.model_load import get_vector_settings
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -159,12 +158,20 @@ async def update_vector_settings(body: VectorSettingsBody):
         return {"error": "백터 DB설정 불가(백터 DB를 전부 삭제)", "detail": str(e)}
 
 
+from repository.rag_settings import get_rag_settings_row
+
 @router.get(
     "/admin/vector/settings",
     summary="현재 벡터 설정(임베딩 모델/검색 방식) 조회",
 )
 async def read_vector_settings():
-    return get_vector_settings()
+    row = get_rag_settings_row()
+    return {
+        "embeddingModel": row.get("embedding_key"),
+        "searchType": row.get("search_type", "hybrid"),
+        "chunkSize": int(row.get("chunk_size", 512)),
+        "overlap": int(row.get("overlap", 64)),
+    }
 
 
 @router.get(
@@ -236,13 +243,13 @@ async def rag_full_ingest(files: List[UploadFile] = File(...)):
 
     extract_result = await extract_documents(rel_paths)
     # 3) 인제스트
-    settings = get_vector_settings()
+    settings = get_rag_settings_row()
 
     # 2) 추출
 
     ingest_result = await ingest_embeddings(
-        model_key=settings["embeddingModel"],
-        max_token=int(settings["chunkSize"]),
+        model_key=settings["embedding_key"],
+        max_token=int(settings["chunk_size"]),
         overlab=int(settings["overlap"]),
     )
     logger.debug(f"\n\n[API] ingest_result: {ingest_result}\n\n")
@@ -257,7 +264,7 @@ async def rag_full_ingest(files: List[UploadFile] = File(...)):
 async def rag_search_endpoint(body: ExecuteBody):
     print(f"🎯 [API] 관리자 검색 엔드포인트 호출: question='{body.question}', topK={body.topK}, rerank_topN={body.rerank_topN}")
     
-    model_key = get_vector_settings()["embeddingModel"]
+    model_key = get_rag_settings_row()["embedding_key"]
     print(f"🎯 [API] execute_search 호출 시작...")
     
     result = await execute_search(
@@ -279,7 +286,7 @@ async def rag_search_endpoint(body: ExecuteBody):
     "/user/vector/execute", summary="사용자 검색"
 )
 async def user_rag_search_endpoint(body: ExecuteBody):
-    model_key = get_vector_settings()["embeddingModel"]
+    model_key = get_rag_settings_row()["embedding_key"]
     return await execute_search(
         question=body.question,
         top_k=body.topK,  # 임베딩 후보 개수

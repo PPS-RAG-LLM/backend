@@ -19,6 +19,7 @@ from repository.documents import (
     fetch_metadata_by_vector_ids,
 )
 from repository.prompt_templates.common import repo_find_default_template
+from repository.rag_settings import get_rag_settings_row
 from service.retrieval.admin_search import RAGSearchRequest
 from storage.db_models import DocumentType
 from service.retrieval.common import hf_embed_text
@@ -94,8 +95,7 @@ from service.admin.manage_vator_DB import (
     get_security_level_rules_all,         # (sid, dir) 생성
     parse_doc_version,
 )
-from utils.model_load import get_or_load_embedder_async, get_vector_settings
-from utils.time import now_kst_string
+from utils import now_kst_string, get_or_load_embedder_async, logger
 
 # ===== (옵션) 모델 스트리머 (가능 시 스트림, 실패 시 _simple_generate 폴백) =====
 try:
@@ -486,9 +486,9 @@ async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_ove
     if req.task_type not in TASK_TYPES:
         return {"error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"}
 
-    settings = get_vector_settings()
-    model_key = req.model or settings["embeddingModel"]
-    raw_st = (search_type_override or settings.get("searchType") or "").lower()
+    settings = get_rag_settings_row()
+    model_key = req.model or settings["embedding_key"]
+    raw_st = (search_type_override or settings.get("search_type") or "").lower()
     search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
 
     tok, model, device = await get_or_load_embedder_async(model_key)
@@ -700,7 +700,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         return {"error": "invalid sid"}
 
     coll = meta.get("collection")
-    settings = get_vector_settings()
+    settings = get_rag_settings_row()
     all_rules = get_security_level_rules_all()
     tasks = task_types or list(TASK_TYPES)
 
@@ -726,7 +726,7 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
             insert_document_vectors(
                 doc_id=doc_id,
                 collection=coll,
-                embedding_version=str(settings["embeddingModel"]),
+                embedding_version=str(settings["embedding_key"]),
                 vectors=records,
             )
         except Exception:

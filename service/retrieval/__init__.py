@@ -8,17 +8,15 @@ from service.retrieval.unified import unified_search  # noqa: F401
 from service.retrieval.common import (  # noqa: F401
     embed_text,
     cosine_similarity,
-    get_embedding_model,
-    get_document_title,
-    load_document_vectors,
+    # get_document_title,
+    # load_document_vectors,
 )
 
 __all__ = [
     "unified_search",
     "embed_text",
     "cosine_similarity",
-    "get_embedding_model",
-    "get_document_title",
-    "load_document_vectors",
+    # "get_document_title",
+    # "load_document_vectors",
 ]
 

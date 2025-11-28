@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import tiktoken
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,19 +34,11 @@ from service.vector_db.milvus_store import (
 )
 from storage.db_models import DocumentType
 from repository.rag_settings import get_rag_settings_row
-from utils import load_embedding_model, logger, make_safe_filename, now_kst
+from utils import load_embedding_model, logger, now_kst
 
 logger = logger(__name__)
 
-# storage 루트: config의 DB 경로 기준(상대경로 유지)
-SAVE_DOC_DIR = config["user_documents"]
-DOC_INFO_DIR = Path(SAVE_DOC_DIR["doc_info_dir"])
-VEC_CACHE_DIR = Path(SAVE_DOC_DIR["vector_cache_dir"])
-
-# TODO : 임베딩 모델 데이터베이스 조회 후 사용 로직 필요
-EMBEDDING_MODEL_DIR = Path(SAVE_DOC_DIR["embedding_model_dir"])
-TEMP_DOC_CFG = config.get("temp_documents", {}) or {}
-TEMP_TTL_HOURS = int(TEMP_DOC_CFG.get("ttl_hours", 12))
+TEMP_TTL_HOURS = int(config["retrieval"]["temp_ttl_hours"])
 
 def _get_embedding_key() -> str:
        rag = get_rag_settings_row()
@@ -156,13 +147,9 @@ def _build_chunk_records(page_texts: List[str]) -> List[Dict[str, Any]]:
 
 
 async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
-    """sentence-transformers로 임베딩 생성. 모델은 config에서 읽고, 없으면 다국어 소형 기본값."""
+    """sentence-transformers로 임베딩 생성. 모델은 rag_settings(DB)에서 읽어옵니다."""
     import asyncio
     try:
-        model_path = EMBEDDING_MODEL_DIR
-        if not model_path.exists():
-            raise FileNotFoundError(f"임베딩 모델 경로를 찾을 수 없음: {model_path}")
-
         # 동기 블로킹 작업을 별도 쓰레드에서 실행하여 이벤트 루프 차단 방지
         def _sync_embed():
             model = load_embedding_model()
@@ -440,7 +427,6 @@ def delete_documents_by_ids(
     doc_id 기준으로 문서 메타/벡터/Milvus 레코드를 삭제한다.
     """
 
-    deleted_files = {"doc_info": 0, "vector_cache": 0}
     workspace_id: Optional[int] = None
 
     cleaned_ids = [d.strip() for d in (doc_ids or []) if isinstance(d, str) and d.strip()]
@@ -450,20 +436,20 @@ def delete_documents_by_ids(
         workspace_id = get_workspace_id_by_slug_for_user(user_id, workspace_slug)
         if not workspace_id:
             logger.warning("workspace slug not found: %s", workspace_slug)
-            return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
+            return {"deleted_doc_ids": [], "deleted_vectors": 0}
         try:
             rows = list_doc_ids_by_workspace(int(workspace_id))
         except Exception as exc:
             logger.error("list_doc_ids_by_workspace 실패: %s", exc)
-            return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
+            return {"deleted_doc_ids": [], "deleted_vectors": 0}
         owned_doc_ids = {r.get("doc_id") for r in rows if r and r.get("doc_id")}
         targets = doc_ids or list(owned_doc_ids)
         doc_ids = [d for d in targets if d in owned_doc_ids]
 
     if not doc_ids:
-        return {"deleted_doc_ids": [], "deleted_vectors": 0, "deleted_files": deleted_files}
+        return {"deleted_doc_ids": [], "deleted_vectors": 0}
 
-    deleted_files = delete_document_files(doc_ids)
+    # deleted_files = delete_document_files(doc_ds)
 
     vectors = fetch_document_vectors(doc_ids)
     deleted_vectors = 0
@@ -501,32 +487,5 @@ def delete_documents_by_ids(
     return {
         "deleted_doc_ids": doc_ids,
         "deleted_vectors": int(deleted_vectors),
-        "deleted_files": deleted_files,
+        # "deleted_files": deleted_files,
     }
-
-def delete_document_files(doc_ids: List[str]) -> Dict[str, int]:
-    """
-    doc_id 리스트에 해당하는 파일들(doc_info, vector_cache)을 삭제.
-    Returns: {"doc_info": count, "vector_cache": count}
-    """
-    deleted_files = {"doc_info": 0, "vector_cache": 0}
-    
-    for did in doc_ids:
-        # documents-info/*-{doc_id}.json
-        for p in DOC_INFO_DIR.glob(f"*-{did}.json"):
-            try:
-                p.unlink()
-                deleted_files["doc_info"] += 1
-            except Exception as e:
-                logger.warning(f"Failed to delete doc_info file {p}: {e}")
-
-        # vector-cache/{doc_id}.json
-        vc = VEC_CACHE_DIR / f"{did}.json"
-        if vc.exists():
-            try:
-                vc.unlink()
-                deleted_files["vector_cache"] += 1
-            except Exception as e:
-                logger.warning(f"Failed to delete vector_cache file {vc}: {e}")
-    
-    return deleted_files

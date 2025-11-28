@@ -9,7 +9,7 @@ from errors import (
     NotFoundError,
     not_found_error_handler,
 )
-from utils import ProcessTimeMiddleware
+from utils import ProcessTimeMiddleware, load_embedding_model
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -48,39 +48,9 @@ from routers.admin.manage_user_api import router as admin_user_router
 async def lifspan(app):
     """주기적으로 만료된 세션 정리"""
     init_db() # 스키마 1회 초기화, 이미 있으면 즉시 스킵
-    
-    # # 서버 시작 시 활성 임베딩 모델 확인 및 rag_settings 동기화
-    # try:
-    #     from utils.database import get_session
-    #     from storage.db_models import EmbeddingModel, RagSettings
-    #     from datetime import datetime
-    #     with get_session() as session:
-    #         row = (
-    #             session.query(EmbeddingModel)
-    #             .filter(EmbeddingModel.is_active == 1)
-    #             .order_by(EmbeddingModel.activated_at.desc().nullslast())
-    #             .first()
-    #         )
-    #         if row:
-    #             active_key = row.name
-    #             s = session.query(RagSettings).filter(RagSettings.id == 1).first()
-    #             if not s:
-    #                 s = RagSettings(id=1)
-    #                 session.add(s)
-    #             s.embedding_key = active_key
-    #             s.updated_at = datetime.utcnow()
-    #             session.commit()
-    #             logger.info(f"활성 임베딩 모델 확인: {active_key}")
-    #         else:
-    #             logger.warning("활성 임베딩 모델이 없습니다. embedding_models에서 is_active=1을 하나 지정하세요.")
-    # except Exception as e:
-    #     logger.error(f"임베딩 모델 확인 실패: {e}")
-
-    # (선택) 프리로드는 지연 로딩으로 대체 가능
     try:
-        from service.admin.manage_vator_DB import warmup_active_embedder
         logger.info("활성 임베딩 모델 확인 및 (선택) 프리로드...")
-        # warmup_active_embedder(logger.info)
+        load_embedding_model()
     except Exception as e:
         logger.error(f"임베딩 모델 확인/프리로드 실패: {e}")
 
@@ -181,7 +151,6 @@ app.include_router(test_error_router)
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
-
 
 
 
