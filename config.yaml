@@ -56,8 +56,7 @@ models_dir:
 retrieval:
   temp_ttl_hours: 12
   paths:
-    storage_dir: storage
-    user_data_root: storage/raw_files # 사용자 "/user_raw_data" & "/admin_raw_data" 저장 경로
+    raw_data_dir: storage/raw_files # 사용자 "/user_raw_data" & "/admin_raw_data" 저장 경로
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:

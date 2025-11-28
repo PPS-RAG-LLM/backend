@@ -48,7 +48,7 @@ async def ingest_common(
     if not inputs:
         return {"error": "No inputs provided"}
 
-    eff_model_key = settings["embeddingModel"]
+    eff_model_key = settings["embedding_key"]
     tok, model, device = await get_or_load_embedder_async(eff_model_key)
     emb_dim = int(hf_embed_text(tok, model, device, "probe").shape[0])
 

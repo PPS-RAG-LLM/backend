@@ -62,10 +62,9 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
         logger.debug(f"FILTER_EXPR: {filter_expr}")
         logger.debug(f"OUTPUT_FIELDS: {output_fields}")
         logger.debug(f"QUERY: {query}")
-        logger.debug(f"QUERY_VEC: {query_vec[:100]}")
+        logger.debug(f"QUERY_VEC: {query_vec[:50]}")
         logger.debug(f"LIMIT: {top_k}")
         logger.debug(f"COLLECTION_NAME: {self.collection_name}")
-        logger.debug(f"CLIENT: {client}")
 
         if mode == "hybrid":
             raw_hits = run_hybrid_search(
