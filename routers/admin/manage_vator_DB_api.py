@@ -21,6 +21,7 @@ from service.admin.manage_vator_DB import (
     # 파이프라인
     ingest_embeddings,
     execute_search,
+    ingest_specific_files_with_levels,
     # 관리
     list_indexed_files,
     list_indexed_files_overview,
@@ -422,7 +423,7 @@ def _parse_level_for_tasks_flex(
     raise ValueError('level_for_tasks 파싱 실패. 예) {"qna":2,"summary":1} 또는 "qna:2,summary:1" 또는 "2"')
     
 @router.post("/admin/vector/override-levels-upload", 
-    summary="-- 단일 파일 올리기 "
+    summary="파일 업로드 후 레벨 지정하여 바로 전처리 및 인제스트 (full-ingest 방식)"
     )
 async def override_levels_upload_form(
     files: List[UploadFile] = File(...),
@@ -432,33 +433,43 @@ async def override_levels_upload_form(
     summary_level: Optional[str] = Form(None),
     doc_gen_level: Optional[str] = Form(None),
 ):
-    # # 1) 파일 저장
-    saved_original_names: List[str] = []
-    saved_rel_paths : List[str] = []
-    for f in files:
-        # save_raw_file이 상대 경로를 돌려주도록 수정, 
-        # 단건 전처리/등록을 담당하는 새 헬퍼들을 추가
-        content = await f.read()
-        rel_path = save_raw_file(f.filename, folder="row_data", content=content)
-        saved_original_names.append(f.filename)
-        saved_rel_paths.append(rel_path)
-
-    processed_docs = await process_saved_raw_files(saved_rel_paths)
-    target_tokens = [doc["doc_id"] for doc in processed_docs] or saved_original_names
-    logger.debug(f"🎯 [API] target_tokens: {target_tokens}")
-
-    # 3) task 목록
-    tlist = None
-    if tasks:
-        tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES] or None
-
-    # 4) 레벨 파싱(유연)
     try:
-        lvmap = _parse_level_for_tasks_flex(level_for_tasks, qna_level, summary_level, doc_gen_level)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # 1) task 목록 파싱
+        tlist = None
+        if tasks:
+            tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES]
+            if not tlist:
+                tlist = None
 
-    # 5) 지정 파일만 레벨 오버라이드 + 해당 파일만 인제스트
-    req = OverrideLevelsRequest(files=target_tokens, level_for_tasks=lvmap, tasks=tlist)
-    result = await override_levels_and_ingest(req)
-    return {"saved": saved_original_names, "ingest_result": result}
+        # 2) 레벨 파싱(유연) - 레벨 지정은 필수입니다 (태그 기반 자동 결정 비활성화)
+        try:
+            lvmap = _parse_level_for_tasks_flex(level_for_tasks, qna_level, summary_level, doc_gen_level)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # 레벨이 지정되지 않았으면 에러 반환
+        if not lvmap:
+            raise HTTPException(
+                status_code=400, 
+                detail="보안레벨을 지정해야 합니다. level_for_tasks, qna_level, summary_level, doc_gen_level 중 하나 이상을 제공하세요."
+            )
+
+        # 3) ingest_specific_files_with_levels를 사용하여 파일 업로드 → 전처리 → 인제스트 한번에 처리
+        # 이 함수는 지정된 레벨로 바로 올립니다 (태그 기반 자동 결정 없음)
+        result = await ingest_specific_files_with_levels(
+            uploads=files,
+            tasks=tlist,
+            level_for_tasks=lvmap,
+            collection_name=None,  # 기본값 사용
+        )
+
+        saved_names = [f.filename for f in files]
+        return {
+            "saved": saved_names,
+            "ingest_result": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("override-levels-upload 처리 중 오류 발생")
+        raise HTTPException(status_code=500, detail=f"처리 중 오류: {str(e)}")

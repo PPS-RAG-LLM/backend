@@ -797,6 +797,10 @@ async def ingest_specific_files_with_levels(
         for t in tasks_eff:
             lvl_map[t] = max(1, int(level))
 
+    # 레벨이 지정되지 않았으면 에러 반환 (태그 기반 자동 결정 비활성화)
+    if not lvl_map:
+        return {"error": "보안레벨을 지정해야 합니다. level_for_tasks 또는 level 파라미터를 제공하세요."}
+
     # 업로드 저장(임시) + 경로 합치기
     run_id = uuid.uuid4().hex[:8]
     tmp_root = (VAL_SESSION_ROOT / "adhoc" / run_id).resolve()
@@ -825,6 +829,29 @@ async def ingest_specific_files_with_levels(
     settings = get_rag_settings_row()
     coll_eff = collection_name or ADMIN_COLLECTION
 
+    # Pre-ingest callback: 문서를 documents 테이블에 먼저 저장 (FOREIGN KEY 제약 조건 해결)
+    def _pre_ingest_callback(info: Dict[str, Any]) -> None:
+        doc_id = info.get("doc_id")
+        source_path = info.get("source_path", "")
+        file_name = Path(source_path).name if source_path else str(info.get("file", ""))
+        sec_map = info.get("levels", {}) or {}
+        
+        if not doc_id:
+            return
+        
+        # documents 테이블에 문서 메타데이터 저장
+        upsert_document(
+            doc_id=doc_id,
+            doc_type=ADMIN_DOC_TYPE,
+            filename=file_name,
+            source_path=source_path,
+            security_level=_max_security_level(sec_map),
+            payload={
+                "security_levels": sec_map,
+                "version": int(info.get("version", 0)),
+            },
+        )
+
     # Callback to handle vector insertion (equivalent to insert_document_vectors)
     def _batch_callback(records: List[Dict[str, Any]], doc_id: str):
         if not records:
@@ -839,15 +866,16 @@ async def ingest_specific_files_with_levels(
         except Exception:
             logger.exception(f"document_vectors 기록 실패(doc_id={doc_id})")
 
+    # override_level_map을 사용하여 태그 기반 자동 결정을 건너뛰고 지정된 레벨로 바로 올림
     res = await ingest_common(
-        files=saved,
+        inputs=saved,
         collection_name=coll_eff,
         task_types=tasks_eff,
         settings=settings,
-        # lvl_map이 있으면 사용, 없으면 security_level_config 사용
-        override_level_map=lvl_map if lvl_map else None,
-        security_level_config=get_security_level_rules_all() if not lvl_map else None,
+        override_level_map=lvl_map,  # 지정된 레벨 사용 (태그 무시)
+        security_level_config=None,  # 태그 기반 결정 비활성화
         doc_id_generator=lambda _base: generate_doc_id(),
+        pre_ingest_callback=_pre_ingest_callback,  # 문서를 먼저 저장
         batch_callback=_batch_callback,
     )
 
