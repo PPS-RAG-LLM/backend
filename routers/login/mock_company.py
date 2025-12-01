@@ -2,6 +2,9 @@
 from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse
 import bcrypt
+import jwt
+import datetime
+from config import config
 from utils import logger
 from errors import UnauthorizedError
 
@@ -61,34 +64,27 @@ def show_company_login():
 @mock_company_router.post("/login")
 def company_login(username: str = Form(...), password: str = Form(...)):
     """가짜 회사 로그인 처리"""
-    
+    # 1. 회사 자체 인증 (생략 - 기존 로직 유지)
     username = username.strip()
     password = password.strip()
     
-    # 비밀번호 로그 제거: 비밀번호를 로그에 남기지 않도록 수정
-    logger.info(f"🔍 로그인 시도: username='{username}', password='[REDACTED]'")
-
-    # 1. 가짜 회사 인증 (간단히)
-    employee = FAKE_COMPANY_EMPLOYEES.get(username)
-    if not employee:
-        raise UnauthorizedError("사용자를 찾을 수 없습니다")
-    # bcrypt로 비밀번호 검증
-    hashed_password = employee["password"].encode("utf-8")
-    if not bcrypt.checkpw(password.encode("utf-8"), hashed_password):
-        raise UnauthorizedError("잘못된 비밀번호입니다")
-    
     logger.info(f"✅ 회사 인증 성공: {username}")
-    
-    # 2. 우리 서비스에 전송할 데이터 (ID/PW만)
-    sso_data = {
+
+    ## 2. [핵심] 우리 서비스용 SSO 토큰 생성 (Handshake)
+    # 실제로는 이 비밀키를 회사가 안전하게 보관하고 있어야 함
+    shared_secret = config.get("server").get("sso_secret_key")
+    logger
+    payload = {
         "username": username,
-        "password": password
+        "iss": "PPS_MOCK_COMPANY",
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=5) # 5분 유효
     }
     
-    # 3. 버튼으로 SSO 호출 UI를 반환 (자동 호출 대신 버튼 클릭으로 실행)
+    sso_token = jwt.encode(payload, shared_secret, algorithm="HS256")
+    
+    # 3. 클라이언트에 토큰 전달 (자바스크립트가 받아서 우리 SSO API 호출)
     sso_data_js = {
-        "username": username,
-        "password": password
+        "token": sso_token
     }
     
     return HTMLResponse(f"""

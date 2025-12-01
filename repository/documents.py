@@ -54,6 +54,8 @@ def upsert_document(
             filename=filename,
             source_path=source_path,
             payload=payload,
+            created_at=now_kst(),
+            updated_at=now_kst(),
         )
         update_stmt = insert_stmt.on_conflict_do_update(
             index_elements=[Document.doc_id],
@@ -64,6 +66,8 @@ def upsert_document(
                 "filename": insert_stmt.excluded.filename,
                 "source_path": insert_stmt.excluded.source_path,
                 "payload": insert_stmt.excluded.payload,
+                "created_at": insert_stmt.excluded.created_at,
+                "updated_at": insert_stmt.excluded.updated_at,
             },
         )
         session.execute(update_stmt)
@@ -87,6 +91,8 @@ def bulk_upsert_document_metadata(
                 "chunk_index": int(record.get("chunk_index", 0)),
                 "text": record.get("text") or "",
                 "payload": record.get("payload") or {},
+                "created_at": now_kst(),
+                "updated_at": now_kst(),
             }
         )
     with get_session() as session:
@@ -100,6 +106,8 @@ def bulk_upsert_document_metadata(
             set_={
                 "text": insert_stmt.excluded.text,
                 "payload": insert_stmt.excluded.payload,
+                "created_at": insert_stmt.excluded.created_at,
+                "updated_at": insert_stmt.excluded.updated_at,
             },
         )
         result = session.execute(update_stmt)
@@ -135,7 +143,6 @@ def insert_workspace_document(
         existing.doc_type = DocumentType.WORKSPACE.value
         existing.payload = payload
         existing.updated_at = now_kst()
-
         session.commit()
         return int(existing.id)
 
@@ -161,6 +168,8 @@ def insert_document_vectors(
                 "embedding_version": embedding_version,
                 "page": item.get("page"),
                 "chunk_index": item.get("chunk_index"),
+                "created_at": now_kst(),
+                "updated_at": now_kst(),
             }
         )
     with get_session() as session:
@@ -176,6 +185,8 @@ def insert_document_vectors(
                 "embedding_version": insert_stmt.excluded.embedding_version,
                 "page": insert_stmt.excluded.page,
                 "chunk_index": insert_stmt.excluded.chunk_index,
+                "created_at": insert_stmt.excluded.created_at,
+                "updated_at": insert_stmt.excluded.updated_at,
             },
         )
         result = session.execute(insert_stmt)
