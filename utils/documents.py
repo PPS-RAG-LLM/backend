@@ -5,8 +5,6 @@ from config import config as app_config
 from pathlib import Path
 import time
 
-_RETRIEVAL_PATHS = app_config.get("retrieval", {}).get("paths", {}) or {}
-RAW_DATA_DIR = Path(_RETRIEVAL_PATHS.get("raw_data_root", "storage/raw_files"))
 
 def generate_doc_id() -> str:
     """
@@ -15,13 +13,15 @@ def generate_doc_id() -> str:
     """
     return str(uuid.uuid4())
 
-def save_raw_file(filename: str, folder: str, content: bytes) -> str:
+def save_raw_file(filename: str, folder: Path, content: bytes) -> str:
     name = Path(filename or "uploaded").name 
-    folder_path = RAW_DATA_DIR / folder
-    folder_path.mkdir(parents=True, exist_ok=True)
-    dst = folder_path / name
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / name
     if dst.exists():
         stem, ext = dst.stem, dst.suffix
-        dst = folder_path / f"{stem}_{int(time.time())}{ext}"
+        dst = folder / f"{stem}_{int(time.time())}{ext}"
     dst.write_bytes(content)
-    return str(dst.relative_to(RAW_DATA_DIR).as_posix())
+    # folder가 절대 경로일 수 있으므로, relative_to 시 주의 필요
+    # 하지만 호출처에서 folder를 기준으로 상대 경로를 기대하므로 그대로 둠.
+    # 만약 folder가 절대 경로이고, dst도 절대 경로이면 문제 없음.
+    return str(dst.relative_to(folder).as_posix())

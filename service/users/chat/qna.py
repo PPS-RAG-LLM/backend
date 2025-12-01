@@ -1,5 +1,6 @@
 """QA 카테고리 스트리밍 로직"""
-from typing import Any, Dict, Generator, List
+import asyncio
+from typing import Any, Dict, Generator, List, Optional
 
 from errors import BadRequestError
 from repository.rag_settings import get_rag_settings_row
@@ -11,6 +12,8 @@ from service.retrieval.unified import (
 )
 from storage.db_models import DocumentType
 from service.retrieval.adapters.base import RetrievalResult
+from service.retrieval.interface import SearchRequest, retrieval_service
+from service.vector_db.milvus_store import resolve_collection
 from .common import (
     build_user_message_with_context,
     preflight_stream_chat_for_workspace,
@@ -47,11 +50,32 @@ def _insert_rag_context(
     sources_config = _resolve_rag_sources(ws.get("rag_sources"))
     logger.info("[RAG] resolved sources=%s", sources_config)
 
+    workspace_only = (
+        len(sources_config) == 1 and sources_config[0] == DocumentType.WORKSPACE.value
+    )
+    if workspace_only:
+        rerank_top_n = top_k if bool(ws.get("enable_rerank", True)) else 0
+        try:
+            workspace_results = _search_workspace_sources(
+                query=body["message"],
+                workspace_id=int(ws.get("id") or 0),
+                security_level=security_level,
+                top_k=top_k + 10,
+                rerank_top_n=rerank_top_n,
+                search_type=ws.get("vector_search_mode"),
+                model_key=model_key,
+            )
+            snippets = [_result_to_legacy_dict(res) for res in workspace_results]
+            return snippets, temp_doc_ids
+        except Exception as exc:  # pragma: no cover - 로깅
+            logger.error("Workspace RAG search failed: %s", exc)
+            return [], temp_doc_ids
+
     config = {
         "workspace_id": ws.get("id"),
         "attachments": attachments,
         "security_level": security_level,
-        "top_k": top_k+10,
+        "top_k": top_k + 10,
         "threshold": threshold,
         "sources": sources_config,
         "enable_rerank": bool(ws.get("enable_rerank", True)),
@@ -60,17 +84,7 @@ def _insert_rag_context(
         "search_type": ws.get("vector_search_mode"),
         "model_key": model_key,
     }
-    logger.debug(f"CONFIG.attachments: {attachments}")
-    logger.debug(f"CONFIG.temp_doc_ids: {temp_doc_ids}")
-    logger.debug(f"CONFIG.sources_config: {sources_config}")
-    logger.debug(f"CONFIG.security_level: {security_level}")
-    logger.debug(f"CONFIG.top_k: {top_k}")
-    logger.debug(f"CONFIG.threshold: {threshold}")
-    logger.debug(f"CONFIG.enable_rerank: {ws.get('enable_rerank', True)}")
-    logger.debug(f"CONFIG.rerank_top_n: {top_k}")
-    logger.debug(f"CONFIG.task_type: {ws.get('task_type', 'qna')}")
-    logger.debug(f"CONFIG.search_type: {ws.get('vector_search_mode')}")
-    logger.debug(f"CONFIG.model_key: {model_key}")
+    logger.debug("CONFIG: %s", config)
 
     try:
         results = unified_search(body["message"], config)
@@ -92,6 +106,75 @@ def _result_to_legacy_dict(result: RetrievalResult) -> Dict[str, Any]:
         "source": result.source,
         "page": result.page,
     }
+
+
+def _search_workspace_sources(
+    *,
+    query: str,
+    workspace_id: int,
+    security_level: int,
+    top_k: int,
+    rerank_top_n: int,
+    search_type: Optional[str],
+    model_key: Optional[str],
+) -> List[RetrievalResult]:
+    """RetrievalService를 통해 워크스페이스 문서를 직접 검색."""
+    if workspace_id <= 0:
+        return []
+
+    collection = resolve_collection(DocumentType.WORKSPACE.value)
+    request = SearchRequest(
+        query=query,
+        collection_name=collection,
+        task_type="qna",
+        security_level=security_level,
+        top_k=top_k,
+        rerank_top_n=rerank_top_n,
+        search_type=search_type,
+        model_key=model_key,
+        filters={"workspace_id": workspace_id},
+    )
+    raw = _run_retrieval_search(request)
+    hits = raw.get("hits", [])
+
+    results: List[RetrievalResult] = []
+    for hit in hits:
+        snippet = str(hit.get("snippet") or "").strip()
+        if not snippet:
+            continue
+        results.append(
+            RetrievalResult(
+                doc_id=hit.get("doc_id"),
+                title=str(hit.get("doc_id") or hit.get("path") or "workspace"),
+                text=snippet,
+                score=float(hit.get("score", 0.0)),
+                source=DocumentType.WORKSPACE.value,
+                chunk_index=int(hit.get("chunk_idx", 0)),
+                page=int(hit.get("page", 0)) if hit.get("page") is not None else None,
+                metadata={
+                    "path": hit.get("path"),
+                    "collection": collection,
+                    "workspace_id": workspace_id,
+                },
+            )
+        )
+    return results
+
+
+def _run_retrieval_search(request: SearchRequest) -> Dict[str, Any]:
+    """동기 컨텍스트에서 RetrievalService 호출."""
+
+    async def _runner() -> Dict[str, Any]:
+        return await retrieval_service.search(request)
+
+    try:
+        return asyncio.run(_runner())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_runner())
+        finally:
+            loop.close()
 
 
 def stream_chat_for_qna(

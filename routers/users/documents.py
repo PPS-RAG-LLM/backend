@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form
 from utils import logger
@@ -5,6 +6,7 @@ from pydantic import BaseModel
 from typing import List
 from service.manage_documents import upload_documents, delete_documents_by_ids
 from utils.documents import save_raw_file
+from config import config
 
 logger = logger(__name__)
 router = APIRouter(tags=["Document"], prefix="/v1/document")
@@ -19,10 +21,12 @@ async def upload_endpoint(
     logger.info(
         f"upload_endpoint: user_id={user_id}, files={len(files)}, addToWorkspaces={addToWorkspaces}"
     )
+    USER_RAW_DATA_DIR = Path(config.get("user_raw_data_dir", "storage/raw_files/user_raw_data"))
+    
     rel_paths = [] # RAW 저장
     for f in files:
         data = await f.read()
-        rel_paths.append(save_raw_file(f.filename, folder="user_raw_data", content=data))
+        rel_paths.append(save_raw_file(f.filename, folder=USER_RAW_DATA_DIR, content=data))
         await f.seek(0)
         
     return await upload_documents(

@@ -414,7 +414,7 @@ def get_list_indexed_files(collection_name: str, offset: int = 0, limit: int = 1
         stmt = (
             select(
                 DocumentVector.doc_id,
-                DocumentVector.task_type,
+                DocumentVector.task_type, # 이것때문에 vector 쪽 조회
                 func.count(DocumentVector.vector_id).label("chunk_count"),
             )
             .where(DocumentVector.collection == collection_name)

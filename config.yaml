@@ -53,10 +53,13 @@ models_dir:
   rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
 # model_root_dir: storage/embedding-models
 
+admin_raw_data_dir: storage/raw_files/admin_raw_data
+user_raw_data_dir: storage/raw_files/user_raw_data
+test_llm_raw_data_dir: storage/raw_files/test_llm
+
 retrieval:
   temp_ttl_hours: 12
   paths:
-    raw_data_dir: storage/raw_files # 사용자 "/user_raw_data" & "/admin_raw_data" 저장 경로
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
@@ -71,16 +74,3 @@ retrieval:
     - doc_gen
     - summary
     - qna
-  supported_extensions:
-    - ".pdf"
-    - ".txt"
-    - ".text"
-    - ".md"
-    - ".docx"
-    - ".pptx"
-    - ".csv"
-    - ".xlsx"
-    - ".xls"
-    - ".doc"
-    - ".ppt"
-    # - ".hwp"

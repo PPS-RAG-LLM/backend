@@ -27,7 +27,7 @@ from repository.workspace import (
     get_workspace_id_by_slug_for_user,
     update_workspace_vector_count,
 )
-from service.vector_db.milvus_store import (
+from service.vector_db import (
     ensure_collection_and_index,
     get_milvus_client,
     resolve_collection,

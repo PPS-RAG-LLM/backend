@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import time
 from typing import Optional, Dict, Any, List, Tuple
 import uuid
 from config import config as app_config
@@ -16,24 +15,18 @@ from repository.documents import (
     delete_documents_by_type_and_ids,
     insert_document_vectors,
     upsert_document,
-    fetch_metadata_by_vector_ids,
 )
 from repository.prompt_templates.common import repo_find_default_template
 from repository.rag_settings import get_rag_settings_row
-from service.retrieval.admin_search import RAGSearchRequest
 from storage.db_models import DocumentType
-from service.retrieval.common import hf_embed_text
-from service.retrieval.ingestion import ingest_common
-from service.retrieval.pipeline import DEFAULT_OUTPUT_FIELDS, build_dense_hits, build_rerank_payload
-from service.retrieval.reranker import rerank_snippets
-from service.vector_db import ensure_collection_and_index, get_milvus_client, run_dense_search, run_hybrid_search
+from service.retrieval.interface import SearchRequest, retrieval_service
+from service.vector_db import get_milvus_client
 
 logger = logging.getLogger(__name__)
 
-
 # ===== 경로/세션 고정값 =====
-BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
-PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
+# BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
+# PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
 _RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
 _RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
 _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
@@ -41,10 +34,9 @@ _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
 LLM_TEST_COLLECTION = _MILVUS_CFG.get("LLM_TEST", "llm_test_collection")
 
 TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
-SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
-_val_rel = _RETRIEVAL_PATHS.get("val_session_root", "storage/val_data") # TODO: MinIO로 마이그레이션
-VAL_SESSION_ROOT = (PROJECT_ROOT / _val_rel).resolve()
-VAL_SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+LLM_TEST_DIR = Path(app_config.get("test_llm_raw_data_dir", "storage/raw_files/test_llm"))
+LLM_TEST_DIR.mkdir(parents=True, exist_ok=True)
+
 LLM_TEST_DOC_TYPE = DocumentType.LLM_TEST.value
 
 def _session_doc_id(sid: str, base: str) -> str:
@@ -95,7 +87,7 @@ from service.admin.manage_vator_DB import (
     get_security_level_rules_all,         # (sid, dir) 생성
     parse_doc_version,
 )
-from utils import now_kst_string, get_or_load_embedder_async, logger
+from utils import now_kst_string, logger
 
 # ===== (옵션) 모델 스트리머 (가능 시 스트림, 실패 시 _simple_generate 폴백) =====
 try:
@@ -204,10 +196,10 @@ def _ensure_shared_session() -> str:
 # ===== 파일 관리 =====
 def list_shared_files() -> Dict[str, Any]:
     files = []
-    for p in sorted(VAL_SESSION_ROOT.glob("*")):
+    for p in sorted(LLM_TEST_DIR.glob("*")):
         if p.is_file() and not p.name.startswith("."):
             files.append(p.name)
-    return {"success": True, "files": files, "dir": str(VAL_SESSION_ROOT)}
+    return {"success": True, "files": files, "dir": str(LLM_TEST_DIR)}
 
 async def upload_shared_files(mem_files: List[tuple[str, bytes]]) -> Dict[str, Any]:
     """
@@ -220,7 +212,7 @@ async def upload_shared_files(mem_files: List[tuple[str, bytes]]) -> Dict[str, A
         name = Path(name).name.strip()
         if not name:
             continue
-        dst = VAL_SESSION_ROOT / name
+        dst = LLM_TEST_DIR / name
         dst.write_bytes(data)
         saved.append(str(dst))
 
@@ -246,7 +238,7 @@ async def delete_shared_files(file_names: List[str]) -> Dict[str, Any]:
     # 디스크 삭제
     removed: List[str] = []
     for n in names:
-        f = VAL_SESSION_ROOT / n
+        f = LLM_TEST_DIR / n
         try:
             if f.is_file():
                 f.unlink()
@@ -296,7 +288,7 @@ async def ensure_eval_on_shared_session(
 
     # 현재 공유 세션 및 파일 목록(정규화)
     sid = _ensure_shared_session()
-    current_files = [p.name for p in VAL_SESSION_ROOT.glob("*") if p.is_file() and not p.name.startswith(".")]
+    current_files = [p.name for p in LLM_TEST_DIR.glob("*") if p.is_file() and not p.name.startswith(".")]
     pdf_list = _canon_pdf_list(current_files)
     pdf_json = json.dumps(pdf_list, ensure_ascii=False)
 
@@ -354,14 +346,17 @@ async def ensure_eval_on_shared_session(
 
     # ===== RAG 검색 (공유 세션 전체) =====
     task_for_rag = cat if cat in ("doc_gen", "summary", "qna") else "qna"
-    req = RAGSearchRequest(
+    req = SearchRequest(
         query=(user_prompt or tmpl_name or "검색"),
-        top_k=top_k,
-        user_level=user_level,
+        collection_name=LLM_TEST_COLLECTION,
         task_type=task_for_rag,
-        model=None,
+        security_level=user_level,
+        top_k=top_k,
+        rerank_top_n=5, # 기본값 (필요시 파라미터로 받거나 조정)
+        search_type=search_type,
+        model_key=model_name, # 모델명이 있다면 사용
     )
-    rag_res = await search_documents_test(req, sid=sid, search_type_override=search_type)
+    rag_res = await retrieval_service.search(req, sid=sid, search_type_override=search_type)
     hits = rag_res.get("hits", []) if isinstance(rag_res, dict) else []
 
     # rag_refs: 실제 출처를 저장
@@ -473,132 +468,6 @@ def delete_past_runs(
         return {"success": False, "error": "delete_past_runs failed"}
 
 
-# --- add: search_documents_test ---
-async def search_documents_test(req: RAGSearchRequest, sid: str, search_type_override: Optional[str] = None, rerank_top_n: Optional[int] = None) -> Dict:
-    """
-    세션 전용 컬렉션에서만 검색 (기존 search_documents의 세션 버전)
-    """
-    meta = get_test_session(sid)
-    if not meta:
-        return {"error": "invalid sid"}
-
-    t0 = time.perf_counter()
-    if req.task_type not in TASK_TYPES:
-        return {"error": f"invalid task_type: {req.task_type}. choose one of {TASK_TYPES}"}
-
-    settings = get_rag_settings_row()
-    model_key = req.model or settings["embedding_key"]
-    raw_st = (search_type_override or settings.get("search_type") or "").lower()
-    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
-
-    tok, model, device = await get_or_load_embedder_async(model_key)
-    q_emb = hf_embed_text(tok, model, device, req.query)
-
-    client = get_milvus_client()
-    coll = meta.get("collection") 
-    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=coll)
-    if coll not in client.list_collections():
-        return {"error": "세션 컬렉션이 없습니다. 먼저 인제스트 하세요."}
-
-    embedding_candidates = int(req.top_k)  # 임베딩에서 찾을 후보 개수
-    final_results = int(rerank_top_n) if rerank_top_n is not None else 5  # 최종 반환 개수
-    candidate = max(embedding_candidates, final_results * 2)
-    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-
-    if search_type == "vector":
-        raw_results = run_dense_search(
-            client,
-            collection_name=coll,
-            query_vector=q_emb.tolist(),
-            limit=candidate,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    else:
-        raw_results = run_hybrid_search(
-            client,
-            collection_name=coll,
-            query_vector=q_emb.tolist(),
-            query_text=req.query,
-            limit=candidate,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    hits_raw = build_dense_hits(raw_results)
-
-    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
-    meta_map = fetch_metadata_by_vector_ids(vector_ids)
-    for i, hit in enumerate(hits_raw):
-        vid = str(hit.get("vector_id") or "")
-        meta = meta_map.get(vid)
-        logger.debug(f"[Search '{i}'] vector_id: {vid} meta: {(meta["text"][:50] + "...")}")
-        if meta:
-            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
-            hit["chunk_idx"] = meta.get("chunk_index")
-            hit["snippet"] = meta.get("text")
-       
-            
-    rerank_candidates = build_rerank_payload(hits_raw)
-
-    if rerank_candidates:
-        reranked = rerank_snippets(rerank_candidates, query=req.query, top_n=final_results)
-        hits_sorted = []
-        for res in reranked:
-            original = res.metadata or {}
-            hits_sorted.append(
-                {
-                    "score": float(res.score),
-                    "doc_id": original.get("doc_id"),
-                    "path": original.get("path"),
-                    "vector_id": original.get("vector_id"),
-                    "chunk_idx": int(original.get("chunk_idx", 0)),
-                    "task_type": original.get("task_type"),
-                    "security_level": int(original.get("security_level", 1)),
-                    "page": int(original.get("page", 0)),
-                    "snippet": res.text,
-                }
-            )
-    else:
-        hits_sorted = sorted(
-            hits_raw,
-            key=lambda x: x.get("score_fused", x.get("score_vec", x.get("score_sparse", 0.0))),
-            reverse=True,
-        )[:final_results]
-
-    # 리랭크 결과 로그 출력 (테스트 세션)
-    if hits_sorted:
-        top_hit = hits_sorted[0]
-        logger.info(f"✨ [Rerank-Test] 완료! 최고 점수: {top_hit.get('score', 0):.4f}")
-        logger.info(f"🏆 [Rerank-Test] 최고 스니펫 (doc_id: {top_hit.get('doc_id', 'unknown')}): {top_hit.get('snippet', '')[:100]}...")
-
-    context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
-    prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
-    elapsed = round(time.perf_counter() - t0, 4)
-
-
-    return {
-        "elapsed_sec": elapsed,
-        "settings_used": {"model": model_key, "searchType": search_type},
-        "hits": [
-            {
-                "score": float(h.get("score", h.get("score_fused", h.get("score_vec", 0.0)))),
-                "doc_id": h.get("doc_id"),
-                "path": h.get("path", ""),
-                "vector_id": h["vector_id"],
-                "chunk_idx": int(h["chunk_idx"]),
-                "task_type": h["task_type"],
-                "security_level": int(h["security_level"]),
-                "page": int(h["page"]),
-                "snippet": h["snippet"],
-            }
-            for h in hits_sorted
-        ],
-        "prompt": prompt,
-        "sid": sid,
-        "collection": coll,
-    }
-
-
 def _serialize_session(row: LlmTestSession) -> Dict[str, Any]:
     return {
         "sid": row.sid,
@@ -623,7 +492,7 @@ def create_test_session() -> Dict:
     # 혹은 나중에 원본 폴더(VAL_DIR)를 참조하기 위한 용도로 VAL_DIR 경로를 저장해도 됨
     # 여기서는 단순히 str(VAL_DIR)을 넣어 "이 세션은 이 폴더를 쓴다"는 의미로 남기거나
     # 아예 필요 없다면 빈 문자열로 처리 ㅇ
-    common_dir = str(VAL_SESSION_ROOT) 
+    common_dir = str(LLM_TEST_DIR) 
     obj = insert_test_session(sid, common_dir, LLM_TEST_COLLECTION)
     return _serialize_session(obj)
 
@@ -732,16 +601,15 @@ async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[
         except Exception:
             logger.exception(f"document_vectors 기록 실패(doc_id={doc_id})")
 
-    res = await ingest_common(
+    res = await retrieval_service.ingest_documents(
         inputs=pdf_paths,
         collection_name=coll,
         task_types=tasks,
-        settings=settings,
         security_level_config=all_rules,
         doc_id_generator=_doc_id_gen,
         pre_ingest_callback=_post_ingest,
         post_ingest_callback=_post_ingest,
         batch_callback=_batch_callback,
     )
-    
-    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": res["inserted_chunks"]}
+
+    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": res.get("inserted_chunks", 0)}

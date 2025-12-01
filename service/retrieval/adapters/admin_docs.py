@@ -5,28 +5,38 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from service.admin.manage_vator_DB import search_vector_candidates # type: ignore
-from service.retrieval.admin_search import RAGSearchRequest
+from config import config as app_config
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
+from service.retrieval.interface import SearchRequest, retrieval_service
+
+_RETRIEVAL_CFG = app_config.get("retrieval", {}) or {}
+_MILVUS_CFG = _RETRIEVAL_CFG.get("milvus", {}) or {}
+_ADMIN_COLLECTION = _MILVUS_CFG.get("ADMIN_DOCS", "admin_docs_collection")
 
 
 def _run_search_candidates(**kwargs: Any) -> Dict[str, Any]:
-    """async search_vector_candidates를 동기적으로 실행"""
-    req = RAGSearchRequest(
+    """동기 환경에서 RetrievalService.search 실행."""
+
+    request = SearchRequest(
         query=kwargs["question"],
-        top_k=kwargs["top_k"],
-        user_level=kwargs["security_level"],
-        task_type=kwargs["task_type"],
-        model=kwargs.get("model_key"),
+        collection_name=kwargs.get("collection_name", _ADMIN_COLLECTION),
+        task_type=kwargs.get("task_type", "qna"),
+        security_level=int(kwargs.get("security_level", 1)),
+        top_k=int(kwargs.get("top_k", 5)),
+        rerank_top_n=kwargs.get("rerank_top_n"),
+        search_type=kwargs.get("search_type"),
+        model_key=kwargs.get("model_key"),
     )
-    search_type = kwargs.get("search_type")
-    
+
+    async def _runner() -> Dict[str, Any]:
+        return await retrieval_service.search(request)
+
     try:
-        return asyncio.run(search_vector_candidates(req, search_type_override=search_type))
+        return asyncio.run(_runner())
     except RuntimeError:
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(search_vector_candidates(req, search_type_override=search_type))
+            return loop.run_until_complete(_runner())
         finally:
             loop.close()
 
@@ -48,14 +58,15 @@ class AdminDocsAdapter(BaseRetrievalAdapter):
         rerank_top_n: Optional[int] = None,
         source_filter: Optional[List[str]] = None,
     ) -> List[RetrievalResult]:
-        # [변경] search_vector_candidates 호출 (리랭킹 X)
         response = _run_search_candidates(
             question=query,
-            top_k=top_k, # 후보군 넉넉히
+            top_k=top_k,
             security_level=int(security_level), 
             task_type=task_type,
             model_key=model_key,
             search_type=search_type,
+            rerank_top_n=0,
+            collection_name=_ADMIN_COLLECTION,
         )
         hits = response.get("hits", []) or []
         results: List[RetrievalResult] = []
@@ -68,7 +79,7 @@ class AdminDocsAdapter(BaseRetrievalAdapter):
                     doc_id=hit.get("doc_id"),
                     title=str(hit.get("doc_id") or hit.get("path") or "Milvus"),
                     text=snippet,
-                    score=float(hit.get("score_fused", hit.get("score_vec", 0.0))), # 리랭크 전 점수 사용
+                    score=float(hit.get("score", hit.get("score_vec", 0.0))),
                     chunk_index=hit.get("chunk_idx"),
                     page=hit.get("page"),
                     metadata={
