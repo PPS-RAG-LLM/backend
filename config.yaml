@@ -15,11 +15,9 @@ server:
   # 쿠키 보안 설정
   cookie_name: "coreiq_session"
   cookie_session_max_age: 8*60*60 # 8 hours
-  cookie_httponly: true # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
-  cookie_secure: true # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
-  cookie_samesite:
-    "lax" # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어
-    # 필요 시 "strict" 또는 "none"
+  cookie_httponly: true   # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
+  cookie_secure: false    # [수정] 로컬(HTTP)에서는 false여야 쿠키가 저장됨
+  cookie_samesite: "lax"  # [수정] "none"으로 하면 secure: true가 필수라 "lax"가 무난
 
 database:
   path: storage/pps_rag.db
