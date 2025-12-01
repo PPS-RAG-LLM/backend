@@ -21,6 +21,7 @@ from service.admin.manage_vator_DB import (
     # 파이프라인
     ingest_embeddings,
     execute_search,
+    ingest_specific_files_with_levels,
     # 관리
     list_indexed_files,
     delete_files_by_names,
@@ -447,7 +448,7 @@ def _parse_level_for_tasks_flex(
     raise ValueError('level_for_tasks 파싱 실패. 예) {"qna":2,"summary":1} 또는 "qna:2,summary:1" 또는 "2"')
     
 @router.post("/admin/vector/override-levels-upload", 
-    summary="-- 단일 파일 올리기 "
+    summary="파일 업로드 후 레벨 지정하여 바로 전처리 및 인제스트 (full-ingest 방식)"
     )
 async def override_levels_upload_form(
     files: List[UploadFile] = File(...),

@@ -28,21 +28,28 @@ env/
 Dockerfile
 .dockerignore
 
-
-# models
-*/models/
 # Logs
 *.log
 
-# Database
+# Database (런타임에 생성되므로 제외)
 *.db
 *.sqlite
 *.sqlite3
 
-# Cache
+# Cache (빌드 시 불필요)
 .cache/
 *.cache
 unsloth_compiled_cache/
+
+# Storage에서 모델은 포함하되, 불필요한 것만 제외
+# 모델은 포함: storage/models/, storage/embedding-models/, storage/rerank_model/
+# 제외할 것들:
+storage/user_data/
+storage/train_data/
+storage/documents/
+storage/extracted_texts/
+storage/val_data/
+storage/volumes/
 
 # Volumes
 volumes/

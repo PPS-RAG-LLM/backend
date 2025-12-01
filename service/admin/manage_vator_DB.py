@@ -617,18 +617,6 @@ async def search_documents(req: SearchRequest)-> Dict:
     [Legacy/Direct Search]
     검색 -> 리랭킹 -> 중복제거 과정을 모두 수행하여 최종 결과를 반환합니다.
     """
-    # settings = get_rag_settings_row()
-    # search_request = SearchRequest(
-    #     query=req.query,
-    #     collection_name=ADMIN_COLLECTION,
-    #     task_type=req.task_type,
-    #     security_level=req.user_level,
-    #     top_k=req.top_k,
-    #     rerank_top_n=rerank_top_n,
-    #     search_type=search_type_override or settings.get("search_type"),
-    #     model_key=req.model or settings.get("embedding_key"),
-    # )
-
     search_res = await retrieval_service.search(req)
     hits = search_res.get("hits", [])
     context = "\n---\n".join(h["snippet"] for h in hits if h.get("snippet"))
