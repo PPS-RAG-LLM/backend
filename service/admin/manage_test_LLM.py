@@ -25,8 +25,6 @@ from service.vector_db import get_milvus_client
 logger = logging.getLogger(__name__)
 
 # ===== 경로/세션 고정값 =====
-# BASE_DIR = Path(__file__).resolve().parent  # .../backend/service/admin
-# PROJECT_ROOT = BASE_DIR.parent.parent  # .../backend
 _RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
 _RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
 _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
@@ -356,7 +354,7 @@ async def ensure_eval_on_shared_session(
         search_type=search_type,
         model_key=model_name, # 모델명이 있다면 사용
     )
-    rag_res = await retrieval_service.search(req, sid=sid, search_type_override=search_type)
+    rag_res = await retrieval_service.search(req)
     hits = rag_res.get("hits", []) if isinstance(rag_res, dict) else []
 
     # rag_refs: 실제 출처를 저장

@@ -21,7 +21,6 @@ from service.admin.manage_vator_DB import (
     # 파이프라인
     ingest_embeddings,
     execute_search,
-    ingest_specific_files_with_levels,
     # 관리
     list_indexed_files,
     delete_files_by_names,
