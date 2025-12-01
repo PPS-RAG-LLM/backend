@@ -1,7 +1,7 @@
 """
 # 다운로드 예시
 
-python scripts/download_hf_models.py --base_dir /home/wzxcv123/NIQ/backend/storage/model --hf_token ""
+python scripts/download_hf_models.py --base_dir /home/wzxcv123/NIQ/jo/backend/storage/models --hf_token ""
 
 """
 from __future__ import annotations
@@ -113,31 +113,31 @@ def download_default_two(
             ],
         },
         # === 추가: Qwen/Qwen3-Omni-30B-A3B-Instruct (멀티모달: 하위 디렉터리 포함 보수적 패턴) ===
-        {
-            "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
-            "dst": os.path.join(base_dir, "Qwen3-Omni-30B-A3B-Instruct"),
-            "include": [
-                # 가중치/샤드
-                "*.safetensors",
-                "**/*.safetensors",
-                "*.bin",                   # projector 등 일부 자산이 .bin 일 수 있음
-                "**/*.bin",
-                # 구성/인덱스/프로세서 설정
-                "*.json",
-                "**/*.json",               # *config.json, *.index.json, processor_config.json 등
-                # 토크나이저/스페셜 토큰/템플릿
-                "tokenizer.*",
-                "**/tokenizer.*",
-                "vocab.json",
-                "merges.txt",
-                "special_tokens_map.json",
-                "chat_template*",
-                "**/chat_template*",
-                # SentencePiece/기타
-                "*.model",                 # tokenizer.model
-                "**/*.model",
-            ],
-        },
+        # {
+        #     "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        #     "dst": os.path.join(base_dir, "Qwen3-Omni-30B-A3B-Instruct"),
+        #     "include": [
+        #         # 가중치/샤드
+        #         "*.safetensors",
+        #         "**/*.safetensors",
+        #         "*.bin",                   # projector 등 일부 자산이 .bin 일 수 있음
+        #         "**/*.bin",
+        #         # 구성/인덱스/프로세서 설정
+        #         "*.json",
+        #         "**/*.json",               # *config.json, *.index.json, processor_config.json 등
+        #         # 토크나이저/스페셜 토큰/템플릿
+        #         "tokenizer.*",
+        #         "**/tokenizer.*",
+        #         "vocab.json",
+        #         "merges.txt",
+        #         "special_tokens_map.json",
+        #         "chat_template*",
+        #         "**/chat_template*",
+        #         # SentencePiece/기타
+        #         "*.model",                 # tokenizer.model
+        #         "**/*.model",
+        #     ],
+        # },
     ]
 
     out: dict[str, str] = {}
