@@ -261,6 +261,16 @@ class FineTuneRequest(BaseModel):
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
     )
+    
+    @field_validator("tuningType", mode="before")
+    @classmethod
+    def _v_tuning_type_strip(cls, v):
+        """tuningType 값의 앞뒤 공백을 제거합니다."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v.strip()
+        return v
     startAt: Optional[str] = Field(
         default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
     )

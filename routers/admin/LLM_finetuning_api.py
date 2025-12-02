@@ -104,7 +104,7 @@ async def launch_fine_tuning(
     _lr = float(learningRate) if learningRate is not None else 2e-4
     _ofp = True if overfittingPrevention is None else bool(overfittingPrevention)
     _gas = int(gradientAccumulationSteps) if gradientAccumulationSteps is not None else 16
-    _tuning = (tuningType or "QLORA").upper()
+    _tuning = (tuningType or "QLORA").strip().upper() if tuningType else "QLORA"
 
     # quantizationBits는 QLORA에서만 사용.
     # - 폼에서 ""로 오면 None 처리
