@@ -80,8 +80,8 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
         expires_kst = _parse_legacy_kst_string_to_utc(expires_at)
         if expires_kst is None and isinstance(expires_at, datetime):
             expires_kst = expires_at
-        now_kst = now_kst()
-        if not expires_kst or expires_kst <= now_kst:
+        now_dt = now_kst()
+        if not expires_kst or expires_kst <= now_dt:
             # 만료된 세션 삭제
             session.execute(
                 delete(UserSession).where(UserSession.session_id == session_id)

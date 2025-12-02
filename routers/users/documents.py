@@ -1,10 +1,13 @@
+from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form
 from utils import logger
 from pydantic import BaseModel
 from typing import List
 from service.manage_documents import upload_documents, delete_documents_by_ids
+from utils.auth import get_user_id_from_cookie
 from utils.documents import save_raw_file
+from config import config
 
 logger = logger(__name__)
 router = APIRouter(tags=["Document"], prefix="/v1/document")
@@ -13,16 +16,18 @@ router = APIRouter(tags=["Document"], prefix="/v1/document")
 async def upload_endpoint(
     files: List[UploadFile] = File(...),
     addToWorkspaces: Optional[str] = Form(None),
+    user_id: int = Depends(get_user_id_from_cookie),
 ):
     # TODO: 인증 연동 시 user_id 추출로 교체
-    user_id = 3
     logger.info(
         f"upload_endpoint: user_id={user_id}, files={len(files)}, addToWorkspaces={addToWorkspaces}"
     )
+    USER_RAW_DATA_DIR = Path(config.get("user_raw_data_dir", "storage/raw_files/user_raw_data"))
+    
     rel_paths = [] # RAW 저장
     for f in files:
         data = await f.read()
-        rel_paths.append(save_raw_file(f.filename, folder="user_raw_data", content=data))
+        rel_paths.append(save_raw_file(f.filename, folder=USER_RAW_DATA_DIR, content=data))
         await f.seek(0)
         
     return await upload_documents(
@@ -37,9 +42,8 @@ class TempCleanupBody(BaseModel):
     docIds: Optional[List[str]]
 
 @router.delete("/delete-documents", summary="서버문서 삭제 / 워크스페이스 문서+임베딩 삭제 || 임시 문서 삭제")
-async def temp_cleanup_endpoint(body: TempCleanupBody):
-    user_id = 3
+async def temp_cleanup_endpoint(body: TempCleanupBody, user_id: int = Depends(get_user_id_from_cookie)):
     logger.info(f"temp_cleanup_endpoint: body={body}")
     return delete_documents_by_ids(
-        doc_ids=body.docIds, workspace_slug=body.workspaceSlug, user_id=user_id
+        doc_ids=body.docIds, workspace_slug=body.workspaceSlug, user_id=user_id,
         )

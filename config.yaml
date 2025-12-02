@@ -1,6 +1,7 @@
 server:
   host: 0.0.0.0
   port: 3005
+  sso_secret_key: "NIQ-SECURE-SECRET-KEY-FOR-SSO-HANDSHAKE" 
 
   # CORS middleware 설정
   cors_origins:
@@ -13,12 +14,10 @@ server:
 
   # 쿠키 보안 설정
   cookie_name: "coreiq_session"
-  cookie_session_max_age: 8*60*60 # 8 hours
-  cookie_httponly: true # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
-  cookie_secure: true # HTTPS에서만 쿠키를 전송되도록 하여 중간자 공격을 방지
-  cookie_samesite:
-    "lax" # CSRF를 줄여주는 쿠키 속성 - 교차 사이트 간 요청에서 쿠키 전송 제어
-    # 필요 시 "strict" 또는 "none"
+  cookie_session_max_age: 28800 # 8 hours
+  cookie_httponly: true   # 자바스크립트로 쿠키에 접근하지 못하게 해 XSS로 인한 탈취 방지
+  cookie_secure: false    # [수정] 로컬(HTTP)에서는 false여야 쿠키가 저장됨
+  cookie_samesite: "lax"  # [수정] "none"으로 하면 secure: true가 필수라 "lax"가 무난
 
 database:
   path: storage/pps_rag.db
@@ -53,10 +52,13 @@ models_dir:
   rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
 # model_root_dir: storage/embedding-models
 
+admin_raw_data_dir: storage/raw_files/admin_raw_data
+user_raw_data_dir: storage/raw_files/user_raw_data
+test_llm_raw_data_dir: storage/raw_files/test_llm
+
 retrieval:
   temp_ttl_hours: 12
   paths:
-    raw_data_dir: storage/raw_files # 사용자 "/user_raw_data" & "/admin_raw_data" 저장 경로
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
@@ -71,16 +73,3 @@ retrieval:
     - doc_gen
     - summary
     - qna
-  supported_extensions:
-    - ".pdf"
-    - ".txt"
-    - ".text"
-    - ".md"
-    - ".docx"
-    - ".pptx"
-    - ".csv"
-    - ".xlsx"
-    - ".xls"
-    - ".doc"
-    - ".ppt"
-    # - ".hwp"

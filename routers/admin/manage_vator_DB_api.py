@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException, Form
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Literal, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Literal
 import json as _json
-
-from pymilvus.grpc_gen.common_pb2 import RequestTSO
+from collections import defaultdict
+from pathlib import Path
 
 from service.admin.manage_vator_DB import (
     TASK_TYPES,
@@ -21,10 +21,8 @@ from service.admin.manage_vator_DB import (
     # 파이프라인
     ingest_embeddings,
     execute_search,
-    ingest_specific_files_with_levels,
     # 관리
     list_indexed_files,
-    list_indexed_files_overview,
     delete_files_by_names,
     # 파일 저장
     process_saved_raw_files,
@@ -47,6 +45,9 @@ logger = logger(__name__)
 # ============================
 # Request/Response Models
 # ============================
+from config import config
+
+ADMIN_RAW_DATA_DIR = Path(config.get("admin_raw_data_dir", "storage/raw_files/admin_raw_data"))
 
 class VectorSettingsBody(BaseModel):
     embeddingModel: Optional[str] = Field(
@@ -91,7 +92,7 @@ class ExecuteBody(BaseModel):
     sourceFilter: Optional[List[str]] = None
     taskType: Literal["doc_gen", "summary", "qna"]
     searchMode: Optional[Literal["hybrid", "semantic", "bm25"]] = None
-
+    
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -238,9 +239,14 @@ async def get_security_levels(taskType: Optional[TaskLiteral] = None):
 @router.post("/admin/vector/full-ingest", summary="전체 파일 추출 및 저장 인제스트") # TODO : MinIO 마이그레이션 필요
 async def rag_full_ingest(files: List[UploadFile] = File(...)):
     # 1) RAW 저장
+    # 기본적으로 securityLevel1 폴더에 저장
+    target_folder = ADMIN_RAW_DATA_DIR / "securityLevel1"
     rel_paths = []
     for f in files:
-        rel_paths.append(save_raw_file(f.filename, folder="row_data", content=await f.read()))
+        content = await f.read()
+        filename = save_raw_file(f.filename, folder=target_folder, content=content)
+        # process_saved_raw_files는 ADMIN_RAW_DATA_DIR 기준 상대 경로를 필요로 함
+        rel_paths.append(f"securityLevel1/{filename}")
 
     extract_result = await extract_documents(rel_paths)
     # 3) 인제스트
@@ -250,8 +256,8 @@ async def rag_full_ingest(files: List[UploadFile] = File(...)):
 
     ingest_result = await ingest_embeddings(
         model_key=settings["embedding_key"],
-        max_token=int(settings["chunk_size"]),
-        overlab=int(settings["overlap"]),
+        # max_token=int(settings["chunk_size"]),
+        # overlab=int(settings["overlap"]),
     )
     logger.debug(f"\n\n[API] ingest_result: {ingest_result}\n\n")
     return {
@@ -322,7 +328,17 @@ async def list_vector_files_endpoint(
     summary="작업유형·보안레벨별 집계 + 파일 리스트"
 )
 async def list_vector_files_overview():
-    return await list_indexed_files_overview()
+    
+    items = await list_indexed_files(limit=16384, offset=0, query=None, task_type=None)
+    # agg: task_type -> level -> count
+    agg: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for it in items:
+        agg[it["taskType"]][int(it["securityLevel"])] += it["chunkCount"]
+    # 보기 좋게 변환
+    overview = {
+        t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()
+    }
+    return {"overview": overview, "items": items}
 
 
 @router.delete(
@@ -397,6 +413,14 @@ def _parse_level_for_tasks_flex(
                     out[k] = max(1, int(v))
             if out:
                 return out
+        elif isinstance(obj, list):
+            # 리스트인 경우 [1, 2, 3] -> qna=1, summary=2, doc_gen=3 (순서 가정)
+            # 또는 tasks 목록을 알 수 없으므로, 이 함수 단독으로는 처리가 어렵지만
+            # 일단 가능한 경우만 처리
+            # 여기서는 task 순서를 고정(TASK_TYPES)한다고 가정하거나, 호출처에서 처리해야 함.
+            # 하지만 사용자 요청에 따라 [1,2,3] 형태를 지원하기 위해 간단히 매핑
+            # (주의: tasks 파라미터와 순서가 일치한다고 가정)
+            pass 
     except Exception:
         pass
 
@@ -433,43 +457,59 @@ async def override_levels_upload_form(
     summary_level: Optional[str] = Form(None),
     doc_gen_level: Optional[str] = Form(None),
 ):
+    # 1) tasks, levels 파싱 (저장 폴더 결정을 위해 먼저 수행)
+    tlist = None
+    if tasks:
+        tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES] or None
+
+    lvmap = {}
     try:
-        # 1) task 목록 파싱
-        tlist = None
-        if tasks:
-            tlist = [t.strip() for t in tasks.split(",") if t.strip() in TASK_TYPES]
-            if not tlist:
-                tlist = None
+        # [1,2,3] 형태의 리스트 문자열 처리 시도 (tasks 순서와 매핑 가정)
+        s_lvl = str(level_for_tasks).strip()
+        if s_lvl.startswith("[") and s_lvl.endswith("]"):
+            try:
+                lvl_arr = _json.loads(s_lvl)
+                if isinstance(lvl_arr, list):
+                    # tlist가 있다면 순서대로 매핑, 없으면 TASK_TYPES 순서대로? 
+                    # 사용자 요구사항: tasks=[qna, summary, doc_gen], level_for_tasks=[1,2,3]
+                    # 따라서 tlist가 있으면 1:1 매핑
+                    mapping_target = tlist if tlist else TASK_TYPES
+                    for i, t in enumerate(mapping_target):
+                        if i < len(lvl_arr):
+                             lvmap[t] = max(1, int(lvl_arr[i]))
+            except Exception:
+                pass
 
-        # 2) 레벨 파싱(유연) - 레벨 지정은 필수입니다 (태그 기반 자동 결정 비활성화)
-        try:
-            lvmap = _parse_level_for_tasks_flex(level_for_tasks, qna_level, summary_level, doc_gen_level)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        
-        # 레벨이 지정되지 않았으면 에러 반환
         if not lvmap:
-            raise HTTPException(
-                status_code=400, 
-                detail="보안레벨을 지정해야 합니다. level_for_tasks, qna_level, summary_level, doc_gen_level 중 하나 이상을 제공하세요."
-            )
+            lvmap = _parse_level_for_tasks_flex(level_for_tasks, qna_level, summary_level, doc_gen_level)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        # 3) ingest_specific_files_with_levels를 사용하여 파일 업로드 → 전처리 → 인제스트 한번에 처리
-        # 이 함수는 지정된 레벨로 바로 올립니다 (태그 기반 자동 결정 없음)
-        result = await ingest_specific_files_with_levels(
-            uploads=files,
-            tasks=tlist,
-            level_for_tasks=lvmap,
-            collection_name=None,  # 기본값 사용
-        )
+    # 저장할 폴더 결정: 지정된 레벨 중 가장 높은 레벨 폴더에 저장 (또는 단일 레벨)
+    # 만약 qna=1, summary=2 라면 securityLevel2 에 저장하여 높은 보안을 따름
+    effective_levels = [v for k, v in lvmap.items() if (not tlist) or (k in tlist)]
+    max_lvl = max(effective_levels) if effective_levels else 1
+    target_folder = ADMIN_RAW_DATA_DIR / f"securityLevel{max_lvl}"
 
-        saved_names = [f.filename for f in files]
-        return {
-            "saved": saved_names,
-            "ingest_result": result,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("override-levels-upload 처리 중 오류 발생")
-        raise HTTPException(status_code=500, detail=f"처리 중 오류: {str(e)}")
+    # 2) 파일 저장
+    saved_original_names: List[str] = []
+    saved_rel_paths : List[str] = []
+    for f in files:
+        # 수정된 부분: folder를 동적으로 지정
+        content = await f.read()
+        filename = save_raw_file(f.filename, folder=target_folder, content=content)
+        saved_original_names.append(f.filename)
+        
+        # process_saved_raw_files는 ADMIN_RAW_DATA_DIR 기준 상대 경로를 필요로 함
+        # target_folder는 ADMIN_RAW_DATA_DIR / f"securityLevel{max_lvl}"
+        rel_path = f"securityLevel{max_lvl}/{filename}"
+        saved_rel_paths.append(rel_path)
+
+    processed_docs = await process_saved_raw_files(saved_rel_paths)
+    target_tokens = [doc["doc_id"] for doc in processed_docs] or saved_original_names
+    logger.debug(f"🎯 [API] target_tokens: {target_tokens}")
+
+    # 3) 인제스트 요청
+    req = OverrideLevelsRequest(files=target_tokens, level_for_tasks=lvmap, tasks=tlist)
+    result = await override_levels_and_ingest(req)
+    return {"saved": saved_original_names, "ingest_result": result}

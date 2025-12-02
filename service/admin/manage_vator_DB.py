@@ -6,58 +6,40 @@
 from __future__ import annotations
 import asyncio
 import re
-import time
-import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from config import config as app_config
 from repository.rag_settings import get_rag_settings_row, set_rag_settings_row
+from repository import security_level as security_repo
 from repository.documents import (
     delete_document_vectors,
     delete_documents_by_type_and_ids,
     document_has_vectors,
-    fetch_metadata_by_vector_ids,
     get_document_by_source_path,
     get_list_indexed_files,
     insert_document_vectors,
     list_documents_by_type,
     purge_documents_by_collection,
     upsert_document,
-    fetch_document_metadata_by_doc_ids, 
+    fetch_document_metadata_by_doc_ids,
+    bulk_upsert_document_metadata, 
 )
 from service.preprocessing.rag_preprocessing import ext
-from service.retrieval.admin_search import RAGSearchRequest, apply_reranking, deduplicate_hits
-from utils.database import get_session
+from service.retrieval.interface import SearchRequest, retrieval_service
 from utils.documents import generate_doc_id
-from storage.db_models import (
-    DocumentType,
-    RagSettings,
-    SecurityLevelConfigTask,
-    SecurityLevelKeywordsTask,
-)
+from storage.db_models import DocumentType
+
 from ..vector_db import (
-    ensure_collection_and_index,
     get_milvus_client,
     milvus_has_data,
-    run_dense_search,
-    run_hybrid_search,
 )
 from service.retrieval.common import (
-    extract_insert_ids,
-    hf_embed_text, 
     parse_doc_version, 
     determine_level_for_task,
 )
-from service.retrieval.ingestion import ingest_common
-from service.retrieval.pipeline import (
-    DEFAULT_OUTPUT_FIELDS,
-    build_dense_hits,
-    build_rerank_payload,
-)
 from utils.model_load import (
-    get_or_load_embedder_async,
     invalidate_embedder_cache,
 )
 from utils import now_kst, now_kst_string, logger
@@ -73,19 +55,13 @@ _RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
 _RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
 _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
 
-def _cfg_path(key: str, fallback: str) -> Path:
-    value = _RETRIEVAL_PATHS.get(key, fallback)
-    return (PROJECT_ROOT / Path(value)).resolve()
-
-RAW_DATA_DIR = _cfg_path("raw_data_dir", "storage/raw_files/")
-VAL_SESSION_ROOT = _cfg_path("val_session_root", "storage/val_data")
 MODEL_ROOT_DIR = Path(app_config.get("models_dir", {}).get("embedding_model_path", "storage/embedding-models"))
+ADMIN_RAW_DATA_DIR = Path(app_config.get("admin_raw_data_dir", "storage/raw_files/admin_raw_data"))
 
 DATABASE_CFG = app_config.get("database", {}) or {}
 SQLITE_DB_PATH = (PROJECT_ROOT / Path(DATABASE_CFG.get("path", "storage/pps_rag.db"))).resolve()
 ADMIN_COLLECTION = _MILVUS_CFG.get("ADMIN_DOCS", "admin_docs_collection")
 TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "qna"))
-SUPPORTED_EXTS = set(_RETRIEVAL_CFG.get("supported_extensions"))
 
 ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\u2060\uFEFF]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
@@ -224,49 +200,6 @@ def _build_doc_name_index() -> Dict[str, str]:
 # SQLite 유틸
 # -------------------------------------------------
 
-# def _write_combined_text_file(
-#     output_path: Path,
-#     *,
-#     text: str,
-#     tables: List[Dict[str, Any]],
-#     pages_text_dict: Dict[int, str],
-# ) -> None:
-#     def _write_tables(handle, items):
-#         for tbl in items:
-#             table_text = (tbl.get("text") or "").strip()
-#             if table_text:
-#                 handle.write(table_text)
-#                 handle.write("\n\n")
-
-#     output_path.parent.mkdir(parents=True, exist_ok=True)
-#     with output_path.open("w", encoding="utf-8") as handle:
-#         if pages_text_dict:
-#             pages_tables: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-#             for tbl in tables or []:
-#                 page_num = int(tbl.get("page", 0))
-#                 if page_num > 0:
-#                     pages_tables[page_num].append(tbl)
-#             ordered_pages = sorted({*pages_text_dict.keys(), *pages_tables.keys()})
-#             if ordered_pages:
-#                 for idx, page_num in enumerate(ordered_pages):
-#                     page_text = pages_text_dict.get(page_num, "")
-#                     if page_text:
-#                         handle.write(page_text)
-#                         handle.write("\n\n")
-#                     _write_tables(handle, pages_tables.get(page_num, []))
-#                     if idx < len(ordered_pages) - 1:
-#                         handle.write("\n---\n\n")
-#             else:
-#                 if text.strip():
-#                     handle.write(text)
-#                     handle.write("\n\n")
-#                 _write_tables(handle, tables or [])
-#         else:
-#             if text.strip():
-#                 handle.write(text)
-#                 handle.write("\n\n")
-#             _write_tables(handle, tables or [])
-
 async def process_saved_raw_files(rel_paths: List[str]) -> List[Dict[str, Any]]:
     if not rel_paths:
         return []
@@ -283,13 +216,13 @@ def _process_saved_raw_files_sync(rel_paths: List[str]) -> List[Dict[str, Any]]:
     return results
 
 def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Optional[Dict[str, Any]]:
-    raw_path = (RAW_DATA_DIR / rel_path).resolve()
+    raw_path = (ADMIN_RAW_DATA_DIR / rel_path).resolve()
     if not raw_path.exists():
         logger.warning("[ProcessRaw] RAW 파일을 찾을 수 없습니다: %s", rel_path)
         return None
 
     try:
-        rel_from_raw = raw_path.relative_to(RAW_DATA_DIR)
+        rel_from_raw = raw_path.relative_to(ADMIN_RAW_DATA_DIR)
     except ValueError:
         rel_from_raw = raw_path
 
@@ -298,11 +231,11 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
     total_pages = 0
 
     try:
+        from service.preprocessing.rag_preprocessing import extract_any
         if file_ext == ".pdf":
-            from service.preprocessing.extension.pdf_preprocessing import _extract_pdf_with_tables
-            text, tables, pages_text_dict, total_pages = _extract_pdf_with_tables(raw_path)
+            from service.preprocessing.extension.pdf_preprocessing import extract_pdf_with_tables
+            text, tables, pages_text_dict, total_pages = extract_pdf_with_tables(raw_path)
         else:
-            from service.preprocessing.rag_preprocessing import extract_any
             text, tables = extract_any(raw_path)
     except Exception:
         logger.exception("[ProcessRaw] 추출 실패: %s", raw_path)
@@ -353,6 +286,60 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
         extraction_info=extraction_info,
     )
 
+    # DocumentMetadata 저장 (청크/페이지 단위 텍스트)
+    metadata_records: List[Dict[str, Any]] = []
+    chunk_index = 0
+
+    def _append_record(page: int, chunk_text: str, *, extra_payload: Optional[Dict] = None):
+        nonlocal chunk_index
+        payload = {"source_file": raw_path.name}
+        if extra_payload:
+            payload.update(extra_payload)
+        metadata_records.append(
+            {
+                "page": int(page),
+                "chunk_index": int(chunk_index),
+                "text": chunk_text,
+                "payload": payload,
+            }
+        )
+        chunk_index += 1
+
+    pages_tables = defaultdict(list)
+    for t in tables:
+        page_num = t.get("page", 0)
+        if page_num > 0:
+            pages_tables[page_num].append(t)
+
+    if pages_text_dict:
+        all_page_nums = sorted(set(pages_text_dict) | set(pages_tables))
+        for page_num in all_page_nums:
+            page_text = pages_text_dict.get(page_num, "")
+            if page_text.strip():
+                _append_record(page_num, page_text)
+            for tbl in pages_tables.get(page_num, []):
+                table_text = tbl.get("text", "")
+                if table_text.strip():
+                    _append_record(
+                        page_num,
+                        table_text,
+                        extra_payload={"table": True, "table_bbox": tbl.get("bbox")}
+                    )
+    else:
+        if text.strip():
+            _append_record(1, text)
+        for tbl in tables:
+            table_text = tbl.get("text", "")
+            if table_text.strip():
+                _append_record(
+                    int(tbl.get("page") or 0),
+                    table_text,
+                    extra_payload={"table": True, "table_bbox": tbl.get("bbox")}
+                )
+    
+    if metadata_records:
+        bulk_upsert_document_metadata(doc_id=doc_id, records=metadata_records)
+
     return {
         "doc_id": doc_id,
         "filename": raw_path.name,
@@ -399,24 +386,6 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
         set_rag_settings_row(new_search=new_st, new_chunk=new_cs, new_overlap=new_ov, new_key=new_key)
         invalidate_embedder_cache()
 
-    with get_session() as session:
-        s = session.query(RagSettings).filter(RagSettings.id == 1).first()
-        if not s:
-            s = RagSettings(id=1)
-            session.add(s)
-        s.embedding_key = new_key
-        # search_type/chunk/overlap은 _update_vector_settings에서 반영됨. 여기선 존재 시 보존
-        if search_type is not None:
-            s.search_type = (
-                (search_type or "hybrid").lower().replace("vector", "semantic")
-            )
-        if chunk_size is not None:
-            s.chunk_size = int(chunk_size)
-        if overlap is not None:
-            s.overlap = int(overlap)
-        s.updated_at = now_kst()
-        session.commit()
-
     # Refresh and return in API format
     updated = get_rag_settings_row()
     return {
@@ -449,12 +418,6 @@ def list_available_embedding_models() -> List[str]:
 
 
 # ------------- Security Level (per task) ---------
-def _parse_at_string_to_keywords(value: str) -> List[str]:
-    if not value:
-        return []
-    toks = [t.strip() for t in value.split("@")]
-    return [t for t in toks if t]
-
 
 def _normalize_keywords(val: Any) -> List[str]:
     """
@@ -505,139 +468,51 @@ def upsert_security_level_for_task(
         raise ValueError("maxLevel must be >= 1")
 
     levels_map = _normalize_levels(levels_raw, max_level)
-
-    with get_session() as session:
-        # upsert config
-        cfg = (
-            session.query(SecurityLevelConfigTask)
-            .filter(SecurityLevelConfigTask.task_type == task_type)
-            .first()
-        )
-        if not cfg:
-            cfg = SecurityLevelConfigTask(task_type=task_type, max_level=int(max_level))
-            session.add(cfg)
-        else:
-            cfg.max_level = int(max_level)
-            cfg.updated_at = now_kst()
-        # replace keywords
-        session.query(SecurityLevelKeywordsTask).filter(
-            SecurityLevelKeywordsTask.task_type == task_type
-        ).delete()
-        for lv, kws in levels_map.items():
-            for kw in kws:
-                session.add(
-                    SecurityLevelKeywordsTask(
-                        task_type=task_type, level=int(lv), keyword=str(kw)
-                    )
-                )
-        session.commit()
-        return get_security_level_rules_for_task(task_type)
+    
+    security_repo.upsert_security_config_and_keywords(task_type, max_level, levels_map)
+    return get_security_level_rules_for_task(task_type)
 
 
 def get_security_level_rules_for_task(task_type: str) -> Dict:
-    with get_session() as session:
-        cfg = (
-            session.query(SecurityLevelConfigTask)
-            .filter(SecurityLevelConfigTask.task_type == task_type)
-            .first()
-        )
-        max_level = int(cfg.max_level) if cfg else 1
-        res: Dict[str, Any] = {
-            "taskType": task_type,
-            "maxLevel": max_level,
-            "levels": {str(i): [] for i in range(1, max_level + 1)},
-        }
-        rows = (
-            session.query(
-                SecurityLevelKeywordsTask.level, SecurityLevelKeywordsTask.keyword
-            )
-            .filter(SecurityLevelKeywordsTask.task_type == task_type)
-            .order_by(
-                SecurityLevelKeywordsTask.level.asc(),
-                SecurityLevelKeywordsTask.keyword.asc(),
-            )
-            .all()
-        )
-        for lv, kw in rows:
-            key = str(int(lv))
-            res["levels"].setdefault(key, []).append(str(kw))
-        return res
+    cfg = security_repo.get_security_config_by_task_type(task_type)
+    max_level = int(cfg.max_level) if cfg else 1
 
-
-def set_security_level_rules_per_task(config: Dict[str, Dict]) -> Dict:
-    """
-    config = {
-      "doc_gen": {"maxLevel": 3, "levels": {"2": "@금액@연봉", "3": "@부정@퇴직금"}},
-      "summary": {"maxLevel": 2, "levels": {"2": "@사내비밀"}},
-      "qna": {"maxLevel": 3, "levels": {"2": "@연구", "3": "@개인정보"}}
+    res: Dict[str, Any] = {
+        "taskType": task_type,
+        "maxLevel": max_level,
+        "levels": {str(i): [] for i in range(1, max_level + 1)},
     }
-    """
-    with get_session() as session:
-        # 전체 삭제 후 재삽입(간결/명확)
-        session.query(SecurityLevelConfigTask).delete()
-        session.query(SecurityLevelKeywordsTask).delete()
-        session.flush()
-
-        for task in TASK_TYPES:
-            entry = config.get(task) or {}
-            max_level = int(entry.get("maxLevel", 1))
-            session.add(
-                SecurityLevelConfigTask(task_type=task, max_level=max(1, max_level))
-            )
-            levels = entry.get("levels", {}) or {}
-            for lvl_str, at_str in levels.items():
-                try:
-                    lvl = int(str(lvl_str).strip().replace("level_", ""))
-                except Exception:
-                    continue
-                if lvl <= 1 or lvl > max_level:
-                    continue
-                for kw in _parse_at_string_to_keywords(str(at_str)):
-                    session.add(
-                        SecurityLevelKeywordsTask(
-                            task_type=task, level=int(lvl), keyword=str(kw)
-                        )
-                    )
-        session.commit()
-        return get_security_level_rules_all()
+    
+    rows = security_repo.get_security_keywords_by_task_type(task_type)
+    for lv, kw in rows:
+        key = str(int(lv))
+        res["levels"].setdefault(key, []).append(str(kw))
+    return res
 
 
 def get_security_level_rules_all() -> Dict:
-    with get_session() as session:
         # 기본 max_level=1
-        max_map = {t: 1 for t in TASK_TYPES}
-        for task, max_level in session.query(
-            SecurityLevelConfigTask.task_type, SecurityLevelConfigTask.max_level
-        ).all():
-            max_map[task] = int(max_level)
+    max_map = {t: 1 for t in TASK_TYPES}
+    
+    configs, keywords = security_repo.get_all_security_configs_and_keywords()
+    
+    for task, max_level in configs:
+        max_map[task] = int(max_level)
 
-        res: Dict[str, Dict] = {}
-        for task in TASK_TYPES:
-            res[task] = {
-                "maxLevel": max_map.get(task, 1),
-                "levels": {str(i): [] for i in range(1, max_map.get(task, 1) + 1)},
-            }
+    res: Dict[str, Dict] = {}
+    for task in TASK_TYPES:
+        res[task] = {
+            "maxLevel": max_map.get(task, 1),
+            "levels": {str(i): [] for i in range(1, max_map.get(task, 1) + 1)},
+        }
 
-        rows = (
-            session.query(
-                SecurityLevelKeywordsTask.task_type,
-                SecurityLevelKeywordsTask.level,
-                SecurityLevelKeywordsTask.keyword,
-            )
-            .order_by(
-                SecurityLevelKeywordsTask.task_type.asc(),
-                SecurityLevelKeywordsTask.level.asc(),
-                SecurityLevelKeywordsTask.keyword.asc(),
-            )
-            .all()
-        )
-        for task, level, kw in rows:
-            if task in res:
-                lv = str(int(level))
-                if lv not in res[task]["levels"]:
-                    res[task]["levels"][lv] = []
-                res[task]["levels"][lv].append(str(kw))
-        return res
+    for task, level, kw in keywords:
+        if task in res:
+            lv = str(int(level))
+            if lv not in res[task]["levels"]:
+                res[task]["levels"][lv] = []
+            res[task]["levels"][lv].append(str(kw))
+    return res
 
 
 # -------------------------------------------------
@@ -647,8 +522,8 @@ def get_security_level_rules_all() -> Dict:
 async def ingest_embeddings(
     model_key: str | None = None,
     target_tasks: list[str] | None = None,
-    max_token: int = 512,
-    overlab: int = 64,
+    # max_token: int = 512,
+    # overlab: int = 64,
     collection_name: str = ADMIN_COLLECTION,
     file_keys_filter: list[str] | None = None,
 ):
@@ -658,14 +533,6 @@ async def ingest_embeddings(
     - 표는 [[TABLE ...]] 머리글 유지, 이어지는 조각은 [[TABLE_CONT i/n]] 마커로 연속성 표시
     - file_keys_filter 전달 시 doc_id/파일명/스토리지 경로가 일치하는 문서만 인제스트
     """
-    tok, model, device = await get_or_load_embedder_async(model_key)
-    probe_vec = hf_embed_text(tok, model, device, "probe")
-    emb_dim = int(probe_vec.shape[0])
-    logger.info("[Ingest] 임베딩 모델: %s, 벡터 차원: %s", model_key, emb_dim)
-
-    client = get_milvus_client()
-    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=collection_name)
-
     tasks = [t for t in (target_tasks or TASK_TYPES) if t in TASK_TYPES]
     if not tasks:
         return {"error": f"유효한 작업유형이 없습니다. 허용: {TASK_TYPES}"}
@@ -676,9 +543,10 @@ async def ingest_embeddings(
 
     doc_ids = [doc["doc_id"] for doc in documents if doc.get("doc_id")]
     metadata_by_doc = fetch_document_metadata_by_doc_ids(doc_ids)
-    total_inserted = 0
-    BATCH_SIZE = 128
+    settings = get_rag_settings_row()
+    collection = collection_name
 
+    prepared_inputs: List[Dict[str, Any]] = []
     for doc in documents:
         doc_id = str(doc.get("doc_id") or "").strip()
         if not doc_id:
@@ -687,247 +555,74 @@ async def ingest_embeddings(
         if not meta_chunks:
             logger.warning("[Ingest] metadata missing: doc_id=%s", doc_id)
             continue
-
         payload = doc.get("payload") or {}
         sec_map = payload.get("security_levels", {}) or {}
         version = int(payload.get("version") or 0)
-        chunk_entries: list[dict[str, Any]] = [
+        filename = doc.get("filename") or doc_id
+        saved_files = payload.get("saved_files") or {}
+        text_path = saved_files.get("text") or doc.get("source_path") or ""
+
+        chunk_entries = [
             {
                 "page": int(entry.get("page") or 0),
-                "chunk_idx": int(entry.get("chunk_index") or 0),
+                "chunk_idx": int(entry.get("chunk_index") or entry.get("chunk_idx") or 0),
                 "text": entry.get("text") or "",
-                "is_table": bool((entry.get("payload") or {}).get("table")),
             }
             for entry in meta_chunks
             if entry.get("text")
         ]
-
-        for task in tasks:
-            lvl = int(sec_map.get(task, 1))
-            batch: List[Dict[str, Any]] = []
-            batch_meta: List[Dict[str, int]] = []
-            vector_records: List[Dict[str, Any]] = []
-
-            def flush_batch_for_task() -> None:
-                nonlocal batch, batch_meta, total_inserted
-                if not batch:
-                    return
-                result = client.insert(collection_name=collection_name, data=batch)
-                # [Refactor] _extract_insert_ids -> extract_insert_ids (common)
-                ids = extract_insert_ids(result)
-                for vec_id, meta in zip(ids or [], batch_meta):
-                    vector_records.append(
-                        {
-                            "vector_id": vec_id,
-                            "page": meta["page"],
-                            "chunk_index": meta["chunk_idx"],
-                            "task_type": task,
-                        }
-                    )
-                total_inserted += len(batch)
-                batch.clear()
-                batch_meta.clear()
-
-            for entry in chunk_entries:
-                part = entry["text"]
-                vec = hf_embed_text(tok, model, device, part, max_len=max_token)
-                if len(vec) != emb_dim:
-                    continue
-                batch.append(
-                    {
-                        "embedding": vec.tolist(),
-                        "path": "",  # 파일 경로 대신 빈 값 또는 doc_id 사용
-                        "chunk_idx": entry["chunk_idx"],
-                        "task_type": task,
-                        "security_level": lvl,
-                        "doc_id": doc_id,
-                        "version": version,
-                        "page": entry["page"],
-                        "workspace_id": 0,
-                        "text": part,
-                    }
-                )
-                batch_meta.append(
-                    {
-                        "page": entry["page"],
-                        "chunk_idx": entry["chunk_idx"],
-                    }
-                )
-                if len(batch) >= BATCH_SIZE:
-                    flush_batch_for_task()
-
-            flush_batch_for_task()
-
-            if vector_records:
-                insert_document_vectors(
-                    doc_id=doc_id,
-                    collection=collection_name,
-                    embedding_version=str(model_key),
-                    vectors=vector_records,
-                )
-    client.flush(collection_name)
-    ensure_collection_and_index(client, emb_dim=emb_dim, metric="IP", collection_name=collection_name)
-
-    return {
-        "message": f"Ingest 완료(Milvus Server, collection={collection_name})",
-        "inserted_chunks": int(total_inserted),
-    }
-
-async def ingest_specific_files_with_levels(
-    uploads: Optional[List[Any]] = None,          # FastAPI UploadFile 리스트
-    paths: Optional[List[str]] = None,            # 로컬 경로 리스트
-    tasks: Optional[List[str]] = None,            # 없으면 모든 TASK_TYPES
-    level_for_tasks: Optional[Dict[str, int]] = None,  # {"qna":2,"summary":1} 우선
-    level: Optional[int] = None,                  # 공통 레벨. 위 map 있으면 무시
-    collection_name: Optional[str] = None,
-):
-    if not uploads and not paths:
-        return {"error": "대상 파일이 없습니다. uploads 또는 paths 중 하나는 필요합니다."}
-
-    tasks_eff = [t for t in (tasks or TASK_TYPES) if t in TASK_TYPES]
-    if not tasks_eff:
-        return {"error": f"유효한 작업유형이 없습니다. 허용: {TASK_TYPES}"}
-
-    lvl_map: Dict[str, int] = {}
-    if level_for_tasks:
-        for k, v in level_for_tasks.items():
-            if k in TASK_TYPES:
-                lvl_map[k] = max(1, int(v))
-    elif level is not None:
-        for t in tasks_eff:
-            lvl_map[t] = max(1, int(level))
-
-    # 레벨이 지정되지 않았으면 에러 반환 (태그 기반 자동 결정 비활성화)
-    if not lvl_map:
-        return {"error": "보안레벨을 지정해야 합니다. level_for_tasks 또는 level 파라미터를 제공하세요."}
-
-    # 업로드 저장(임시) + 경로 합치기
-    run_id = uuid.uuid4().hex[:8]
-    tmp_root = (VAL_SESSION_ROOT / "adhoc" / run_id).resolve()
-    tmp_root.mkdir(parents=True, exist_ok=True)
-
-    saved: List[Path] = []
-    if uploads:
-        for f in uploads:
-            fname = Path(getattr(f, "filename", "uploaded")).name
-            tmp_path = tmp_root / fname
-            try:
-                data = await f.read()
-            except Exception:
-                data = getattr(getattr(f, "file", None), "read", lambda: b"")()
-            tmp_path.write_bytes(data or b"")
-            saved.append(tmp_path)
-    for p in (paths or []):
-        pp = Path(str(p)).resolve()
-        if pp.exists() and pp.is_file():
-            saved.append(pp)
-
-    if not saved:
-        return {"error": "저장/유효성 검사 후 남은 파일이 없습니다."}
-
-    # [Refactor] ingest_common을 사용하여 로직 간소화
-    settings = get_rag_settings_row()
-    coll_eff = collection_name or ADMIN_COLLECTION
-
-    # Pre-ingest callback: 문서를 documents 테이블에 먼저 저장 (FOREIGN KEY 제약 조건 해결)
-    def _pre_ingest_callback(info: Dict[str, Any]) -> None:
-        doc_id = info.get("doc_id")
-        source_path = info.get("source_path", "")
-        file_name = Path(source_path).name if source_path else str(info.get("file", ""))
-        sec_map = info.get("levels", {}) or {}
-        
-        if not doc_id:
-            return
-        
-        # documents 테이블에 문서 메타데이터 저장
-        upsert_document(
-            doc_id=doc_id,
-            doc_type=ADMIN_DOC_TYPE,
-            filename=file_name,
-            source_path=source_path,
-            security_level=_max_security_level(sec_map),
-            payload={
-                "security_levels": sec_map,
-                "version": int(info.get("version", 0)),
-            },
+        if not chunk_entries:
+            continue
+        prepared_inputs.append(
+            {
+                "doc_id": doc_id,
+                "version": version,
+                "levels": sec_map,
+                "chunks": chunk_entries,
+                "metadata_records": meta_chunks,
+                "source_path": text_path,
+                "filename": filename,
+            }
         )
 
-    # Callback to handle vector insertion (equivalent to insert_document_vectors)
-    def _batch_callback(records: List[Dict[str, Any]], doc_id: str):
+    if not prepared_inputs:
+        return {"error": "인제스트할 문서 조각을 찾지 못했습니다."}
+
+    def _batch_callback(records: List[Dict[str, Any]], doc_id: str) -> None:
         if not records:
             return
         try:
             insert_document_vectors(
                 doc_id=doc_id,
-                collection=coll_eff,
-                embedding_version=settings["embedding_key"],
+                collection=collection,
+                embedding_version=str(model_key or settings["embedding_key"]),
                 vectors=records,
             )
         except Exception:
-            logger.exception(f"document_vectors 기록 실패(doc_id={doc_id})")
+            logger.exception("document_vectors 기록 실패(doc_id=%s)", doc_id)
 
-    # override_level_map을 사용하여 태그 기반 자동 결정을 건너뛰고 지정된 레벨로 바로 올림
-    res = await ingest_common(
-        inputs=saved,
-        collection_name=coll_eff,
-        task_types=tasks_eff,
-        settings=settings,
-        override_level_map=lvl_map,  # 지정된 레벨 사용 (태그 무시)
-        security_level_config=None,  # 태그 기반 결정 비활성화
-        doc_id_generator=lambda _base: generate_doc_id(),
-        pre_ingest_callback=_pre_ingest_callback,  # 문서를 먼저 저장
+    ingest_result = await retrieval_service.ingest_documents(
+        inputs=prepared_inputs,
+        collection_name=collection,
+        task_types=tasks,
         batch_callback=_batch_callback,
+        upsert_metadata=False,
     )
 
-    return {
-        "message": "Upload & Ingest 완료",
-        "collection": coll_eff,
-        "runId": run_id,
-        "processed": res.get("processed", []),
-        "inserted_chunks": int(res.get("inserted_chunks", 0)),
-    }
+    ingest_result["message"] = f"Ingest 완료(Milvus Server, collection={collection})"
+    return ingest_result
 
-
-async def search_documents(req: RAGSearchRequest, 
-                            search_type_override: Optional[str] = None,
-                            rerank_top_n: Optional[int] = None) -> Dict:
+async def search_documents(req: SearchRequest)-> Dict:
     """
     [Legacy/Direct Search]
     검색 -> 리랭킹 -> 중복제거 과정을 모두 수행하여 최종 결과를 반환합니다.
     """
-    # 1. 순수 검색 (Candidates)
-    search_res = await search_vector_candidates(req, search_type_override)
-    hits_raw = search_res.get("hits", [])
-    
-    # 2. 리랭킹 (Rerank)
-    final_results = int(rerank_top_n) if rerank_top_n is not None else 5
-    hits_reranked = apply_reranking(hits_raw, req.query, top_n=final_results)
-    
-    # 3. 중복 제거 (Dedup)
-    hits_sorted = deduplicate_hits(hits_reranked)
-    
-    # 결과 포맷팅 (Prompt 생성 등)
-    context = "\n---\n".join(h["snippet"] for h in hits_sorted if h.get("snippet"))
+    search_res = await retrieval_service.search(req)
+    hits = search_res.get("hits", [])
+    context = "\n---\n".join(h["snippet"] for h in hits if h.get("snippet"))
     prompt = f"사용자 질의: {req.query}\n:\n{context}\n\n위 내용을 바탕으로 응답을 생성해 주세요."
-
-    return {
-        "elapsed_sec": search_res["elapsed_sec"],
-        "settings_used": search_res["settings_used"],
-        "hits": [
-            {
-                "score": float(h["score"]),
-                "path": h.get("path"),
-                "chunk_idx": int(h["chunk_idx"]),
-                "task_type": h["task_type"],
-                "security_level": int(h["security_level"]),
-                "doc_id": h.get("doc_id"),
-                "page": int(h.get("page", 0)),
-                "snippet": h["snippet"],
-            }
-            for h in hits_sorted
-        ],
-        "prompt": prompt,
-    }
+    search_res["prompt"] = prompt
+    return search_res
     
 
 async def execute_search(
@@ -941,15 +636,17 @@ async def execute_search(
     search_type: Optional[str] = None,
 ) -> Dict:
     print(f"⭐ [ExecuteSearch] 함수 호출: question='{question}', topK={top_k}, rerank_topN={rerank_top_n}")
-    req = RAGSearchRequest(
+    req = SearchRequest(
         query=question,
+        collection_name = ADMIN_COLLECTION,
         top_k=top_k,
-        user_level=security_level,
+        rerank_top_n=rerank_top_n,
+        security_level=security_level,
+        search_type=search_type,
         task_type=task_type,
-        model=model_key,
+        model_key=model_key,
     )
-    # search_documents 내부에서 search_vector_candidates -> apply_reranking -> deduplicate_hits 순차 실행
-    res = await search_documents(req, search_type_override=search_type, rerank_top_n=rerank_top_n)
+    res = await search_documents(req)
     
     # ... (이하 소스 필터링 및 체크 파일 생성 로직 유지)
     check_files: List[str] = []
@@ -1179,17 +876,6 @@ async def delete_files_by_names(file_names: List[str], task_type: Optional[str] 
         "perFile": per_file,  # 파일별 처리현황
     }
 
-async def list_indexed_files_overview():
-    items = await list_indexed_files(limit=16384, offset=0, query=None, task_type=None)
-    # agg: task_type -> level -> count
-    agg: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    for it in items:
-        agg[it["taskType"]][int(it["securityLevel"])] += it["chunkCount"]
-    # 보기 좋게 변환
-    overview = {
-        t: {str(lv): agg[t][lv] for lv in sorted(agg[t].keys())} for t in agg.keys()
-    }
-    return {"overview": overview, "items": items}
 
 
 # === 새 API: 키워드 없이 레벨 오버라이드 후 인제스트 ===
@@ -1256,82 +942,4 @@ async def override_levels_and_ingest(req: OverrideLevelsRequest):
         "updated_meta_entries": updated,
         "inserted_chunks": int(res.get("inserted_chunks", 0)),
         "target_count": len(target_tokens),
-    }
-
-async def search_vector_candidates(
-    req: RAGSearchRequest, 
-    search_type_override: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    [Pure Search] 
-    Milvus에서 벡터/하이브리드 검색만 수행하고 메타데이터를 매핑하여 반환합니다.
-    (Reranking 및 Deduplication을 수행하지 않음 -> 통합 검색 등에서 활용)
-    """
-    t0 = time.perf_counter()
-    
-    if req.task_type not in TASK_TYPES:
-        return {"hits": [], "error": f"invalid task_type: {req.task_type}"}
-
-    settings = get_rag_settings_row()
-    model_key = req.model or settings["embedding_key"]
-    raw_st = (search_type_override or settings.get("search_type") or "").lower()
-    search_type = (raw_st.replace("semantic", "vector").replace("sementic", "vector") or "hybrid")
-
-    tok, model, device = await get_or_load_embedder_async(model_key)
-    q_emb = hf_embed_text(tok, model, device, req.query)
-    client = get_milvus_client()
-    ensure_collection_and_index(client, emb_dim=len(q_emb), metric="IP", collection_name=ADMIN_COLLECTION)
-
-    if ADMIN_COLLECTION not in client.list_collections():
-        return {"hits": [], "settings_used": {"model": model_key, "searchType": search_type}, "elapsed_sec": 0.0}
-
-    # 후보군 검색 (Rerank 전이므로 top_k보다 넉넉하게 가져옴)
-    candidate_limit = int(req.top_k) * 2 
-    # 최소 10개, 최대 100개 정도로 제한하는 것이 좋으나 여기선 req.top_k 기반 설정
-    if candidate_limit < 10: candidate_limit = 10
-
-    filter_expr = f"task_type == '{req.task_type}' && security_level <= {int(req.user_level)}"
-
-    if search_type == "vector":
-        raw_results = run_dense_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            limit=candidate_limit,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    else:
-        raw_results = run_hybrid_search(
-            client,
-            collection_name=ADMIN_COLLECTION,
-            query_vector=q_emb.tolist(),
-            query_text=req.query,
-            limit=candidate_limit,
-            filter_expr=filter_expr,
-            output_fields=DEFAULT_OUTPUT_FIELDS,
-        )
-    
-    hits_raw = build_dense_hits(raw_results)
-    
-    # 메타데이터(텍스트 등) Fetch
-    vector_ids = [str(h["vector_id"]) for h in hits_raw if h.get("vector_id")]
-    meta_map = fetch_metadata_by_vector_ids(vector_ids)
-    
-    valid_hits = []
-    for hit in hits_raw:
-        vid = str(hit.get("vector_id") or "")
-        meta = meta_map.get(vid)
-        if meta:
-            hit["doc_id"] = hit.get("doc_id") or meta.get("doc_id")
-            hit["chunk_idx"] = meta.get("chunk_index")
-            hit["snippet"] = meta.get("text")
-            hit["path"] = meta.get("source_path", hit.get("path"))
-            valid_hits.append(hit)
-
-    elapsed = round(time.perf_counter() - t0, 4)
-    return {
-        "hits": valid_hits,
-        "settings_used": {"model": model_key, "searchType": search_type},
-        "elapsed_sec": elapsed
     }

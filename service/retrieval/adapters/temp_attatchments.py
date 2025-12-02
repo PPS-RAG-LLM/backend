@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
-from service.retrieval.pipeline import DEFAULT_OUTPUT_FIELDS
 from utils import logger
 
 from repository.documents import get_documents_by_ids
 from service.retrieval.adapters.base import BaseRetrievalAdapter, RetrievalResult
 from service.retrieval.common import embed_text, hf_embed_text
-from service.vector_db.milvus_store import (
+from service.vector_db import (
     get_milvus_client,
     resolve_collection,
     run_dense_search,
     run_hybrid_search,
+    DEFAULT_OUTPUT_FIELDS
 )
 from storage.db_models import DocumentType
 from utils.model_load import _get_or_load_embedder
