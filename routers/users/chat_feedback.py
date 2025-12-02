@@ -9,6 +9,7 @@ from service.users.chat_feedback import (
 )
 from utils import logger, validate_category_subcategory, validate_category
 from errors import BadRequestError, NotFoundError
+from utils.auth import get_user_id_from_cookie
 
 logger = logger(__name__)
 
@@ -29,16 +30,16 @@ class ChatFeedbackRequest(BaseModel):
 def save_feedback_endpoint(
     validated_category: tuple[str, Optional[str]] = Depends(validate_category_subcategory),
     body: ChatFeedbackRequest = Body(..., description="피드백 요청 본문"),
+    user_id: int = Depends(get_user_id_from_cookie),
 ):
     """
     사용자가 채팅 응답에 좋아요/싫어요를 누를 때 호출됩니다.
     피드백 데이터는 CSV 파일에 저장되며, 파인튜닝 학습 데이터로 사용됩니다.
     """
-    userId = 3  # TODO: 실제 세션에서 가져오기
     category, subcategory = validated_category # 카테고리 검증
-    logger.info(f"[save_feedback] user_id={userId}, category={category}, subcategory={subcategory}")
+    logger.info(f"[save_feedback] user_id={user_id}, category={category}, subcategory={subcategory}")
     result = save_chat_feedback(
-        user_id=userId,
+        user_id=user_id,
         chat_id=body.chatId,
         like=body.like,
         category=category,

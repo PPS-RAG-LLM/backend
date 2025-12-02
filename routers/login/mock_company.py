@@ -1,3 +1,4 @@
+"""가짜 컴퍼니 로그인 라우터"""
 # routers/mock_company.py 수정
 from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse

@@ -13,6 +13,8 @@ from utils import logger
 from errors import BadRequestError
 import time, json
 
+from utils.auth import get_user_id_from_cookie
+
 logger = logger(__name__)
 
 chat_router = APIRouter(tags=["Workspace Chat"], prefix="/v1/workspace")
@@ -43,8 +45,8 @@ def stream_chat_qna_endpoint(
     slug            : str = Path(..., description="워크스페이스 슬러그"),
     thread_slug     : str = Path(..., description="채팅 스레드 슬러그"),
     body            : StreamChatRequest = Body(..., description="채팅 요청 본문"),
+    user_id         : int = Depends(get_user_id_from_cookie),
 ):
-    user_id         = 3
     security_level  = 2 # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
     logger.info(f"\n\n[stream_chat_qna_endpoint] \n{body}\n")
 
@@ -113,10 +115,10 @@ class SummaryRequest(BaseModel):
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")
 def summary_stream_endpoint(
-    slug: str = Path(..., description="워크스페이스 슬러그"),
-    body: SummaryRequest = Body(..., description="요약 요청 (시스템프롬프트/내용/요청사항)"),
+    slug    : str = Path(..., description="워크스페이스 슬러그"),
+    body    : SummaryRequest = Body(..., description="요약 요청 (시스템프롬프트/내용/요청사항)"),
+    user_id : int = Depends(get_user_id_from_cookie),
 ):
-    user_id = 3
     from repository.workspace import get_workspace_id_by_slug_for_user
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
 
@@ -131,40 +133,40 @@ def summary_stream_endpoint(
             raise BadRequestError("워크스페이스에 등록된 문서가 없고 originalText도 제공되지 않았습니다.")
     
     gen = stream_chat_for_summary(
-        user_id=user_id,
-        ws=ws,
-        category="summary",
-        body={
-            "provider": body.provider,
-            "model": body.model,
-            "systemPrompt": body.systemPrompt,
-            "originalText": body.originalText,
-            "userPrompt": body.userPrompt,
+        user_id     = user_id,
+        ws          = ws,
+        category    = "summary",
+        body        = {
+            "provider"      : body.provider,
+            "model"         : body.model,
+            "systemPrompt"  : body.systemPrompt,
+            "originalText"  : body.originalText,
+            "userPrompt"    : body.userPrompt,
         },
     )
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
 
 class VariableItem(BaseModel):
-    key: str
-    value: str
+    key     : str
+    value   : str
 
 class DocGenRequest(BaseModel):
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    templateId: int
+    provider    : Optional[str] = None
+    model       : Optional[str] = None
+    templateId  : int
     systemPrompt: Optional[str] = None
-    userPrompt: Optional[str] = None
-    variables: List[VariableItem] = Field(default_factory=list)
+    userPrompt  : Optional[str] = None
+    variables   : List[VariableItem] = Field(default_factory=list)
 
 
 @chat_router.post("/{slug}/doc-gen/stream", summary="문서 생성 실행 (스트리밍)")
 def doc_gen_stream_endpoint(
-    slug: str = Path(..., description="워크스페이스 슬러그"),
-    body: DocGenRequest = Body(..., description="문서 생성 요청 (템플릿/변수/요청사항)"),
+    slug    : str = Path(..., description="워크스페이스 슬러그"),
+    body    : DocGenRequest = Body(..., description="문서 생성 요청 (템플릿/변수/요청사항)"),
+    user_id : int = Depends(get_user_id_from_cookie),
 ):
     from repository.workspace import get_workspace_id_by_slug_for_user
-    user_id = 3
     tmpl = get_doc_gen_template(int(body.templateId))
     if not tmpl:
         raise BadRequestError("유효하지 않은 templateId 입니다.")
@@ -188,13 +190,13 @@ def doc_gen_stream_endpoint(
         ws=ws,
         category="doc_gen",
         body={
-            "provider": body.provider,
-            "model": body.model,
-            "message": message,
-            "mode": "chat",
-            "systemPrompt": body.systemPrompt,
-            "templateId": body.templateId,
-            "templateVariables": filtered_vars,
+            "provider"          : body.provider,
+            "model"             : body.model,
+            "message"           : message,
+            "mode"              : "chat",
+            "systemPrompt"      : body.systemPrompt,
+            "templateId"        : body.templateId,
+            "templateVariables" : filtered_vars,
         },
     )
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
@@ -205,17 +207,17 @@ class UpdateMetricsRequest(BaseModel):
 
 @chat_router.patch(
     "/{slug}/chat/{chat_id}/metrics",
-    summary="채팅 메트릭 업데이트",
-    description="프론트엔드에서 계산한 reasoning_duration을 업데이트"
+    summary     = "채팅 메트릭 업데이트",
+    description = "프론트엔드에서 계산한 reasoning_duration을 업데이트"
 )
 def update_chat_metrics_endpoint(
-    chat_id: int = Path(..., description="채팅 ID"),
-    body: UpdateMetricsRequest = Body(..., description="채팅 메트릭 업데이트 요청"),
+    chat_id : int = Path(..., description="채팅 ID"),
+    body    : UpdateMetricsRequest = Body(..., description="채팅 메트릭 업데이트 요청"),
+    user_id : int = Depends(get_user_id_from_cookie),
 ):
     """
     프론트엔드가 스트리밍 응답 중 계산한 reasoning_duration을 저장
     """
     from service.users.chat.response_metrics import update_reasoning_duration
-    user_id = 3
     result = update_reasoning_duration(user_id, chat_id, body.reasoningDuration)
     return {"success": True, "data": result}
