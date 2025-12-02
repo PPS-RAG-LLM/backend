@@ -8,8 +8,15 @@ from .milvus_store import (
     reload_collection,
     run_dense_search,
     run_hybrid_search,
+    resolve_collection
 )
 
+from .milvus_hitz import (
+    DEFAULT_OUTPUT_FIELDS,
+    build_dense_hits,
+    build_rerank_payload,
+    load_snippet_from_store,
+)
 __all__ = [
     "drop_all_collections",
     "ensure_collection_and_index",
@@ -18,5 +25,12 @@ __all__ = [
     "reload_collection",
     "run_dense_search",
     "run_hybrid_search",
+    "resolve_collection",
+    ###
+    "DEFAULT_OUTPUT_FIELDS",
+    "build_dense_hits",
+    "build_rerank_payload",
+    "load_snippet_from_store",
 ]
+
 

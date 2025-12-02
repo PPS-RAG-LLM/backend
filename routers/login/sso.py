@@ -1,10 +1,9 @@
 # routers/sso.py (완전 버전)
+from datetime import timedelta, timezone, datetime
 from fastapi import APIRouter, Response, Cookie
 from pydantic import BaseModel
-from utils import get_db, now_kst_string
-from typing import Optional, Dict, Any
 from errors import SessionNotFound, NotFoundError, UnauthorizedError
-from service.users.session import create_session
+from service.users.session import login_by_sso_token
 from utils import logger
 from config import config
 from utils.time import now_kst
@@ -14,8 +13,7 @@ logger = logger(__name__)
 sso_router = APIRouter(prefix="/v1/sso", tags=["SSO"])
 
 class CompanyUserInfo(BaseModel):
-    username: str      # 회사의 employee_id
-    password: str
+    token: str
 
 @sso_router.post("/login")
 def sso_login(company_user: CompanyUserInfo, response: Response):
@@ -23,25 +21,23 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
     try:
         server_conf = config.get("server")
         # 1. 로그인 처리 및 세션 생성
-        session_id, user_info = create_session(company_user.username, company_user.password)
+        session_id, user_info = login_by_sso_token(company_user.token)
         # 2. 브라우저에 쿠키 설정
         response.set_cookie(
             key     =server_conf.get("cookie_name").lower(),
             value   =session_id,
-            max_age =server_conf.get("cookie_session_max_age"),    # 8 hours
+            max_age =int(server_conf.get("cookie_session_max_age")),    # 8 hours
+            expires = datetime.now(timezone.utc) + timedelta(seconds=int(server_conf.get("cookie_session_max_age"))),
             httponly=server_conf.get("cookie_httponly"),     
             samesite=server_conf.get("cookie_samesite"),     
             secure  =server_conf.get("cookie_secure"),
             path    ="/"
         )
-        logger.info(f"login success: {user_info['name']} (session: {session_id[:8]}...)")
+        logger.info(f"SSO Login success: {user_info['name']}")
+        
         return {
-            "message"       : "login success", 
-            "user_id"       : user_info['user_id'],
-            "name"          : user_info['name'],
-            "department"    : user_info['department'],
-            "position"      : user_info['position'],
-            "security_level": user_info['security_level']
+            "message": "login success", 
+            "user": user_info
         }
     except (NotFoundError, UnauthorizedError) as e:
         logger.info(f"login failed: {e.message}")

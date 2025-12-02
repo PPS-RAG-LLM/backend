@@ -99,22 +99,22 @@ def unified_search(query: str, config: Dict[str, Any]) -> List[RetrievalResult]:
             )
             future_to_source[future] = "ADMIN_DOCS"
 
-        # 4. LLM Test (Admin Docs reuse)
-        if "LLM_TEST" in sources:
-            logger.info(f"LLM_TEST source enabled and security_level={config.get('security_level')}")
-            sec_level = int(config.get("security_level") or 1)
-            adapter = AdminDocsAdapter()
-            future = executor.submit(
-                adapter.search,
-                query,
-                top_k,
-                security_level=sec_level,
-                task_type=str(config.get("task_type") or "qna"),
-                search_type=config.get("search_type"),
-                model_key=config.get("model_key"),
-                rerank_top_n=rerank_top_n,
-            )
-            future_to_source[future] = "LLM_TEST"
+        # # 4. LLM Test (Admin Docs reuse)
+        # if "LLM_TEST" in sources:
+        #     logger.info(f"LLM_TEST source enabled and security_level={config.get('security_level')}")
+        #     sec_level = int(config.get("security_level") or 1)
+        #     adapter = AdminDocsAdapter()
+        #     future = executor.submit(
+        #         adapter.search,
+        #         query,
+        #         top_k,
+        #         security_level=sec_level,
+        #         task_type=str(config.get("task_type") or "qna"),
+        #         search_type=config.get("search_type"),
+        #         model_key=config.get("model_key"),
+        #         rerank_top_n=rerank_top_n,
+        #     )
+        #     future_to_source[future] = "LLM_TEST"
 
         # Collect results
         for future in as_completed(future_to_source):

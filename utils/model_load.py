@@ -17,9 +17,7 @@ _USER_DOCS_CFG = app_config.get("user_documents", {}) or {}
 
 
 def _resolve_model_root() -> Path:
-    path_value = _RETRIEVAL_PATHS.get(
-        "model_root_dir", _USER_DOCS_CFG.get("embedding_model_dir", "storage/embedding-models")
-    )
+    path_value = app_config.get("models_dir", {}).get("embedding_model_path", "storage/embedding-models")
     rel = Path(path_value)
     base = (PROJECT_ROOT / rel)
     return base.resolve()

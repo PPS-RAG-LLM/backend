@@ -13,6 +13,7 @@ from typing import Any, List, Optional
 
 from tqdm import tqdm  # type: ignore
 
+from config import config
 from repository.documents import bulk_upsert_document_metadata, delete_documents_not_in_doc_ids
 from utils.documents import generate_doc_id
 from service.retrieval.common import determine_level_for_task, parse_doc_version
@@ -26,6 +27,7 @@ from service.preprocessing.extension.ppt_preprocessing import extract_ppt
 from service.preprocessing.extension.pptx_preprocessing import extract_pptx
 from service.preprocessing.extension.txt_preprocessing import extract_plain_text
 from utils.time import now_kst_string
+from storage.db_models import DocumentType
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +82,13 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
         dict: 전처리 결과
     """
     from service.admin.manage_vator_DB import (
-        ADMIN_DOC_TYPE,
-        RAW_DATA_DIR,
         TASK_TYPES,
-        SUPPORTED_EXTS,
         get_security_level_rules_all,
         register_admin_document,
     )
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ADMIN_RAW_DATA_DIR = Path(config.get("admin_raw_data_dir", "storage/raw_files/admin_raw_data"))
+
+    ADMIN_RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # 규칙 로드
     all_rules = get_security_level_rules_all()  # {task: {"maxLevel":N, "levels":{...}}}
@@ -107,11 +108,11 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
         base = max(mid_tokens, key=len) if mid_tokens else parts[0]
         return base, date_num
 
-    raw_files = [p for p in RAW_DATA_DIR.rglob("*") if p.is_file() and ext(p) in SUPPORTED_EXTS]
+    raw_files = [p for p in ADMIN_RAW_DATA_DIR.rglob("*") if p.is_file()]
     if target_rel_paths:
         wanted = set()
         for rel in target_rel_paths:
-            candidate = (RAW_DATA_DIR / Path(rel)).resolve()
+            candidate = (ADMIN_RAW_DATA_DIR / Path(rel)).resolve()
             if candidate.exists():
                 wanted.add(candidate)
             else:
@@ -141,7 +142,7 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
         for old_path, _ in lst_sorted[:-1]:
             try:
                 old_path.unlink(missing_ok=True)
-                removed.append(str(old_path.relative_to(RAW_DATA_DIR)))
+                removed.append(str(old_path.relative_to(ADMIN_RAW_DATA_DIR)))
             except Exception:
                 logger.exception("Failed to remove duplicate: %s", old_path)
 
@@ -185,10 +186,9 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
             }
 
             max_sec = max(sec_map.values()) if sec_map else 1
-            sec_folder = f"securityLevel{int(max_sec)}"
 
-            rel_from_raw = src.relative_to(RAW_DATA_DIR)
-            rel_source_path = str(Path("row_data") / rel_from_raw.as_posix())  # RAW 기준 경로
+            rel_from_raw = src.relative_to(ADMIN_RAW_DATA_DIR)
+            rel_source_path = str(Path("admin_raw_data") / rel_from_raw.as_posix())  # RAW 기준 경로
 
             pages_tables: dict[int, list[dict]] = defaultdict(list)
             for t in (tables or []):
@@ -280,7 +280,7 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
     deleted_docs = 0
     if processed_doc_ids and not target_rel_paths:
         unique_ids = list(dict.fromkeys(processed_doc_ids))
-        deleted_docs = delete_documents_not_in_doc_ids(ADMIN_DOC_TYPE, unique_ids)
+        deleted_docs = delete_documents_not_in_doc_ids(DocumentType.ADMIN.value, unique_ids)
 
     return {
         "message": "문서 추출 완료",

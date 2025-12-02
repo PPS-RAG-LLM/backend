@@ -35,3 +35,4 @@ def set_rag_settings_row(new_search: str, new_chunk: int, new_overlap: int, new_
         settings.overlap = new_overlap
         settings.updated_at = now_kst()
         session.commit()
+
