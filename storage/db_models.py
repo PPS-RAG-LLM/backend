@@ -161,7 +161,6 @@ class User(Base):
     role = Column(Text, nullable=False, server_default=text("'user'"))
     username = Column(Text, nullable=False, unique=True)
     name = Column(Text, nullable=False)
-    password = Column(Text, nullable=False)
     department = Column(Text, nullable=False)
     position = Column(Text, nullable=False)
     pfp_filename = Column(Text)
