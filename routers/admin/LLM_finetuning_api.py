@@ -87,7 +87,8 @@ async def launch_fine_tuning(
     overfittingPrevention: bool | None = Form(None),
     gradientAccumulationSteps: int | None = Form(None),
     tuningType: str | None = Form(None, description="LORA | QLORA | FULL"),
-    quantizationBits: int | None = Form(None, description="QLORA 전용: 4 또는 8"),
+    # 문자열로 받아서 빈 문자열("")을 None으로 처리한 뒤, QLORA일 때만 int로 변환
+    quantizationBits: str | None = Form(None, description="QLORA 전용: 4 또는 8"),
     startAt: str | None = Form(None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"),
     startNow: bool | None = Form(None, description="즉시 실행 여부 (True: 바로 시작, False: 예약만 등록)"),
     # 업로드 파일(필수)
@@ -103,8 +104,20 @@ async def launch_fine_tuning(
     _lr = float(learningRate) if learningRate is not None else 2e-4
     _ofp = True if overfittingPrevention is None else bool(overfittingPrevention)
     _gas = int(gradientAccumulationSteps) if gradientAccumulationSteps is not None else 16
-    _tuning = (tuningType or "QLORA").upper()
-    _qbits = quantizationBits if quantizationBits is not None else (4 if _tuning == "QLORA" else None)
+    _tuning = (tuningType or "QLORA").strip().upper() if tuningType else "QLORA"
+
+    # quantizationBits는 QLORA에서만 사용.
+    # - 폼에서 ""로 오면 None 처리
+    # - QLORA인데 값이 없으면 기본 4, 값이 있으면 int로 변환
+    # - FULL/LORA에서는 항상 None
+    raw_qbits = (quantizationBits or "").strip() if quantizationBits is not None else None
+    if _tuning == "QLORA":
+        if not raw_qbits:
+            _qbits = 4
+        else:
+            _qbits = int(raw_qbits)
+    else:
+        _qbits = None
     _startNow = startNow if startNow is not None else False
 
     # 1) 파일 저장

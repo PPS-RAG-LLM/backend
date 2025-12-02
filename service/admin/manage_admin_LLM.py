@@ -13,6 +13,27 @@ from glob import glob
 from pydantic import BaseModel, Field
 from utils.database import get_db as _get_db
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
+from repository.llm_models import (
+    repo_set_cache, repo_get_cache,
+    repo_get_llm_model_by_name,
+    repo_get_active_llm_models,
+    repo_update_llm_model_active_by_path,
+    repo_get_llm_model_path_by_name,
+    repo_get_llm_model_id_and_path_by_name,
+    repo_get_llm_models_by_category_all,
+    repo_get_llm_models_by_category_and_subcategory,
+    repo_get_llm_models_by_category,
+    repo_delete_llm_model,
+    repo_get_llm_model_by_id,
+    repo_get_fine_tuned_model_by_model_id,
+    repo_get_distinct_model_ids_from_fine_tuned_models,
+    repo_get_prompt_template_by_id,
+    repo_get_prompt_variables_by_template_id,
+    repo_get_prompt_templates_by_category_and_name,
+    repo_get_default_prompt_template_by_category,
+    repo_get_best_llm_prompt_mapping_by_prompt_id,
+    repo_count_default_prompt_templates,
+)
 try:
     from peft import PeftModel
 except Exception:
@@ -158,78 +179,13 @@ def _canon_storage_path(p: str) -> str:
 def _connect() -> sqlite3.Connection:
     # Delegate to shared database connector (respects config/database paths and pragmas)
     return _get_db()
+
 # ===== Migration / helpers =====
-# def _migrate_llm_models_if_needed():
-#     conn = _connect()
-#     conn.row_factory = sqlite3.Row
-#     cur = conn.cursor()
-#     try:
-#         cur.execute("PRAGMA table_info(llm_models)")
-#         cols = {r[1] for r in cur.fetchall()}  # name is at index 1
-#         cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_models'")
-#         row = cur.fetchone()
-#         ddl = row[0] if row else ""
-#         need_sub = "subcategory" not in cols
-#         need_all = ("CHECK" in ddl) and ("'all'" not in ddl)
-#         if not (need_sub or need_all):
-#             return
-#         cur.execute("PRAGMA foreign_keys=off")
-#         cur.execute(
-#             """
-#             CREATE TABLE llm_models__new(
-#               id INTEGER PRIMARY KEY AUTOINCREMENT,
-#               provider TEXT NOT NULL,
-#               name TEXT UNIQUE NOT NULL,
-#               revision INTEGER,
-#               model_path TEXT,
-#               category TEXT NOT NULL CHECK (category IN ('qna','doc_gen','summary','all')),
-#               subcategory TEXT,
-#               type TEXT NOT NULL CHECK (type IN ('base','lora','full')) DEFAULT 'base',
-#               is_default BOOLEAN NOT NULL DEFAULT 0,
-#               is_active BOOLEAN NOT NULL DEFAULT 1,
-#               trained_at DATETIME,
-#               created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-#             )
-#             """
-#         )
-#         # Copy common columns
-#         keep = [
-#             "id","provider","name","revision","model_path","category","type","is_default","is_active","trained_at","created_at"
-#         ]
-#         present = []
-#         for c in keep:
-#             try:
-#                 cur.execute(f"SELECT 1 FROM llm_models LIMIT 1")
-#                 present.append(c)
-#             except Exception:
-#                 pass
-#         sel = ", ".join([c for c in keep if c in cols])
-#         if sel:
-#             cur.execute(f"INSERT INTO llm_models__new({sel}) SELECT {sel} FROM llm_models")
-#         cur.execute("DROP TABLE llm_models")
-#         cur.execute("ALTER TABLE llm_models__new RENAME TO llm_models")
-#         cur.execute("PRAGMA foreign_keys=on")
-#         conn.commit()
-#     except Exception:
-#         logging.getLogger(__name__).exception("llm_models migration failed")
-#     finally:
-#         conn.close()
-
-
-
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
     try:
-        conn = _connect()
-        cur = conn.cursor()
-        cur.execute("UPDATE llm_models SET is_active=? WHERE model_path=?", (1 if active else 0, rel_path))
-        conn.commit()
+        repo_update_llm_model_active_by_path(rel_path, active)
     except Exception:
         logging.getLogger(__name__).exception("failed to sync is_active by path")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 
@@ -252,27 +208,12 @@ def _detect_gguf(base: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 def _fetch_llm_and_ft(conn, model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
-    r = cur.fetchone()
-    llm = dict(r) if r else None
+    llm = repo_get_llm_model_by_name(model_name)
     if not llm:
         return None, None
     # 최신 활성 FT 1건 우선, 없으면 최신 1건
-    cur.execute("""
-        SELECT * FROM fine_tuned_models
-         WHERE model_id=? AND IFNULL(is_active,1)=1
-         ORDER BY id DESC LIMIT 1
-    """, (llm["id"],))
-    ft = cur.fetchone()
-    if not ft:
-        cur.execute("""
-            SELECT * FROM fine_tuned_models
-             WHERE model_id=?
-             ORDER BY id DESC LIMIT 1
-        """, (llm["id"],))
-        ft = cur.fetchone()
-    return llm, (dict(ft) if ft else None)
+    ft = repo_get_fine_tuned_model_by_model_id(llm["id"], active_first=True)
+    return llm, ft
 
 def _choose_artifacts(llm: dict, ft: Optional[dict]) -> Dict[str, Any]:
     """DB 컬럼만 사용하여 로딩 아티팩트 결정"""
@@ -374,12 +315,8 @@ def _now_iso() -> str:
 
 
 def _get_cache(name: str) -> Optional[str]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT data FROM cache_data WHERE name=? ORDER BY id DESC LIMIT 1", (name,))
-    row = cur.fetchone()
-    conn.close()
-    return row["data"] if row else None
+    """cache_data 테이블에서 캐시 데이터를 조회합니다."""
+    return repo_get_cache(name)
 def _norm_category(category: str) -> str:
     """
     외부 표기는 qna, 내부 스키마/기존 코드는 qna.
@@ -395,14 +332,11 @@ def _subtask_key(subtask: Optional[str]) -> str:
 
 
 def _set_cache(name: str, data: str, belongs_to: str = "global", by_id: Optional[int] = None):
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO cache_data(name, data, belongs_to, by_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    """, (name, data, belongs_to, by_id))
-    conn.commit()
-    conn.close()
+    """cache_data 테이블에 캐시 데이터를 저장합니다."""
+    try:
+        repo_set_cache(name, data, belongs_to, by_id)
+    except Exception:
+        logging.getLogger(__name__).exception(f"Failed to set cache: name={name}")
 
 
 # ---------- 활성 프롬프트: 사용자 선택 저장/조회 ----------
@@ -511,26 +445,7 @@ def get_active_llm_models() -> List[Dict[str, Any]]:
     llm_models에서 is_active=1 인 모델 목록을 반환한다.
     로깅/표시 용도로만 사용하며, 모델을 실제로 로드하지 않는다.
     """
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, provider, name, category, model_path, type, is_default, is_active, trained_at, created_at
-        FROM llm_models
-        WHERE is_active=1
-        ORDER BY id DESC
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        try:
-            keys = r.keys()
-            out.append({k: r[k] for k in keys})
-        except Exception:
-            out.append(dict(r))  # best-effort
-    return out
+    return repo_get_active_llm_models()
 
 def _fill_template(content: str, variables: Dict[str, Any]) -> str:
     # 템플릿 내 {{key}} 치환
@@ -540,22 +455,11 @@ def _fill_template(content: str, variables: Dict[str, Any]) -> str:
     return out
     
 
-def _fetch_prompt_full(prompt_id: int) -> Tuple[sqlite3.Row, List[Dict[str, Any]]]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM system_prompt_template WHERE id=? AND ifnull(is_active,1)=1", (prompt_id,))
-    tmpl = cur.fetchone()
+def _fetch_prompt_full(prompt_id: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    tmpl = repo_get_prompt_template_by_id(prompt_id)
     if not tmpl:
-        conn.close()
         raise ValueError("존재하지 않거나 비활성화된 프롬프트입니다.")
-    cur.execute("""
-      SELECT v.id, v.type, v.key, v.value, v.description
-      FROM system_prompt_variables v
-      JOIN prompt_mapping m ON m.variable_id=v.id
-      WHERE m.template_id=?
-    """, (prompt_id,))
-    vars_rows = cur.fetchall()
-    conn.close()
+    vars_rows = repo_get_prompt_variables_by_template_id(prompt_id)
     variables = [{"id": r["id"], "type": r["type"], "key": r["key"], "value": r["value"], "description": r["description"]} for r in vars_rows]
     return tmpl, variables
 
@@ -591,29 +495,8 @@ def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:
         return {"loaded": False, "message": "unexpected error", "modelName": model_name}
 
 
-# def _ensure_models_from_fs(category: str) -> None:
-#     """
-#     STORAGE_ROOT를 스캔하더라도 DB 스키마 카테고리 제약(qna|doc_gen|summary)과 충돌을 피하기 위해
-#     여기서는 DB에 쓰지 않는다. 베이스 모델 등록은 insert-base API로만 수행한다.
-#     """
-#     return
-
-
-# def _to_rel(p: str) -> str:
-#     """Return `p` as a path relative to backend root if possible, to keep DB records portable."""
-#     try:
-#         return os.path.relpath(p, str(BASE_BACKEND))
-#     except Exception:
-#         return p
-
-
-def _lookup_model_by_name(model_name: str) -> Optional[sqlite3.Row]:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+def _lookup_model_by_name(model_name: str) -> Optional[Dict[str, Any]]:
+    return repo_get_llm_model_by_name(model_name)
 
 
 def _active_model_name_for_category(category: str) -> Optional[str]:
@@ -877,36 +760,27 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
 
     LLM모델 경로로 모델 켜졌는지 조회
     """
-    conn = _connect()
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT model_path FROM llm_models WHERE name=?", (model_name,))
-        row = cur.fetchone()
+        model_path = repo_get_llm_model_path_by_name(model_name)
+        if not model_path:
+            return None
+        val = (model_path or "").strip().replace("\\", "/")
+        if not val:
+            return None
+
+        # Handle standardized relative paths like ./service/storage/models/...
+        if val.startswith("./"):
+            leg = LLM_MODEL_DIR / os.path.basename(val)
+            if (leg / "config.json").is_file():
+                return _canon_storage_path(str(leg))
+            return None
+
+        # Absolute or simple name -> resolve via fs helper
+        resolved = _resolve_model_fs_path(val)
+        return _canon_storage_path(resolved)
     except Exception:
         logging.getLogger(__name__).exception("failed to query llm_models for %s", model_name)
         return None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    if not row:
-        return None
-    val = (row["model_path"] or "").strip().replace("\\", "/")
-    if not val:
-        return None
-
-    # Handle standardized relative paths like ./service/storage/models/...
-    if val.startswith("./"):
-        leg = LLM_MODEL_DIR / os.path.basename(val)
-        if (leg / "config.json").is_file():
-            return _canon_storage_path(str(leg))
-        return None
-
-    # Absolute or simple name -> resolve via fs helper
-    resolved = _resolve_model_fs_path(val)
-    return _canon_storage_path(resolved)
 
 def _strip_category_suffix(name: str) -> str:
     # 허용: -qna/-doc_gen/-summary 및 _qna/_doc_gen/_summary
@@ -1074,79 +948,21 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
         # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
         ft_ids: set[int] = set()
         try:
-            cur.execute("SELECT DISTINCT model_id FROM fine_tuned_models")
-            ft_ids = {int(r["model_id"]) for r in cur.fetchall() if r["model_id"] is not None}
+            ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
         except Exception:
             ft_ids = set()
 
         # 1) category=all → 전체(활/비활 포함)
         if cat == "all":
-            cur.execute(
-                """
-                SELECT
-                  id, name, provider, category,
-                  is_active AS isActive,
-                  trained_at, created_at
-                  FROM llm_models
-                 ORDER BY
-                  is_active DESC,
-                  trained_at DESC,
-                  id DESC
-                """
-            )
-            rows = cur.fetchall()
+            rows = repo_get_llm_models_by_category_all()
 
         # 2) doc_gen + subcategory → 매핑 rouge 점수순
         elif cat == "doc_gen" and sub:
-            cur.execute(
-                """
-                WITH t AS (
-                  SELECT id
-                    FROM system_prompt_template
-                   WHERE category = ?
-                     AND name = ?
-                     AND IFNULL(is_active,1) = 1
-                   ORDER BY IFNULL(is_default,0) DESC, id DESC
-                   LIMIT 1
-                )
-                SELECT
-                  m.id,
-                  m.name,
-                  m.provider,
-                  m.category,
-                  m.is_active         AS isActive,
-                  m.trained_at,
-                  m.created_at,
-                  IFNULL(pm.rouge_score,-1) AS rougeScore
-                FROM llm_models m
-                JOIN llm_prompt_mapping pm
-                  ON pm.llm_id    = m.id
-                 AND pm.prompt_id = (SELECT id FROM t)
-                WHERE (m.category = 'doc_gen' OR m.category = 'all')
-                ORDER BY IFNULL(pm.rouge_score,-1) DESC,
-                         m.trained_at DESC,
-                         m.id DESC
-                """,
-                (cat, sub),
-            )
-            rows = cur.fetchall()
+            rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
 
         # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
         else:
-            cur.execute(
-                """
-                SELECT
-                  id, name, provider, category,
-                  is_active AS isActive,
-                  trained_at, created_at
-                  FROM llm_models
-                 WHERE is_active = 1
-                   AND (category = ? OR category = 'all')
-                 ORDER BY trained_at DESC, id DESC
-                """,
-                (cat,),
-            )
-            rows = cur.fetchall()
+            rows = repo_get_llm_models_by_category(cat)
     finally:
         conn.close()
 
@@ -1340,32 +1156,7 @@ def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]
     category = _norm_category(category)
     subcat = (subtask or "").strip().lower() or None
 
-    conn = _connect()
-    cur = conn.cursor()
-    try:
-        if subcat:
-            cur.execute(
-                """
-                SELECT id, name, system_prompt, user_prompt
-                  FROM system_prompt_template
-                 WHERE category=? AND lower(name)=? AND ifnull(is_active,1)=1
-                 ORDER BY id DESC
-                """,
-                (category, subcat),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, name, system_prompt, user_prompt
-                  FROM system_prompt_template
-                 WHERE category=? AND ifnull(is_active,1)=1
-                 ORDER BY id DESC
-                """,
-                (category,),
-            )
-        rows = cur.fetchall()
-    finally:
-        conn.close()
+    rows = repo_get_prompt_templates_by_category_and_name(category, subcat)
 
     prompt_list = []
     for r in rows:
@@ -1382,14 +1173,8 @@ def list_prompts(category: str, subtask: Optional[str] = None) -> Dict[str, Any]
 
 # ==== (추가) LORA/QLORA 베이스/어댑터 경로 인식 강화 ====
 
-def _db_get_model_record(model_name: str) -> Optional[sqlite3.Row]:
-    conn = _connect()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM llm_models WHERE name=?", (model_name,))
-        return cur.fetchone()
-    finally:
-        conn.close()
+def _db_get_model_record(model_name: str) -> Optional[Dict[str, Any]]:
+    return repo_get_llm_model_by_name(model_name)
 
 
 def _resolve_paths_for_model(model_name: str) -> Dict[str, Optional[str]]:
@@ -1462,57 +1247,27 @@ def get_selected_model(q):
     category = _norm_category(q.category)
     subcat = (getattr(q, "subcategory", None) or "").strip().lower() or None
 
-    conn = _connect(); cur = conn.cursor()
     try:
         # 1) default 템플릿 선택
-        if subcat:
-            cur.execute("""
-                SELECT id, name FROM system_prompt_template
-                 WHERE category=? AND lower(name)=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
-                 ORDER BY id DESC LIMIT 1
-            """, (category, subcat))
-        else:
-            cur.execute("""
-                SELECT id, name FROM system_prompt_template
-                 WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
-                 ORDER BY id DESC LIMIT 1
-            """, (category,))
-        tmpl = cur.fetchone()
+        tmpl = repo_get_default_prompt_template_by_category(category, subcat)
         if not tmpl:
             return {"category": category, "subcategory": subcat, "default": None, "note": "기본 템플릿 없음"}
 
         prompt_id = int(tmpl["id"])
 
         # 2) prompt 매핑 중 최고 rouge_score 1건
-        cur.execute("""
-            SELECT llm_id, prompt_id, rouge_score
-              FROM llm_prompt_mapping
-             WHERE prompt_id=?
-             ORDER BY IFNULL(rouge_score, -1) DESC, llm_id DESC
-             LIMIT 1
-        """, (prompt_id,))
-        mp = cur.fetchone()
+        mp = repo_get_best_llm_prompt_mapping_by_prompt_id(prompt_id)
         if not mp:
             return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "프롬프트-모델 매핑 없음"}
 
         # 3) llm_models 메타
-        cur.execute("""
-            SELECT id, name, provider, type, model_path, mather_path, category, is_active, trained_at, created_at
-              FROM llm_models WHERE id=?
-        """, (mp["llm_id"],))
-        mdl = cur.fetchone()
+        mdl = repo_get_llm_model_by_id(mp["llm_id"])
         if not mdl:
             return {"category": category, "subcategory": tmpl["name"], "default": None, "note": "llm_models에 모델 없음"}
 
         # 스키마 제약 확인(참고 메시지)
         # 카테고리/서브카테고리별 default가 1개라는 제약을 코드에서는 강제하지 않음(요구대로 '확인만')
-        cur.execute("""
-            SELECT COUNT(*) AS cnt
-              FROM system_prompt_template
-             WHERE category=? AND ifnull(is_default,0)=1 AND ifnull(is_active,1)=1
-               AND (? IS NULL OR lower(name)=?)
-        """, (category, subcat, subcat))
-        cnt = (cur.fetchone() or {"cnt": 0})["cnt"]
+        cnt = repo_count_default_prompt_templates(category, subcat)
 
         return {
             "category": category,
@@ -1528,8 +1283,9 @@ def get_selected_model(q):
             },
             "note": ("default 템플릿 다수" if (cnt and cnt > 1) else None)
         }
-    finally:
-        conn.close()
+    except Exception:
+        logging.getLogger(__name__).exception("get_default_model_for_category failed")
+        return {"category": category, "subcategory": subcat, "default": None, "note": "오류 발생"}
 
 
 def _is_under_allowed_roots(path_str: str) -> bool:
@@ -1699,13 +1455,12 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
     cur = conn.cursor()
     try:
         # 2) 모델 메타 조회
-        cur.execute("SELECT id, model_path FROM llm_models WHERE name=?", (name,))
-        row = cur.fetchone()
-        if not row:
+        model_info = repo_get_llm_model_id_and_path_by_name(name)
+        if not model_info:
             return {"success": False, "error": f"unknown model: {name}"}
 
-        mid = int(row["id"])
-        model_path_value = (row["model_path"] or "").strip()
+        mid = int(model_info["id"])
+        model_path_value = (model_info["model_path"] or "").strip()
 
         # 3) 파일시스템 정리
         targets = _collect_fs_delete_targets(model_path_value)
@@ -1769,8 +1524,8 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
             cur.execute("DELETE FROM llm_eval_runs WHERE llm_id=?", (mid,))
             deleted["llm_eval_runs"] = cur.rowcount or 0
 
-        cur.execute("DELETE FROM llm_models WHERE id=?", (mid,))
-        deleted["llm_models"] = cur.rowcount or 0
+        deleted_count = repo_delete_llm_model(mid)
+        deleted["llm_models"] = deleted_count
 
         conn.commit()
 

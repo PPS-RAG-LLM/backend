@@ -9,7 +9,8 @@ except Exception:
 
 import os
 # 🔧 CUDA 메모리 단편화 완화 (권장)
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:256,expandable_segments:True")
+# expandable_segments:True는 메모리 단편화를 줄이고, max_split_size_mb는 큰 블록 할당을 방지
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512,expandable_segments:True,roundup_power2_divisions:16")
 
 import json
 import threading
@@ -46,6 +47,24 @@ def _get_model_device(model):
         pass
     import torch as _torch
     return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+
+
+def _clear_gpu_memory():
+    """GPU 메모리 캐시를 완전히 정리하여 단편화를 줄입니다."""
+    try:
+        import torch
+        import gc
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            # 모든 CUDA 캐시 정리
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            # Python GC 실행
+            gc.collect()
+            # 다시 한번 캐시 정리
+            torch.cuda.empty_cache()
+            logger.debug("GPU memory cache cleared")
+    except Exception as e:
+        logger.warning(f"Failed to clear GPU memory: {e}")
 
 
 # ===== 캐시/임시 디렉토리 관리 =====
@@ -242,6 +261,16 @@ class FineTuneRequest(BaseModel):
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
     )
+    
+    @field_validator("tuningType", mode="before")
+    @classmethod
+    def _v_tuning_type_strip(cls, v):
+        """tuningType 값의 앞뒤 공백을 제거합니다."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v.strip()
+        return v
     startAt: Optional[str] = Field(
         default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
     )
@@ -257,6 +286,18 @@ class FineTuneRequest(BaseModel):
         if vv not in allowed:
             raise ValueError(f"category must be one of {sorted(allowed)}")
         return vv
+
+    @field_validator("quantizationBits", mode="before")
+    @classmethod
+    def _v_qbits_empty_to_none(cls, v):
+        """
+        폼에서 빈 문자열("")로 넘어오는 quantizationBits를 None으로 처리.
+        FULL/LORA에서는 quantizationBits를 비워도 되도록 허용하고,
+        QLORA인 경우에만 아래 validator/model_validator에서 4 또는 8을 강제한다.
+        """
+        if v in ("", None):
+            return None
+        return v
 
     @field_validator("quantizationBits")
     @classmethod
@@ -791,10 +832,15 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         output_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
 
+        # ===== 모델 로딩 전 메모리 정리 =====
+        _clear_gpu_memory()
+
         # ===== 모델/토크나이저 로드 =====
         # gpt-oss(MXFP4) → Unsloth
         if tuning_type == "QLORA" and is_mxfp4:
             max_len = int(job.request.get("max_len", 3072))  # 💡 기본 3072로 살짝 낮춰 OOM 예방
+            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
+            _clear_gpu_memory()
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_path,
                 dtype=None,                    # H100 → bf16 자동
@@ -804,6 +850,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 trust_remote_code=True,
                 local_files_only=True,
             )
+            # 로딩 후 메모리 정리
+            _clear_gpu_memory()
             # Unsloth 모범사례: 학습 최적화 활성화
             try:
                 model = FastLanguageModel.for_training(model)  # 일부 버전에선 in-place. 반환값 호환.
@@ -838,6 +886,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 else:
                     tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
                     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
+            _clear_gpu_memory()
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
@@ -847,6 +897,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             )
             model.gradient_checkpointing_enable()
             model = prepare_model_for_kbit_training(model)
+            # 로딩 후 메모리 정리
+            _clear_gpu_memory()
             lora_targets = [
                 "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
                 "down_proj","w1","w2","c_proj","c_attn"
@@ -872,6 +924,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 else:
                     tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
                     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
+            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
+            _clear_gpu_memory()
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
@@ -880,6 +934,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 local_files_only=True,
             )
             model.gradient_checkpointing_enable()
+            # 로딩 후 메모리 정리
+            _clear_gpu_memory()
             targets = [
                 "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
                 "down_proj","w1","w2","c_proj","c_attn"
@@ -889,6 +945,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             model = get_peft_model(model, lora_cfg)
             max_len = int(job.request.get("max_len", 4096))
         else:  # FULL
+            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
+            _clear_gpu_memory()
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
             if tokenizer.pad_token_id is None:
                 if getattr(tokenizer, "eos_token_id", None) is not None:
@@ -901,7 +959,10 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             )
             model.gradient_checkpointing_enable()
             for p in model.parameters(): p.requires_grad = True
-            max_len = int(job.request.get("max_len", 4096))
+            # 로딩 후 메모리 정리
+            _clear_gpu_memory()
+            # FULL 파인튜닝은 메모리를 많이 사용하므로 기본 max_len을 더 보수적으로 설정
+            max_len = int(job.request.get("max_len", 2048))  # 기본값을 4096에서 2048로 감소
 
         # ===== 데이터셋 생성 =====
         train_ds = RagDataset(train_data, tokenizer, max_len=max_len)
@@ -1008,7 +1069,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 # 메모리 해제
                 try:
                     del trainer
-                    torch.cuda.empty_cache(); gc.collect()
+                    _clear_gpu_memory()
                 except Exception:
                     pass
                 # 재구성
