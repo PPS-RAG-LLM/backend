@@ -59,6 +59,7 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
         stmt = (
             select(
                 User.id,
+                User.role,
                 User.username,
                 User.name,
                 User.department,
@@ -74,7 +75,7 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
         if not row:
             return None
 
-        user_id, username, name, department, position, security_level, expires_at = row
+        user_id, role, username, name, department, position, security_level, expires_at = row
 
         # 만료 체크 (UTC 기준). 레거시 문자열 대비
         expires_kst = _parse_legacy_kst_string_to_utc(expires_at)
@@ -92,6 +93,7 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
 
         return {
             "user_id": user_id,
+            "role": role,
             "username": username,
             "name": name,
             "department": department,

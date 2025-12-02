@@ -9,6 +9,7 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
         with get_session() as session:
             stmt = select(
                 User.id,
+                User.role,
                 User.username,
                 User.name,
                 User.department,
@@ -22,6 +23,7 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             m = row._mapping
             return {
                 "id": m["id"],
+                "role": m["role"],
                 "username": m["username"],
                 "name": m["name"],
                 "department": m["department"],
