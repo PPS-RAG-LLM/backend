@@ -14,7 +14,6 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
                 User.department,
                 User.position,
                 User.security_level,
-                User.password,
             ).where(User.username == username).limit(1)
             row = session.execute(stmt).first()
             if not row:
@@ -28,7 +27,6 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
                 "department": m["department"],
                 "position": m["position"],
                 "security_level": m["security_level"],
-                "password": m["password"],
             }
     finally:
         pass
