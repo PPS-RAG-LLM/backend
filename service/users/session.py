@@ -84,6 +84,7 @@ def login_by_sso_token(token: str) -> tuple[str, dict]:
 
     user_info = {
         'user_id': user['id'],
+        'role': user['role'],
         'username': user['username'],
         'name': user['name'],
         'department': user['department'],

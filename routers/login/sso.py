@@ -55,6 +55,7 @@ def get_session_info(coreiq_session: str = Cookie(None)):
         raise SessionNotFound("session not found or expired")
     return {
         "user_id": session_data['user_id'],
+        "role": session_data['role'],
         "username": session_data['username'],
         "name": session_data['name'],
         "security_level": session_data['security_level'],
