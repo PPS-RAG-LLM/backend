@@ -160,6 +160,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     role = Column(Text, nullable=False, server_default=text("'user'"))
     username = Column(Text, nullable=False, unique=True)
+    password = Column(Text, nullable=True)
     name = Column(Text, nullable=False)
     department = Column(Text, nullable=False)
     position = Column(Text, nullable=False)

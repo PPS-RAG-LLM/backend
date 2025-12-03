@@ -58,6 +58,8 @@ def get_session_info(coreiq_session: str = Cookie(None)):
         "role": session_data['role'],
         "username": session_data['username'],
         "name": session_data['name'],
+        "department": session_data['department'],
+        "position": session_data['position'],
         "security_level": session_data['security_level'],
         "expires_at":session_data['expires_at']
     }
