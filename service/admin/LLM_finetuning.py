@@ -869,7 +869,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 from peft import LoraConfig, get_peft_model  # type: ignore
                 lora_cfg = LoraConfig(r=64, lora_alpha=16, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
                 model = get_peft_model(model, lora_cfg)
-
         elif tuning_type == "QLORA":
             # 일반 QLORA
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training  # type: ignore
@@ -1063,17 +1062,26 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             if "out of memory" in str(re).lower():
                 # 🔻 배치/시퀀스 동시 축소 + **이전 Trainer/그래프 완전 정리**
                 old_bs = training_args.per_device_train_batch_size
+                old_gas = training_args.gradient_accumulation_steps
                 new_bs = max(1, old_bs // 2)
-                new_len = max(1024, int(max_len * 0.75))
-                _append_log(log_path, f"[{_now_utc().isoformat()}] OOM → retry with batch={new_bs}, max_len={new_len}")
+                # FULL 파인튜닝의 경우 gradient accumulation을 늘려서 효과적인 배치 크기 유지
+                if tuning_type == "FULL" and new_bs == 1:
+                    new_gas = old_gas * 2  # 배치가 1이면 gradient accumulation을 2배로
+                else:
+                    new_gas = old_gas
+                new_len = max(512, int(max_len * 0.75))  # 최소값을 1024에서 512로 낮춤
+                _append_log(log_path, f"[{_now_utc().isoformat()}] OOM → retry with batch={new_bs}, gas={new_gas}, max_len={new_len}")
                 # 메모리 해제
                 try:
                     del trainer
+                    del train_ds
+                    del eval_ds
                     # _clear_gpu_memory()
                 except Exception:
                     pass
                 # 재구성
                 training_args.per_device_train_batch_size = new_bs
+                training_args.gradient_accumulation_steps = new_gas
                 train_ds = RagDataset(train_data, tokenizer, max_len=new_len)
                 eval_ds  = RagDataset(eval_data,  tokenizer, max_len=new_len) if use_eval else None
                 trainer = Trainer(
@@ -1084,7 +1092,35 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     tokenizer=tokenizer,
                     callbacks=[ProgressCallback(job.job_id), LogCallback()],
                 )
-                trainer.train()
+                try:
+                    trainer.train()
+                except RuntimeError as re2:
+                    if "out of memory" in str(re2).lower():
+                        # 두 번째 OOM: 더 공격적으로 축소
+                        _append_log(log_path, f"[{_now_utc().isoformat()}] OOM again → final retry with batch=1, max_len={max(512, int(new_len * 0.75))}")
+                        try:
+                            del trainer
+                            del train_ds
+                            del eval_ds
+                            # _clear_gpu_memory()
+                        except Exception:
+                            pass
+                        training_args.per_device_train_batch_size = 1
+                        training_args.gradient_accumulation_steps = new_gas * 2
+                        final_len = max(512, int(new_len * 0.75))
+                        train_ds = RagDataset(train_data, tokenizer, max_len=final_len)
+                        eval_ds  = RagDataset(eval_data,  tokenizer, max_len=final_len) if use_eval else None
+                        trainer = Trainer(
+                            model=model,
+                            args=training_args,
+                            train_dataset=train_ds,
+                            eval_dataset=eval_ds,
+                            tokenizer=tokenizer,
+                            callbacks=[ProgressCallback(job.job_id), LogCallback()],
+                        )
+                        trainer.train()
+                    else:
+                        raise
             else:
                 raise
 
