@@ -11,10 +11,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from glob import glob
 from pydantic import BaseModel, Field
-from utils.database import get_db as _get_db
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from repository.llm_models import (
-    repo_set_cache, repo_get_cache,
     repo_get_llm_model_by_name,
     repo_get_active_llm_models,
     repo_update_llm_model_active_by_path,
@@ -34,6 +32,10 @@ from repository.llm_models import (
     repo_get_best_llm_prompt_mapping_by_prompt_id,
     repo_count_default_prompt_templates,
 )
+from repository.event_logs import repo_add_event_log
+from repository.llm_deletion import repo_delete_llm_related_data
+from repository.cache_data import repo_set_cache, repo_get_cache
+
 try:
     from peft import PeftModel
 except Exception:
@@ -175,11 +177,6 @@ def _canon_storage_path(p: str) -> str:
     return p
 
 
-# ===== DB Helpers =====
-def _connect() -> sqlite3.Connection:
-    # Delegate to shared database connector (respects config/database paths and pragmas)
-    return _get_db()
-
 # ===== Migration / helpers =====
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
     try:
@@ -207,7 +204,7 @@ def _detect_gguf(base: str) -> Tuple[bool, Optional[str]]:
             return True, files[0]
     return False, None
 
-def _fetch_llm_and_ft(conn, model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
+def _fetch_llm_and_ft(model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
     llm = repo_get_llm_model_by_name(model_name)
     if not llm:
         return None, None
@@ -282,11 +279,7 @@ def _load_with_llama_cpp(gguf_path: str):
 
 def load_model_unified(model_name: str):
     """통합 모델 로더: 이름 → 메타 조회 → 경로 결정 → 로드"""
-    conn = _connect()
-    try:
-        llm, ft = _fetch_llm_and_ft(conn, model_name)
-    finally:
-        conn.close()
+    llm, ft = _fetch_llm_and_ft(model_name)
     if not llm:
         raise RuntimeError(f"unknown model: {model_name}")
 
@@ -422,18 +415,9 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
         "answer": answer,
         "rougeScore": rouge,
     }
-    conn = _connect()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
-            ("model_eval", _json(meta)),
-        )
-        conn.commit()
-    except Exception:
-        logging.getLogger(__name__).exception("failed to insert model_eval event")
-    finally:
-        conn.close()
+    
+    # ORM 기반 로그 저장
+    repo_add_event_log("model_eval", _json(meta))
 
     return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
 
@@ -942,29 +926,24 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
     sub = (subcategory or "").strip()   # = system_prompt_template.name
 
-    conn = _connect()
-    cur = conn.cursor()
+    # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
+    ft_ids: set[int] = set()
     try:
-        # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
-        ft_ids: set[int] = set()
-        try:
-            ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
-        except Exception:
-            ft_ids = set()
+        ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
+    except Exception:
+        ft_ids = set()
 
-        # 1) category=all → 전체(활/비활 포함)
-        if cat == "all":
-            rows = repo_get_llm_models_by_category_all()
+    # 1) category=all → 전체(활/비활 포함)
+    if cat == "all":
+        rows = repo_get_llm_models_by_category_all()
 
-        # 2) doc_gen + subcategory → 매핑 rouge 점수순
-        elif cat == "doc_gen" and sub:
-            rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
+    # 2) doc_gen + subcategory → 매핑 rouge 점수순
+    elif cat == "doc_gen" and sub:
+        rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
 
-        # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
-        else:
-            rows = repo_get_llm_models_by_category(cat)
-    finally:
-        conn.close()
+    # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
+    else:
+        rows = repo_get_llm_models_by_category(cat)
 
     # 현재 카테고리 활성 모델명(캐시)
     try:
@@ -1301,10 +1280,10 @@ def _is_under_allowed_roots(path_str: str) -> bool:
     except Exception:
         return False
 
-def _table_exists(conn, table: str) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
+# def _table_exists(conn, table: str) -> bool:
+#     cur = conn.cursor()
+#     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+#     return cur.fetchone() is not None
 
 def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     """
@@ -1450,9 +1429,6 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
         _mark_unloaded(name)
     except Exception:
         logging.getLogger(__name__).exception("unload failed (ignored)")
-
-    conn = _connect()
-    cur = conn.cursor()
     try:
         # 2) 모델 메타 조회
         model_info = repo_get_llm_model_id_and_path_by_name(name)
@@ -1505,29 +1481,7 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
                 )
 
         # 4) DB 정리
-        deleted = {
-            "llm_prompt_mapping": 0,
-            "fine_tuned_models": 0,
-            "llm_eval_runs": 0,
-            "llm_models": 0,
-        }
-
-        if _table_exists(conn, "llm_prompt_mapping"):
-            cur.execute("DELETE FROM llm_prompt_mapping WHERE llm_id=?", (mid,))
-            deleted["llm_prompt_mapping"] = cur.rowcount or 0
-
-        if _table_exists(conn, "fine_tuned_models"):
-            cur.execute("DELETE FROM fine_tuned_models WHERE model_id=?", (mid,))
-            deleted["fine_tuned_models"] = cur.rowcount or 0
-
-        if _table_exists(conn, "llm_eval_runs"):
-            cur.execute("DELETE FROM llm_eval_runs WHERE llm_id=?", (mid,))
-            deleted["llm_eval_runs"] = cur.rowcount or 0
-
-        deleted_count = repo_delete_llm_model(mid)
-        deleted["llm_models"] = deleted_count
-
-        conn.commit()
+        deleted = repo_delete_llm_related_data(mid)
 
         return {
             "success": True,
@@ -1539,8 +1493,3 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
     except Exception:
         logging.getLogger(__name__).exception("delete_model_full failed")
         return {"success": False, "error": "delete_model_full failed"}
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
