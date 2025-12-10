@@ -1,7 +1,6 @@
 from utils import logger
 from utils.database import get_session
 from typing import Optional
-from zoneinfo import ZoneInfo
 from storage.db_models import UserSession, User
 from sqlalchemy import select, delete
 from utils.time import now_kst, to_kst_string
@@ -24,30 +23,25 @@ def save_session_to_db(session_id: str, user_id: int):
     """세션을 DB에 저장"""
     with get_session() as session:
         time_kst = now_kst()
-        expires_utc = time_kst + timedelta(hours=8)  # 8시간 유효
+        expires_at_kst = time_kst + timedelta(hours=8)  # 8시간 유효
         obj = UserSession(
             session_id=session_id,
             user_id=int(user_id),
             created_at=time_kst,
-            expires_at=expires_utc,
+            expires_at=expires_at_kst,
         )
         # 같은 키가 있으면 교체 동작을 원한다면 merge 사용 가능
         session.merge(obj)
         session.commit()
 
 
-def _parse_legacy_kst_string_to_utc(value) -> Optional[datetime]:
-    """레거시 문자열(KST '%Y-%m-%d %H:%M:%S')을 UTC datetime으로 변환.
-    값이 datetime이면 그대로 반환, 실패 시 None.
-    """
+def _parse_db_datetime(value) -> Optional[datetime]:
+    """DB 값을 datetime으로 변환 (문자열인 경우 파싱)"""
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=None)
     if isinstance(value, str):
         try:
-            dt_kst = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=ZoneInfo("Asia/Seoul")
-            )
-            return dt_kst.astimezone(ZoneInfo("UTC"))
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
         except Exception:
             return None
     return None
@@ -77,12 +71,11 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
 
         user_id, role, username, name, department, position, security_level, expires_at = row
 
-        # 만료 체크 (UTC 기준). 레거시 문자열 대비
-        expires_kst = _parse_legacy_kst_string_to_utc(expires_at)
-        if expires_kst is None and isinstance(expires_at, datetime):
-            expires_kst = expires_at
+        # 만료 체크
+        expires_dt = _parse_db_datetime(expires_at)
+        
         now_dt = now_kst()
-        if not expires_kst or expires_kst <= now_dt:
+        if not expires_dt or expires_dt <= now_dt:
             # 만료된 세션 삭제
             session.execute(
                 delete(UserSession).where(UserSession.session_id == session_id)
@@ -99,7 +92,7 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
             "department": department,
             "position": position,
             "security_level": security_level,
-            "expires_at": to_kst_string(expires_kst),  # KST 문자열로 반환
+            "expires_at": to_kst_string(expires_dt),  # KST 문자열로 반환
         }
 
 
@@ -136,17 +129,10 @@ def list_all_sessions_from_db() -> list[dict]:
                 if isinstance(created_at, datetime)
                 else str(created_at)
             )
-            # 레거시 문자열 대비
-            exp_utc = _parse_legacy_kst_string_to_utc(expires_at)
-            exp_str = (
-                to_kst_string(exp_utc)
-                if isinstance(exp_utc, datetime)
-                else (
-                    to_kst_string(expires_at)
-                    if isinstance(expires_at, datetime)
-                    else str(expires_at)
-                )
-            )
+            
+            exp_dt = _parse_db_datetime(expires_at)
+            exp_str = to_kst_string(exp_dt) if exp_dt else str(expires_at)
+
             items.append(
                 {
                     "session_id": session_id,
@@ -191,10 +177,9 @@ def cleanup_expired_sessions() -> int:
         rows = session.execute(stmt).all()
         expired_session_ids = []
         for session_id, expires_at in rows:
-            exp_utc = _parse_legacy_kst_string_to_utc(expires_at)
-            if exp_utc is None and isinstance(expires_at, datetime):
-                exp_utc = expires_at
-            if exp_utc and exp_utc <= now_dt:
+            exp_dt = _parse_db_datetime(expires_at)
+            # 파싱 실패 시 안전하게 삭제하지 않음 (또는 정책 결정)
+            if exp_dt and exp_dt <= now_dt:
                 expired_session_ids.append(session_id)
         if expired_session_ids:
             session.execute(
