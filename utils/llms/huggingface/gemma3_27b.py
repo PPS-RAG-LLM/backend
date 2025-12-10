@@ -3,6 +3,7 @@ from transformers import AutoTokenizer, Gemma3ForConditionalGeneration, AutoProc
 from transformers.generation.streamers import TextIteratorStreamer
 import torch
 from utils import logger, free_torch_memory
+import threading
 from threading import Thread
 from config import config
 
@@ -91,7 +92,10 @@ def stream_chat(messages, **gen_kwargs):
             if text_token:
                 yield text_token
     finally:
-        thread.join()
+        # [수정] GC가 생성 스레드 내부에서 실행될 때 발생하는 'cannot join current thread' 방지
+        # 현재 실행 중인 스레드가 model.generate 스레드(thread)와 다를 때만 join()을 호출해야 함
+        if thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
         free_torch_memory()
 
 # def build_prompt(messages):
