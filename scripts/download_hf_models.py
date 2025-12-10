@@ -112,6 +112,22 @@ def download_default_two(
                 "chat_template*",
             ],
         },
+        {
+            "model_id": "google/gemma-3-27b-it",
+            "dst": os.path.join(base_dir, "gemma-3-27b-it"),
+            # Gemma 3는 모델 샤드, config, tokenizer, chat_template, processor 계열 json이 핵심
+            "include": [
+                "*.safetensors",             # model-0000x-of-0000y.safetensors, model.safetensors.index.json 등
+                "*.json",                    # config.json, generation_config.json, *processor_config.json, *tokenizer_config.json, added_tokens.json 등
+                "tokenizer.*",               # tokenizer.model, tokenizer.json 등
+                "vocab.json",                # 존재 시
+                "merges.txt",                # 존재 시
+                "special_tokens_map.json",   # 존재 시
+                "chat_template*",            # chat_template(.jinja/.json 등)
+                "*.model",                   # 추가 안전장치: tokenizer.model 등
+            ],
+        }
+
         # === 추가: Qwen/Qwen3-Omni-30B-A3B-Instruct (멀티모달: 하위 디렉터리 포함 보수적 패턴) ===
         # {
         #     "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
