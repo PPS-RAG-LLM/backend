@@ -1,5 +1,5 @@
 server:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 3005
   sso_secret_key: "NIQ-SECURE-SECRET-KEY-FOR-SSO-HANDSHAKE" 
 
@@ -55,6 +55,8 @@ models_dir:
 admin_raw_data_dir: storage/raw_files/admin_raw_data
 user_raw_data_dir: storage/raw_files/user_raw_data
 test_llm_raw_data_dir: storage/raw_files/test_llm
+
+full_text_dir : storage/documents/full_text # 문서생성 / 텍스트 요약 전체 텍스트 저장 경로
 
 retrieval:
   temp_ttl_hours: 12

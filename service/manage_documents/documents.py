@@ -38,7 +38,22 @@ from utils import load_embedding_model, logger, now_kst
 
 logger = logger(__name__)
 
+FULL_TEXT_DIR = Path(config.get("full_text_dir", "storage/documents/full_text"))
+FULL_TEXT_DIR.mkdir(parents=True, exist_ok=True)
+
 TEMP_TTL_HOURS = int(config["retrieval"]["temp_ttl_hours"])
+
+# 텍스트 파일 저장 헬퍼 함수
+def _save_full_text_to_disk(doc_id: str, text: str):
+    """doc_id.txt 파일로 전체 텍스트 저장"""
+    try:
+        file_path = FULL_TEXT_DIR / f"{doc_id}.txt"
+        # 덮어쓰기 모드로 저장
+        file_path.write_text(text, encoding="utf-8")
+        logger.info(f"Saved full text to {file_path}")
+    except Exception as e:
+        logger.error(f"Failed to save full text for {doc_id}: {e}")
+
 
 def _get_embedding_key() -> str:
        rag = get_rag_settings_row()
@@ -232,6 +247,10 @@ async def upload_document(
     )
 
     doc_id = str(uuid.uuid4())
+
+    # Doc Gen/Summary용 전체 텍스트 저장
+    _save_full_text_to_disk(doc_id, combined_text)
+    
     try:
         chunk_records = _build_chunk_records(page_texts)
     except Exception as exc:

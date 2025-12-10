@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import delete, desc, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from config import config
 from utils import logger, now_kst, now_kst_string
 from utils.database import get_session
 from sqlalchemy import func
@@ -350,7 +352,17 @@ def delete_documents(doc_ids: List[str]) -> int:
         stmt = delete(Document).where(Document.doc_id.in_(doc_ids))
         result = session.execute(stmt)
         session.commit()
-        return int(result.rowcount or 0)
+    # [추가] 텍스트 파일 삭제
+    for doc_id in doc_ids:
+        try:
+            full_text_dir = Path(config.get("full_text_dir", "storage/documents/full_text"))
+            txt_path = full_text_dir / f"{doc_id}.txt"
+            if txt_path.exists():
+                txt_path.unlink()
+        except Exception as e:
+            # 파일 삭제 실패가 DB 트랜잭션을 방해하면 안 됨
+            print(f"Failed to delete text file {doc_id}: {e}")
+    return int(result.rowcount or 0)
 
 
 def list_documents_by_type(
