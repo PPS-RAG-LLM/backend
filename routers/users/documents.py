@@ -1,6 +1,10 @@
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse
+from errors.exceptions import NotFoundError
+from repository.documents import get_documents_by_ids
+from storage.db_models import DocumentType
 from utils import logger
 from pydantic import BaseModel
 from typing import List
@@ -47,3 +51,66 @@ async def temp_cleanup_endpoint(body: TempCleanupBody, user_id: int = Depends(ge
     return delete_documents_by_ids(
         doc_ids=body.docIds, workspace_slug=body.workspaceSlug, user_id=user_id,
         )
+
+
+
+@router.get("/download", summary="파일 다운로드 (모든 경로 지원)")
+def download_endpoint(
+    docId: Optional[str]    = Query(None, description="문서 ID"),
+    filename: Optional[str] = Query(None, description="파일 이름"),
+    user_id: int = Depends(get_user_id_from_cookie),
+):
+    """
+    docId를 통해 파일의 정확한 위치(User/Admin/Test)를 찾아 반환합니다.
+    docId가 없으면 filename으로 모든 경로를 검색합니다.
+    """
+    
+    # 1. config에서 3가지 경로 로드
+    dirs = {
+        "user": Path(config.get("user_raw_data_dir")),
+        "admin": Path(config.get("admin_raw_data_dir")),
+        "test": Path(config.get("test_llm_raw_data_dir")),
+    }
+    target_file = None
+    
+    # 2. docId가 있는 경우: DB에서 경로 정보 조회 (가장 정확함)
+    if docId:
+        doc_info = get_documents_by_ids([docId])
+        if doc_info and docId in doc_info:
+            doc = doc_info[docId]
+            doc_type = doc.get("doc_type")
+            # DB에 저장된 실제 파일명 (혹은 source_path)
+            # source_path가 있으면 그것을 우선, 없으면 filename 사용
+            real_filename = doc.get("payload", {}).get("doc_info_path") or doc.get("filename") or filename
+            
+            # 타입에 따른 디렉토리 선택
+            base_dir = dirs["user"] # 기본값
+            if doc_type == DocumentType.ADMIN.value:
+                base_dir = dirs["admin"]
+            elif doc_type == DocumentType.LLM_TEST.value:
+                base_dir = dirs["test"]
+            
+            # 파일 경로 조합
+            if real_filename:
+                candidate = base_dir / Path(real_filename).name # 경로 조작 방지 위해 .name 사용
+                if candidate.exists():
+                    target_file = candidate
+
+    # 3. docId 조회 실패 또는 docId 미제공 시: filename으로 모든 폴더 순차 검색 (Fallback)
+    if not target_file and filename:
+        # User -> Admin -> Test 순서로 검색
+        for key in ["user", "admin", "test"]:
+            candidate = dirs[key] / filename
+            if candidate.exists():
+                target_file = candidate
+                break
+
+    # 4. 결과 반환
+    if target_file and target_file.is_file():
+        return FileResponse(
+            path=target_file,
+            filename=filename or target_file.name, # 다운로드될 파일명
+            media_type="application/octet-stream"
+        )
+    
+    raise NotFoundError("파일을 찾을 수 없습니다.")
