@@ -422,18 +422,18 @@ def list_available_embedding_models() -> List[str]:
 def _normalize_keywords(val: Any) -> List[str]:
     """
     리스트/튜플/셋: 각 원소를 str로 캐스팅, 공백/해시 제거
-    문자열: 콤마(,) 또는 줄바꿈(\n) 또는 '@' 기준으로 토큰화 (레거시 호환)
+    문자열: 콤마(,) 또는 줄바꿈(\n) 기준으로 토큰화
     빈 값 제거 및 중복 제거
     """
     out: List[str] = []
     if isinstance(val, str):
-        # 콤마, 줄바꿈, '@' 모두를 구분자로 처리
-        # 먼저 줄바꿈으로 split하고, 각 줄을 콤마와 '@'로 split
+        # 콤마와 줄바꿈을 구분자로 처리
+        # 먼저 줄바꿈으로 split하고, 각 줄을 콤마로 split
         lines = val.split('\n')
         toks = []
         for line in lines:
-            # 콤마와 '@' 모두로 split
-            parts = line.replace(',').split(',')
+            # 콤마로 split
+            parts = line.split(',')
             toks.extend([t.strip() for t in parts])
     elif isinstance(val, (list, tuple, set)):
         toks = [str(t).strip() for t in val]
