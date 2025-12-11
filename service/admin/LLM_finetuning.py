@@ -9,8 +9,7 @@ except Exception:
 
 import os
 # 🔧 CUDA 메모리 단편화 완화 (권장)
-# expandable_segments:True는 메모리 단편화를 줄이고, max_split_size_mb는 큰 블록 할당을 방지
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512,expandable_segments:True,roundup_power2_divisions:16")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:256,expandable_segments:True")
 
 import json
 import threading
@@ -31,9 +30,6 @@ from errors.exceptions import BadRequestError, InternalServerError
 
 logger = logger(__name__)
 
-import re
-from urllib.parse import quote_plus
-_FEEDBACK_FILE_RE = re.compile(r"^feedback_(qna|doc_gen|summary)_p(\d+)\.csv$", re.IGNORECASE)
 
 # ===== 디바이스 유틸 =====
 def _get_model_device(model):
@@ -47,24 +43,6 @@ def _get_model_device(model):
         pass
     import torch as _torch
     return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
-
-
-def _clear_gpu_memory():
-    """GPU 메모리 캐시를 완전히 정리하여 단편화를 줄입니다."""
-    try:
-        import torch
-        import gc
-        if hasattr(torch, "cuda") and torch.cuda.is_available():
-            # 모든 CUDA 캐시 정리
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            # Python GC 실행
-            gc.collect()
-            # 다시 한번 캐시 정리
-            torch.cuda.empty_cache()
-            logger.debug("GPU memory cache cleared")
-    except Exception as e:
-        logger.warning(f"Failed to clear GPU memory: {e}")
 
 
 # ===== 캐시/임시 디렉토리 관리 =====
@@ -83,9 +61,9 @@ def _ephemeral_cache_env():
         yield
     finally:
         for k, v in old.items():
-            if v is None:
+            if v is None: 
                 os.environ.pop(k, None)
-            else:
+            else: 
                 os.environ[k] = v
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -101,7 +79,7 @@ BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve(
 # Force DB to pps_rag.db across the process (can be overridden by env before start)
 import os as _os
 _os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "models"))
+STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
 # ===== SQLAlchemy ORM (Session) =====
@@ -114,31 +92,15 @@ DB_URL = f"sqlite:///{os.environ.get('COREIQ_DB', str(BASE_BACKEND / 'storage' /
 _engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
-# ---- Portable path helpers ----
+# ---- Portable path helper ----
 def _to_rel(p: str) -> str:
-    """`p`를 backend 루트 기준 상대 경로로 변환(실패 시 원본 반환)."""
+    """Return `p` as a path **relative** to the backend root so DB records do
+    not depend on absolute host paths (useful inside Docker). If conversion
+    fails, the original path is returned unchanged."""
     try:
         return os.path.relpath(p, BASE_BACKEND)
     except Exception:
         return p
-
-def _to_service_rel(p: str) -> str:
-    """
-    어떤 경로든 최종적으로 './service/<...>' 형태로 표준화.
-    예) /.../backend/storage/models/Qwen3-8B  → ./service/storage/models/Qwen3-8B
-        storage/models/Qwen3-8B               → ./service/storage/models/Qwen3-8B
-        ./service/storage/models/Qwen3-8B     → 그대로 유지
-    """
-    # 절대경로면 backend 기준 상대경로로
-    if os.path.isabs(p):
-        p = os.path.relpath(p, BASE_BACKEND)
-    s = p.replace("\\", "/").lstrip("./")
-    if not s.startswith("service/"):
-        s = f"service/{s}"
-    # 중복 슬래시 정리
-    while "//" in s:
-        s = s.replace("//", "/")
-    return f"./{s}"
 
 # ===== Helpers: path resolve =====
 def _resolve_model_dir(name_or_path: str) -> str:
@@ -148,7 +110,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
     """
     if os.path.isabs(name_or_path):
         return name_or_path
-
+    
     # 1) DB에서 llm_models 테이블 조회
     try:
         with SessionLocal() as s:
@@ -156,21 +118,21 @@ def _resolve_model_dir(name_or_path: str) -> str:
             model = s.execute(
                 select(LlmModel).where(LlmModel.name == name_or_path)
             ).scalar_one_or_none()
-
+            
             if not model:
                 # 카테고리 접미사 제거 후 다시 찾기
                 def _strip_cat(n: str) -> str:
-                    for suf in ("-qna", "-doc_gen", "-summary"):
+                    for suf in ("-qa", "-doc_gen", "-summary"):
                         if n.endswith(suf):
                             return n[: -len(suf)]
                     return n
-
+                
                 base_name = _strip_cat(name_or_path)
                 if base_name != name_or_path:
                     model = s.execute(
                         select(LlmModel).where(LlmModel.name == base_name)
                     ).scalar_one_or_none()
-
+            
             if model and model.model_path:
                 p = model.model_path
                 if os.path.isabs(p):
@@ -181,7 +143,7 @@ def _resolve_model_dir(name_or_path: str) -> str:
                     return cand
     except Exception as e:
         logger.warning(f"DB lookup failed for model {name_or_path}: {e}")
-
+    
     # 2) Fallback to storage root
     return os.path.join(STORAGE_MODEL_ROOT, name_or_path)
 
@@ -241,7 +203,7 @@ def _looks_like_mxfp4_model(dir_or_name: str) -> bool:
 # ===== Schemas =====
 class FineTuneRequest(BaseModel):
     # === 공통 태그(필수) ===
-    category: str = Field(..., description="qna | doc_gen | summary")
+    category: str = Field(..., description="qa | doc_gen | summary")
     subcategory: Optional[str] = Field(None, description="세부 테스크. 현재 주로 doc_gen에서 사용")
 
     baseModelName: str
@@ -261,16 +223,6 @@ class FineTuneRequest(BaseModel):
         description="파인튜닝 방식: LORA | QLORA | FULL",
         pattern="^(LORA|QLORA|FULL)$",
     )
-    
-    @field_validator("tuningType", mode="before")
-    @classmethod
-    def _v_tuning_type_strip(cls, v):
-        """tuningType 값의 앞뒤 공백을 제거합니다."""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return v.strip()
-        return v
     startAt: Optional[str] = Field(
         default=None, description="예약 시작 ISO8601 (예: 2025-09-19T13:00:00)"
     )
@@ -281,23 +233,11 @@ class FineTuneRequest(BaseModel):
     @field_validator("category")
     @classmethod
     def _v_category(cls, v: str) -> str:
-        allowed = {"qna", "doc_gen", "summary"}
+        allowed = {"qa", "doc_gen", "summary"}
         vv = (v or "").strip().lower()
         if vv not in allowed:
             raise ValueError(f"category must be one of {sorted(allowed)}")
         return vv
-
-    @field_validator("quantizationBits", mode="before")
-    @classmethod
-    def _v_qbits_empty_to_none(cls, v):
-        """
-        폼에서 빈 문자열("")로 넘어오는 quantizationBits를 None으로 처리.
-        FULL/LORA에서는 quantizationBits를 비워도 되도록 허용하고,
-        QLORA인 경우에만 아래 validator/model_validator에서 4 또는 8을 강제한다.
-        """
-        if v in ("", None):
-            return None
-        return v
 
     @field_validator("quantizationBits")
     @classmethod
@@ -565,8 +505,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         - type 동일(대문자)
         - rouge1_f1: 최종 ROUGE 저장
     """
-    # ✅ 항상 './service/storage/models/<...>' 로 표준화
-    rel_model_path = _to_service_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))
+    rel_model_path = _to_rel(os.path.join(STORAGE_MODEL_ROOT, model_name))  # 출력(어댑터 or FULL 저장 폴더)
     mdl_type = (tuning_type or "QLORA").upper()
 
     with SessionLocal() as s:
@@ -590,12 +529,12 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         base_model_id = None
         base_model_rel_path = None
         if base_model_name:
-            abs_base = _resolve_model_dir(base_model_name)   # 물리 경로
-            base_model_rel_path = _to_service_rel(abs_base)  # ./service/storage/models/<...>
+            abs_base = _resolve_model_dir(base_model_name)      # 물리 경로
+            base_model_rel_path = _to_rel(abs_base)             # 상대 경로
             base_row = s.execute(select(LlmModel).where(LlmModel.name == base_model_name)).scalar_one_or_none()
             if not base_row:
                 base_row = LlmModel(
-                    provider="huggingface",
+                    provider="hf",
                     name=base_model_name,
                     revision=0,
                     model_path=None,       # BASE는 어댑터 없음
@@ -615,7 +554,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
         m = s.execute(select(LlmModel).where(LlmModel.name == model_name)).scalar_one_or_none()
         if m is None:
             m = LlmModel(
-                provider="huggingface",
+                provider="hf",
                 name=model_name,
                 revision=0,
                 category=category,
@@ -636,6 +575,7 @@ def _finish_job_success(conn, job_id: str, model_name: str, category: str, tunin
             m.mather_path = None
 
         m.category = category
+        # m.subcategory = subcategory  # <- llm_models에 서브태스크 제약 제거. 필요시 메타로만 유지.
         m.is_active = True
         m.trained_at = _now_utc()
         s.add(m)
@@ -778,7 +718,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         conversations = [{
             "conversations": [
-                {"from": "user", "value": build_prompt(r.get("ChunkContext",""), r.get("Question",""))},
+                {"from": "user", "value": build_prompt(r.get("Chunk_Context",""), r.get("Question",""))},
                 {"from": "assistant", "value": r.get("Answer","")},
             ]
         } for _, r in df.iterrows()]
@@ -832,15 +772,10 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         output_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
 
-        # ===== 모델 로딩 전 메모리 정리 =====
-        # _clear_gpu_memory()
-
         # ===== 모델/토크나이저 로드 =====
         # gpt-oss(MXFP4) → Unsloth
         if tuning_type == "QLORA" and is_mxfp4:
             max_len = int(job.request.get("max_len", 3072))  # 💡 기본 3072로 살짝 낮춰 OOM 예방
-            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
-            # _clear_gpu_memory()
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_path,
                 dtype=None,                    # H100 → bf16 자동
@@ -850,8 +785,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 trust_remote_code=True,
                 local_files_only=True,
             )
-            # 로딩 후 메모리 정리
-            # _clear_gpu_memory()
             # Unsloth 모범사례: 학습 최적화 활성화
             try:
                 model = FastLanguageModel.for_training(model)  # 일부 버전에선 in-place. 반환값 호환.
@@ -886,8 +819,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 else:
                     tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
                     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
-            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
-            # _clear_gpu_memory()
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
@@ -897,8 +828,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             )
             model.gradient_checkpointing_enable()
             model = prepare_model_for_kbit_training(model)
-            # 로딩 후 메모리 정리
-            # _clear_gpu_memory()
             lora_targets = [
                 "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
                 "down_proj","w1","w2","c_proj","c_attn"
@@ -924,8 +853,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 else:
                     tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
                     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<|pad|>")
-            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
-            # _clear_gpu_memory()
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 trust_remote_code=True,
@@ -934,8 +861,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 local_files_only=True,
             )
             model.gradient_checkpointing_enable()
-            # 로딩 후 메모리 정리
-            # _clear_gpu_memory()
             targets = [
                 "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj",
                 "down_proj","w1","w2","c_proj","c_attn"
@@ -945,8 +870,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             model = get_peft_model(model, lora_cfg)
             max_len = int(job.request.get("max_len", 4096))
         else:  # FULL
-            # 메모리 단편화 방지를 위해 로딩 전 메모리 정리
-            # _clear_gpu_memory()
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
             if tokenizer.pad_token_id is None:
                 if getattr(tokenizer, "eos_token_id", None) is not None:
@@ -959,10 +882,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             )
             model.gradient_checkpointing_enable()
             for p in model.parameters(): p.requires_grad = True
-            # 로딩 후 메모리 정리
-            # _clear_gpu_memory()
-            # FULL 파인튜닝은 메모리를 많이 사용하므로 기본 max_len을 더 보수적으로 설정
-            max_len = int(job.request.get("max_len", 2048))  # 기본값을 4096에서 2048로 감소
+            max_len = int(job.request.get("max_len", 4096))
 
         # ===== 데이터셋 생성 =====
         train_ds = RagDataset(train_data, tokenizer, max_len=max_len)
@@ -1069,7 +989,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 # 메모리 해제
                 try:
                     del trainer
-                    # _clear_gpu_memory()
+                    torch.cuda.empty_cache(); gc.collect()
                 except Exception:
                     pass
                 # 재구성
@@ -1222,14 +1142,14 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
     # startNow와 startAt 동시 지정 방지
     if body.startNow and body.startAt:
         raise BadRequestError("startNow와 startAt은 동시에 사용할 수 없습니다. (둘 중 하나만)")
-
+    
     # body.category를 최종 신뢰(하위호환을 위해 인수 category는 fallback)
     category = (body.category or category).lower()
     suffix = (body.tuningType or "QLORA").upper()
-    # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qna)
+    # 카테고리까지 포함하여 저장 폴더/모델명을 구분 (예: name-QLORA-qa)
     save_name_with_suffix = f"{body.saveModelName}-{suffix}-{category}"
     _ensure_output_dir(save_name_with_suffix)
-
+    
     # 중복 실행 차단 (락 파일)
     import fcntl
     out_dir = _ensure_output_dir(save_name_with_suffix)
@@ -1295,7 +1215,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             pass
 
     job = FineTuneJob(job_id=job_id, category=category, request=body.model_dump())
-
+    
     # 🔹 즉시 실행이면 예약(startAt)은 **무시**해서 중복 실행을 원천 차단
     if body.startNow:
         def _launch():
@@ -1313,7 +1233,7 @@ def start_fine_tuning(category: str, body: FineTuneRequest) -> Dict[str, Any]:
             # 예약 실행
             def _launch():
                 _run_training_inline(job, save_name_with_suffix)
-
+            
             # 예약 딜레이 재계산
             delay_sec = 0.0
             try:
@@ -1373,7 +1293,7 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
                 metrics = json.loads(row["metrics"]) or {}
             except Exception:
                 metrics = {}
-
+        
         # Liveness: if status is running but heartbeat is stale, flip to failed
         row_status = row["status"]
         try:
@@ -1406,71 +1326,16 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-def list_feedback_datasets() -> dict:
-    """
-    ./storage/train_data 안에서 파일명 패턴
-    'feedback_{task}_p{prompt}.csv'에 매칭되는 모든 CSV를 테스크별로 반환.
-    반환 경로는 상대경로('./storage/train_data/...')를 제공한다.
-    """
-    REL_ROOT = "./storage/train_data"
-
+# ===== Admin util: wipe fine-tune related tables =====
+def reset_fine_tune_tables():
+    """Dangerous: delete all fine-tune jobs and model records (use for dev reset)"""
+    conn = get_db()
     try:
-        names = sorted(os.listdir(TRAIN_DATA_ROOT))
-    except FileNotFoundError:
-        names = []
-
-    entries = []
-    for name in names:
-        m = _FEEDBACK_FILE_RE.match(name)
-        if not m:
-            continue
-        task = m.group(1).lower()
-        prompt = int(m.group(2))
-        abs_path = os.path.join(TRAIN_DATA_ROOT, name)
-        if not os.path.isfile(abs_path):
-            continue
-        st = os.stat(abs_path)
-        mtime_dt = datetime.fromtimestamp(st.st_mtime)
-        entries.append({
-            "task": task,                               # qna | doc_gen | summary
-            "file": name,                               # ex) feedback_qna_p0.csv
-            "prompt": prompt,                           # 정수 p값
-            "bytes": st.st_size,                        # 파일 크기
-            "mtime": mtime_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "mtime_iso": mtime_dt.isoformat(),
-            "path": f"{REL_ROOT}/{name}",               # 상대경로 (Docker 고려)
-            "downloadUrl": f"/v1/admin/llm/feedback-datasets?file={quote_plus(name)}",
-        })
-
-    groups = {"qna": [], "doc_gen": [], "summary": []}
-    for e in entries:
-        groups[e["task"]].append(e)
-    for k in groups:
-        groups[k].sort(key=lambda x: x["prompt"])
-
-    return {
-        "root": REL_ROOT,
-        "pattern": "feedback_{task}_p{prompt}.csv",
-        "total": len(entries),
-        "counts": {k: len(v) for k, v in groups.items()},
-        "groups": groups,
-    }
-
-def resolve_feedback_download(file: str) -> tuple[str, str]:
-    """
-    다운로드용 파일 검증/해결:
-    - basename만 허용 (경로 탈출 방지)
-    - 파일명 패턴 확인
-    - ./storage/train_data 내부 존재 확인
-    성공 시: (abs_path, filename) 반환
-    """
-    if os.path.basename(file) != file:
-        raise BadRequestError("basename만 허용합니다.")
-    m = _FEEDBACK_FILE_RE.match(file)
-    if not m:
-        raise BadRequestError("잘못된 파일명 형식입니다. (feedback_{task}_p{n}.csv)")
-    abs_path = os.path.join(TRAIN_DATA_ROOT, file)
-    if not os.path.isfile(abs_path):
-        # 라우터에서 404로 매핑하기 위해 표준 예외 사용
-        raise FileNotFoundError(f"not found in {TRAIN_DATA_ROOT}: {file}")
-    return abs_path, file
+        cur = conn.cursor()
+        cur.execute("DELETE FROM fine_tuned_models")
+        cur.execute("DELETE FROM fine_tune_jobs")
+        cur.execute("DELETE FROM fine_tune_datasets")
+        cur.execute("DELETE FROM llm_models")
+        conn.commit()
+    finally:
+        conn.close()
