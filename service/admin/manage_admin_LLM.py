@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import gc
 import logging
 from pathlib import Path
@@ -1281,10 +1280,6 @@ def _is_under_allowed_roots(path_str: str) -> bool:
     except Exception:
         return False
 
-# def _table_exists(conn, table: str) -> bool:
-#     cur = conn.cursor()
-#     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-#     return cur.fetchone() is not None
 
 def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     """

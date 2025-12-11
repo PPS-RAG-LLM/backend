@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import delete, desc, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from config import config
-from utils import logger, now_kst, now_kst_string
+from utils import logger, now_kst
 from utils.database import get_session
 from sqlalchemy import func
 from storage.db_models import (
@@ -48,7 +47,7 @@ def upsert_document(
     """documents 테이블에 공통 메타데이터를 upsert."""
     payload = payload or {}
     with get_session() as session:
-        insert_stmt = sqlite_insert(Document).values(
+        insert_stmt = pg_insert(Document).values(
             doc_id=doc_id,
             doc_type=doc_type,
             workspace_id=workspace_id,
@@ -68,7 +67,7 @@ def upsert_document(
                 "filename": insert_stmt.excluded.filename,
                 "source_path": insert_stmt.excluded.source_path,
                 "payload": insert_stmt.excluded.payload,
-                "created_at": insert_stmt.excluded.created_at,
+                # created_at은 업데이트하지 않음
                 "updated_at": insert_stmt.excluded.updated_at,
             },
         )
@@ -98,17 +97,15 @@ def bulk_upsert_document_metadata(
             }
         )
     with get_session() as session:
-        insert_stmt = sqlite_insert(DocumentMetadata).values(rows)
+        insert_stmt = pg_insert(DocumentMetadata).values(rows)
         update_stmt = insert_stmt.on_conflict_do_update(
+            # 복합 유니크 키 (doc_id, page, chunk_index) 기준
             index_elements=[
-                DocumentMetadata.doc_id,
-                DocumentMetadata.page,
-                DocumentMetadata.chunk_index,
+                "doc_id", "page", "chunk_index"
             ],
             set_={
                 "text": insert_stmt.excluded.text,
                 "payload": insert_stmt.excluded.payload,
-                "created_at": insert_stmt.excluded.created_at,
                 "updated_at": insert_stmt.excluded.updated_at,
             },
         )
@@ -175,11 +172,10 @@ def insert_document_vectors(
             }
         )
     with get_session() as session:
-        insert_stmt = sqlite_insert(DocumentVector).values(rows)
+        insert_stmt = pg_insert(DocumentVector).values(rows)
         insert_stmt = insert_stmt.on_conflict_do_update(
             index_elements=[
-                DocumentVector.doc_id,
-                DocumentVector.vector_id,
+                "doc_id", "vector_id"
             ],
             set_={
                 "collection": insert_stmt.excluded.collection,
@@ -187,7 +183,6 @@ def insert_document_vectors(
                 "embedding_version": insert_stmt.excluded.embedding_version,
                 "page": insert_stmt.excluded.page,
                 "chunk_index": insert_stmt.excluded.chunk_index,
-                "created_at": insert_stmt.excluded.created_at,
                 "updated_at": insert_stmt.excluded.updated_at,
             },
         )
