@@ -1,7 +1,7 @@
 from functools import lru_cache
 from transformers import AutoProcessor, AutoModelForVision2Seq
 from transformers.generation.streamers import TextIteratorStreamer
-from qwen_vl_utils import process_vision_info
+# from qwen_vl_utils import process_vision_info
 import torch
 from utils import logger, free_torch_memory
 from threading import Thread

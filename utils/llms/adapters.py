@@ -52,7 +52,7 @@ def _resolve_model_path(local_path: str) -> str:
 
 @register("huggingface")
 def hf_factory(model_key: str) -> Streamer:
-    from utils.llms.huggingface import qwen, qwen_vl, gpt_oss_20b, gemma3_27b
+    from utils.llms.huggingface import qwen, gpt_oss_20b, gemma3_27b
     from pathlib import Path
 
     if model_key in _HF_STREAMER_CACHE:
@@ -80,6 +80,7 @@ def hf_factory(model_key: str) -> Streamer:
         streamer = _Wrap(lambda messages, **kw: qwen.stream_chat(messages, model_path=local_path, **kw))
 
     elif model_key.startswith("Qwen3-vl"):
+        from utils.llms.huggingface import qwen_vl
         logger.info("Alibaba | Qwen Model Qwen3-vl")
         streamer = _Wrap(lambda messages, **kw: qwen_vl.stream_chat(messages, model_path=local_path, **kw))
 
