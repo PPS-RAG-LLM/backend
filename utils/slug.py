@@ -1,7 +1,11 @@
 import re, uuid, unicodedata
 from pathlib import Path
-from .database import get_db
+from sqlalchemy import select
+from .database import get_session
 from .logger import logger
+
+# 지연 import를 위해 타입 힌트용으로만 쓰거나 함수 내 import 사용 권장
+# from storage.db_models import Workspace, WorkspaceThread
 
 logger = logger(__name__)
 
@@ -14,6 +18,8 @@ def re_slug(name: str) -> str:
 
 def generate_unique_slug(name: str) -> str:
     """워크스페이스 이름에서 고유한 slug 생성"""
+    from storage.db_models import Workspace  # 순환 참조 방지
+
     logger.info(f"Generating unique slug for: {name}")
     # 0) 한글/비ASCII 문자가 하나라도 있으면 UUID 강제
     if re.search(r"[^\x00-\x7F]", name):
@@ -21,29 +27,33 @@ def generate_unique_slug(name: str) -> str:
 
     slug = re_slug(name)
 
-	# 1) 정제 결과가 빈 값이거나 너무 짧으면 UUID
+    # 1) 정제 결과가 빈 값이거나 너무 짧으면 UUID
     if not slug or len(slug) < 2:
         return str(uuid.uuid4())
 
-	# 2) 중복 체크 및 유니크하게 만들기
-    conn = get_db()
-    cursor = conn.cursor()
+    # 2) 중복 체크 및 유니크하게 만들기
     try:
-        original_slug = slug
-        counter = 1
-        while True:
-            cursor.execute("SELECT id FROM workspaces WHERE slug=?", (slug,))
-            if not cursor.fetchone():
-                break
-            slug = f"{original_slug}-{counter}"
-            counter += 1
-        return slug
-    finally:
-        conn.close()
+        with get_session() as session:
+            original_slug = slug
+            counter = 1
+            while True:
+                stmt = select(Workspace.id).where(Workspace.slug == slug).limit(1)
+                result = session.execute(stmt).first()
+                if not result:
+                    break
+                slug = f"{original_slug}-{counter}"
+                counter += 1
+            return slug
+    except Exception as e:
+        logger.error(f"Error generating slug: {e}")
+        # DB 에러 시 안전하게 UUID 반환
+        return str(uuid.uuid4())
 
 
 def generate_thread_slug(name: str) -> str:
     """워크스페이스 이름에서 고유한 스레드 slug 생성"""
+    from storage.db_models import WorkspaceThread  # 순환 참조 방지
+
     logger.info(f"Generating unique thread slug for: {name}")
     # 0) 한글/비ASCII 문자가 하나라도 있으면 UUID 강제
     if re.search(r"[^\x00-\x7F]", name):
@@ -54,19 +64,23 @@ def generate_thread_slug(name: str) -> str:
     if not slug or len(slug) < 2:
         slug = str(uuid.uuid4())
         return slug
+    
     # workspace_threads 테이블에서 중복 체크
-    conn = get_db()
-    cursor = conn.cursor()
-    original_slug = slug
-    counter = 1
-    while True:
-        cursor.execute("SELECT id FROM workspace_threads WHERE slug=?", (slug,))
-        if not cursor.fetchone():
-            break
-        slug = f"{original_slug}-{counter}"
-        counter += 1
-    conn.close()
-    return slug
+    try:
+        with get_session() as session:
+            original_slug = slug
+            counter = 1
+            while True:
+                stmt = select(WorkspaceThread.id).where(WorkspaceThread.slug == slug).limit(1)
+                result = session.execute(stmt).first()
+                if not result:
+                    break
+                slug = f"{original_slug}-{counter}"
+                counter += 1
+            return slug
+    except Exception as e:
+        logger.error(f"Error generating thread slug: {e}")
+        return str(uuid.uuid4())
 
 
 ### 문서 파일명 안전하게 줄이기 ###

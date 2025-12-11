@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import gc
 import logging
 from pathlib import Path
@@ -11,10 +10,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from glob import glob
 from pydantic import BaseModel, Field
-from utils.database import get_db as _get_db
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from repository.llm_models import (
-    repo_set_cache, repo_get_cache,
     repo_get_llm_model_by_name,
     repo_get_active_llm_models,
     repo_update_llm_model_active_by_path,
@@ -34,6 +31,10 @@ from repository.llm_models import (
     repo_get_best_llm_prompt_mapping_by_prompt_id,
     repo_count_default_prompt_templates,
 )
+from repository.event_logs import repo_add_event_log
+from repository.llm_deletion import repo_delete_llm_related_data
+from repository.cache_data import repo_set_cache, repo_get_cache
+
 try:
     from peft import PeftModel
 except Exception:
@@ -79,11 +80,11 @@ _DEFAULT_TOPK: int = 5
 # Backend root (상대 경로 기준 루트)
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
 
-# 레거시 위치(호환용): ./storage/models
-LLM_MODEL_DIR = Path(app_config.get("llm_models_path", "storage/models")).resolve()
+# 레거시 위치(호환용): ./storage/models/llm
+_RETRIEVAL_CFG = app_config.get("models_dir", {}) or {}
+LLM_MODEL_DIR = (BASE_BACKEND / Path(_RETRIEVAL_CFG.get("llm_models_path"))).resolve()
+
 LLM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-# DB 경로(환경변수로 오버라이드 가능)
-DB_PATH = Path(app_config["database"]["path"])
 
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qna
 
@@ -161,24 +162,19 @@ class DeleteModelBody(BaseModel):
 # 공통 정규화 함수 추가
 def _canon_storage_path(p: str) -> str:
     """
-    같은 모델 디렉터리를 항상 /storage/models/<basename> 로 통일.
+    같은 모델 디렉터리를 항상 /storage/models/llm/<basename> 로 통일.
     해당 경로에 config.json 이 있으면 그 경로를 반환, 없으면 원본 반환.
     """
     try:
         p = (p or "").strip().replace("\\", "/")
         base = os.path.basename(p.rstrip("/"))
-        cand = f"/storage/models/{base}"
+        cand = f"/storage/models/llm/{base}"
         if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")):
             return cand
     except Exception:
         pass
     return p
 
-
-# ===== DB Helpers =====
-def _connect() -> sqlite3.Connection:
-    # Delegate to shared database connector (respects config/database paths and pragmas)
-    return _get_db()
 
 # ===== Migration / helpers =====
 def _db_set_active_by_path(rel_path: str, active: bool) -> None:
@@ -207,7 +203,7 @@ def _detect_gguf(base: str) -> Tuple[bool, Optional[str]]:
             return True, files[0]
     return False, None
 
-def _fetch_llm_and_ft(conn, model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
+def _fetch_llm_and_ft(model_name: str) -> Tuple[Optional[dict], Optional[dict]]:
     llm = repo_get_llm_model_by_name(model_name)
     if not llm:
         return None, None
@@ -282,11 +278,7 @@ def _load_with_llama_cpp(gguf_path: str):
 
 def load_model_unified(model_name: str):
     """통합 모델 로더: 이름 → 메타 조회 → 경로 결정 → 로드"""
-    conn = _connect()
-    try:
-        llm, ft = _fetch_llm_and_ft(conn, model_name)
-    finally:
-        conn.close()
+    llm, ft = _fetch_llm_and_ft(model_name)
     if not llm:
         raise RuntimeError(f"unknown model: {model_name}")
 
@@ -317,6 +309,7 @@ def _now_iso() -> str:
 def _get_cache(name: str) -> Optional[str]:
     """cache_data 테이블에서 캐시 데이터를 조회합니다."""
     return repo_get_cache(name)
+    
 def _norm_category(category: str) -> str:
     """
     외부 표기는 qna, 내부 스키마/기존 코드는 qna.
@@ -422,18 +415,9 @@ def test_prompt(prompt_id: int, body: Optional[Dict[str, Any]] = None) -> Dict[s
         "answer": answer,
         "rougeScore": rouge,
     }
-    conn = _connect()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO event_logs(event, metadata, user_id, occurred_at) VALUES(?,?,NULL,CURRENT_TIMESTAMP)",
-            ("model_eval", _json(meta)),
-        )
-        conn.commit()
-    except Exception:
-        logging.getLogger(__name__).exception("failed to insert model_eval event")
-    finally:
-        conn.close()
+    
+    # ORM 기반 로그 저장
+    repo_add_event_log("model_eval", _json(meta))
 
     return {"success": True, "result": "테스트 실행 완료", "promptId": prompt_id, "answer": answer, "rougeScore": rouge}
 
@@ -768,7 +752,7 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
         if not val:
             return None
 
-        # Handle standardized relative paths like ./service/storage/models/...
+        # Handle standardized relative paths like ./service/storage/models/llm/...
         if val.startswith("./"):
             leg = LLM_MODEL_DIR / os.path.basename(val)
             if (leg / "config.json").is_file():
@@ -844,11 +828,11 @@ def _preload_via_adapters(model_name: str) -> bool:
             logging.getLogger(__name__).warning("[preload] config.json not found: %s", raw_path)
             return False
 
-        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/models/<basename>')
+        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/models/llm/<basename>')
         def _adapter_visible_path(p: str) -> str:
             try:
                 base = os.path.basename(p.rstrip("/"))
-                cand = f"/storage/models/{base}"
+                cand = f"/storage/models/llm/{base}"
                 return cand if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")) else p
             except Exception:
                 return p
@@ -942,29 +926,24 @@ def get_model_list(category: str, subcategory: Optional[str] = None):
     cat = _norm_category(category)
     sub = (subcategory or "").strip()   # = system_prompt_template.name
 
-    conn = _connect()
-    cur = conn.cursor()
+    # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
+    ft_ids: set[int] = set()
     try:
-        # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
-        ft_ids: set[int] = set()
-        try:
-            ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
-        except Exception:
-            ft_ids = set()
+        ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
+    except Exception:
+        ft_ids = set()
 
-        # 1) category=all → 전체(활/비활 포함)
-        if cat == "all":
-            rows = repo_get_llm_models_by_category_all()
+    # 1) category=all → 전체(활/비활 포함)
+    if cat == "all":
+        rows = repo_get_llm_models_by_category_all()
 
-        # 2) doc_gen + subcategory → 매핑 rouge 점수순
-        elif cat == "doc_gen" and sub:
-            rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
+    # 2) doc_gen + subcategory → 매핑 rouge 점수순
+    elif cat == "doc_gen" and sub:
+        rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
 
-        # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
-        else:
-            rows = repo_get_llm_models_by_category(cat)
-    finally:
-        conn.close()
+    # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
+    else:
+        rows = repo_get_llm_models_by_category(cat)
 
     # 현재 카테고리 활성 모델명(캐시)
     try:
@@ -1301,10 +1280,6 @@ def _is_under_allowed_roots(path_str: str) -> bool:
     except Exception:
         return False
 
-def _table_exists(conn, table: str) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
 
 def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     """
@@ -1450,9 +1425,6 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
         _mark_unloaded(name)
     except Exception:
         logging.getLogger(__name__).exception("unload failed (ignored)")
-
-    conn = _connect()
-    cur = conn.cursor()
     try:
         # 2) 모델 메타 조회
         model_info = repo_get_llm_model_id_and_path_by_name(name)
@@ -1505,29 +1477,7 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
                 )
 
         # 4) DB 정리
-        deleted = {
-            "llm_prompt_mapping": 0,
-            "fine_tuned_models": 0,
-            "llm_eval_runs": 0,
-            "llm_models": 0,
-        }
-
-        if _table_exists(conn, "llm_prompt_mapping"):
-            cur.execute("DELETE FROM llm_prompt_mapping WHERE llm_id=?", (mid,))
-            deleted["llm_prompt_mapping"] = cur.rowcount or 0
-
-        if _table_exists(conn, "fine_tuned_models"):
-            cur.execute("DELETE FROM fine_tuned_models WHERE model_id=?", (mid,))
-            deleted["fine_tuned_models"] = cur.rowcount or 0
-
-        if _table_exists(conn, "llm_eval_runs"):
-            cur.execute("DELETE FROM llm_eval_runs WHERE llm_id=?", (mid,))
-            deleted["llm_eval_runs"] = cur.rowcount or 0
-
-        deleted_count = repo_delete_llm_model(mid)
-        deleted["llm_models"] = deleted_count
-
-        conn.commit()
+        deleted = repo_delete_llm_related_data(mid)
 
         return {
             "success": True,
@@ -1539,8 +1489,3 @@ def delete_model_full(model_name: str) -> Dict[str, Any]:
     except Exception:
         logging.getLogger(__name__).exception("delete_model_full failed")
         return {"success": False, "error": "delete_model_full failed"}
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass

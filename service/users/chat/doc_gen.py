@@ -27,9 +27,9 @@ def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any], pa
     if parsed_documents:
         contexts = []
         for i, parsed_document in enumerate(parsed_documents, 1):
-            title = parsed_document.get("title", "Unknown")
-            page = parsed_document.get("page")
-            text = parsed_document.get("text", "")
+            title   = parsed_document.get("title", "Unknown")
+            page    = parsed_document.get("page")
+            text    = parsed_document.get("text", "")
             
             source_info = f"<document>\n[문서 {i}: {title}"
             if page:
@@ -45,7 +45,9 @@ def _compose_doc_gen_message(user_prompt: Any, template_vars: dict[str, Any], pa
     
     # 2. 템플릿 변수 (있으면 추가)
     if template_vars:
-        var_lines = "\n".join(f"- {key}: {value}" for key, value in template_vars.items())
+        var_lines = "\n".join(
+            f"- {key}: {value}" for key, value in template_vars.items()
+            )
         parts.append(f"\n{var_lines}\n")
 
     # 3. 사용자 프롬프트 (있으면 추가)
@@ -87,17 +89,18 @@ def stream_chat_for_doc_gen(
     parsed_documents = get_full_documents_texts(ws["id"])
     doc_ids = [doc["doc_id"] for doc in parsed_documents]
     
-    logger.debug(f"userPrompt: {body.get('userPrompt')}")
-    logger.debug(f"templateVariables: {body.get('templateVariables')}")
-    logger.debug(f"parsed_documents: {parsed_documents}")
+    logger.debug(f"userPrompt(message):          {body.get('message')}")
+    logger.debug(f"templateVariables:   {body.get('templateVariables')}")
+    logger.debug(f"parsed_documents:    {parsed_documents}")
 
     
     # 메시지 구성 (variables + documents + userPrompt 결합)
     body["message"] = _compose_doc_gen_message(
-        user_prompt=body.get("userPrompt"),
-        template_vars=body.get("templateVariables") or {},
-        parsed_documents=parsed_documents if parsed_documents else None,
+        user_prompt     = body.get("message"),
+        template_vars   = body.get("templateVariables") or {},
+        parsed_documents= parsed_documents if parsed_documents else None,
     )
+    logger.debug(f"message:             {body.get('message')}")
 
     # 6. 메시지 목록 구성
     messages: List[Dict[str, Any]] = []

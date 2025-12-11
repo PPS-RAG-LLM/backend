@@ -2,7 +2,7 @@
 """
 사용법:
   python scripts/download_qwen3_reranker.py --hf_token ""   # 필요 시
-  # 저장 경로는 자동으로 ./storage/rerank_model/Qwen3-Reranker-0.6B 로 지정됨
+  # 저장 경로는 자동으로 ./storage/models/embedding-rerank/Qwen3-Reranker-0.6B 로 지정됨
 """
 from __future__ import annotations
 import os
@@ -41,7 +41,7 @@ def download_qwen3_reranker(
     local_files_only: bool = False,
 ) -> dict[str, str]:
     """
-    저장 경로: ./storage/rerank_model/Qwen3-Reranker-0.6B
+    저장 경로: ./storage/models/embedding-rerank/Qwen3-Reranker-0.6B
     (리포지토리 루트 기준; 본 스크립트가 scripts/ 에 있다고 가정)
     """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

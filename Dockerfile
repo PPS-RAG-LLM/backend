@@ -32,9 +32,9 @@ RUN uv sync --frozen
 
 # 모델 파일을 먼저 복사 (레이어 캐싱 최적화)
 # 모델은 크기가 크지만 자주 변경되지 않으므로 별도 레이어로 분리
-COPY storage/models/ storage/models/
-COPY storage/embedding-models/ storage/embedding-models/
-COPY storage/rerank_model/ storage/rerank_model/
+COPY storage/models/llm/ storage/models/llm/
+COPY storage/models/embedding/ storage/models/embedding/
+COPY storage/models/embedding-rerank/ storage/models/embedding-rerank/
 
 # 애플리케이션 코드 복사
 # 나머지 애플리케이션 코드를 복사합니다

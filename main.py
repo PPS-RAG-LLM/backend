@@ -43,11 +43,26 @@ from routers.admin.manage_user_api import router as admin_user_router
 
 
 ######################### Session Cleaner #########################
+def _init_required_directories():
+    """config.yaml에 정의된 필수 디렉토리 생성"""
+    from pathlib import Path
+    dirs = [
+        config.get("full_text_dir"),
+        config.get("admin_raw_data_dir"),
+        config.get("user_raw_data_dir"),
+        config.get("test_llm_raw_data_dir"),
+        config.get("retrieval", {}).get("paths", {}).get("val_session_root"),
+    ]
+    for dir_path in dirs:
+        if dir_path:
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
+            logger.info(f"Directory ensured: {dir_path}")
 
 @asynccontextmanager
 async def lifspan(app):
     """주기적으로 만료된 세션 정리"""
     init_db() # 스키마 1회 초기화, 이미 있으면 즉시 스킵
+    _init_required_directories()
     try:
         logger.info("활성 임베딩 모델 확인 및 (선택) 프리로드...")
         load_embedding_model()

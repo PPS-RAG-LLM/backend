@@ -3,7 +3,6 @@ from __future__ import annotations
 from utils import logger, now_kst
 from utils.database import get_session
 from storage.db_models import  RagSettings
-from sqlalchemy.dialects.sqlite import insert 
 
 logger = logger(__name__)
 

@@ -47,7 +47,7 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     payload = {
         "username": username,
         "iss": "PPS_MOCK_COMPANY",
-        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5) # 5분 유효
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8) # 8시간 유효
     }
 
     sso_token = jwt.encode(payload, shared_secret, algorithm="HS256")

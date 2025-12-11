@@ -25,3 +25,4 @@ def get_user_info_from_cookie(coreiq_session: str = Cookie(None)) -> dict:
     if not session_data:
         raise SessionNotFoundError("유효하지 않은 세션입니다")
     return session_data
+

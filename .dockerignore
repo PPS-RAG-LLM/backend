@@ -42,7 +42,7 @@ Dockerfile
 unsloth_compiled_cache/
 
 # Storage에서 모델은 포함하되, 불필요한 것만 제외
-# 모델은 포함: storage/models/, storage/embedding-models/, storage/rerank_model/
+# 모델은 포함: storage/models/llm/, storage/models/embedding/, storage/models/embedding-rerank/
 # 제외할 것들:
 storage/user_data/
 storage/train_data/

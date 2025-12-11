@@ -3,9 +3,10 @@ from __future__ import annotations
 import io
 import tiktoken
 import uuid
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 import fitz
 from fastapi import UploadFile
@@ -35,10 +36,28 @@ from service.vector_db import (
 from storage.db_models import DocumentType
 from repository.rag_settings import get_rag_settings_row
 from utils import load_embedding_model, logger, now_kst
+from service.preprocessing.rag_preprocessing import parse_file_content
+from service.retrieval.common import determine_level_for_task
 
 logger = logger(__name__)
 
+
 TEMP_TTL_HOURS = int(config["retrieval"]["temp_ttl_hours"])
+
+# 텍스트 파일 저장 헬퍼 함수
+def _save_full_text_to_disk(doc_id: str, text: str):
+    """doc_id.txt 파일로 전체 텍스트 저장"""
+    try:
+        full_text_dir = Path(config.get("full_text_dir", "storage/documents/full_text"))
+        if not full_text_dir.exists():
+            full_text_dir.mkdir(parents=True, exist_ok=True)
+        file_path = full_text_dir / f"{doc_id}.txt"
+        # 덮어쓰기 모드로 저장
+        file_path.write_text(text, encoding="utf-8")
+        logger.info(f"Saved full text to {file_path}")
+    except Exception as e:
+        logger.error(f"Failed to save full text for {doc_id}: {e}")
+
 
 def _get_embedding_key() -> str:
        rag = get_rag_settings_row()
@@ -61,7 +80,10 @@ def _estimate_tokens(text: str) -> int:
 def _extract_text_and_meta(
     file_bytes: bytes, filename: str, content_type: str
 ) -> tuple[List[str], Dict[str, Any]]:
-    """PDF는 페이지별 텍스트를 반환하고, 기타 문서는 단일 페이지 리스트로 감싼다."""
+    # rag_preprocessing.parse_file_content 사용으로 대체됨, 
+    # 하지만 upload_document 내부에서 직접 호출하지 않는 레거시/유닛테스트 호환을 위해 유지할 수도 있음.
+    # 여기서는 upload_document가 직접 parse_file_content를 쓰므로 이 함수는 사용되지 않을 수 있으나,
+    # 혹시 모를 의존성을 위해 남겨둠.
     name_lower = filename.lower()
     meta: Dict[str, Any] = {
         "docAuthor": "Unknown",
@@ -70,27 +92,21 @@ def _extract_text_and_meta(
     }
     if content_type == "application/pdf" or name_lower.endswith(".pdf"):
         with fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf") as doc:
-            # 각 페이지 텍스트 추출
             page_texts = []
             for page in doc:
                 text = page.get_text("text").strip()
                 page_texts.append(text)
-            
-            # 텍스트가 거의 없으면 경고 로그
             text_all = "\n\n".join(page_texts)
             if len(text_all.strip()) < 10:
                 logger.warning(
-                    f"PDF '{filename}': 추출된 텍스트가 거의 없습니다 ({len(text_all)} chars). "
-                    "이미지 기반 PDF일 가능성이 있습니다. OCR이 필요할 수 있습니다."
+                    f"PDF '{filename}': 추출된 텍스트가 거의 없습니다."
                 )
-            
             pdf_meta = doc.metadata or {}
             meta["docAuthor"] = pdf_meta.get("author") or "Unknown"
             meta["description"] = pdf_meta.get("subject") or "PDF document"
             meta["docSource"] = "pdf file uploaded by the user."
         return page_texts or [""], meta
     else:
-        # 바이너리를 텍스트로 간주(UTF-8)
         try:
             text_all = file_bytes.decode("utf-8", errors="ignore")
         except Exception:
@@ -150,13 +166,11 @@ async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
     """sentence-transformers로 임베딩 생성. 모델은 rag_settings(DB)에서 읽어옵니다."""
     import asyncio
     try:
-        # 동기 블로킹 작업을 별도 쓰레드에서 실행하여 이벤트 루프 차단 방지
         def _sync_embed():
             model = load_embedding_model()
             vecs = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, batch_size=8)
             return [v.astype(float).tolist() for v in vecs]
         
-        # asyncio.to_thread로 동기 작업을 비동기로 처리
         return await asyncio.to_thread(_sync_embed)
     except FileNotFoundError as e:
         logger.error(f"임베딩 모델 경로를 찾을 수 없음: {e}")
@@ -166,23 +180,37 @@ async def _embed_chunks(chunks: List[str]) -> List[List[float]]:
         raise DocumentProcessingError("embedding", str(exc)) from exc
 
 
-
-# 아래는 여러 파일 업로드 지원 함수
 async def upload_documents(
     user_id: int,
     files: List[UploadFile],
     raw_paths: List[str],
     add_to_workspaces: Optional[str],
+    doc_type: DocumentType = DocumentType.TEMP,
+    security_rules: Optional[Dict] = None,
+    override_security_levels: Optional[Dict[str, int]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None, # [추가] 추가 메타데이터
+    doc_id_generator: Optional[Callable[[str], str]] = None, # [추가] doc_id 생성기
 ) -> Dict[str, Any]:
     documents: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     for i, f in enumerate(files):
         try:
+            # doc_id 생성기가 있으면 파일명을 인자로 호출
+            custom_doc_id = None
+            if doc_id_generator:
+                filename_stem = Path(f.filename or "unknown").stem
+                custom_doc_id = doc_id_generator(filename_stem)
+
             res = await upload_document(
                 user_id=user_id,
                 file=f,
                 raw_path=raw_paths[i],
                 add_to_workspaces=add_to_workspaces,
+                doc_type=doc_type,
+                security_rules=security_rules,
+                override_security_levels=override_security_levels,
+                extra_payload=extra_payload,
+                custom_doc_id=custom_doc_id, # 전달
             )
             if res and res.get("documents"):
                 documents.extend(res["documents"])
@@ -203,24 +231,48 @@ async def upload_document(
     file: UploadFile,
     raw_path: str,
     add_to_workspaces: Optional[str],
+    doc_type: DocumentType = DocumentType.TEMP,
+    security_rules: Optional[Dict] = None,
+    override_security_levels: Optional[Dict[str, int]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
+    custom_doc_id: Optional[str] = None, # [추가]
 ) -> Dict[str, Any]:
     """
-    사용자 업로드 문서를 RDB + Milvus 에 저장한다.
+    사용자/관리자/테스트 통합 문서 업로드 함수
+    - extra_payload: 문서 payload에 병합할 추가 데이터 (예: session_id)
+    - custom_doc_id: 외부에서 지정한 doc_id 사용 (없으면 UUID 자동 생성)
     """
 
     filename = file.filename or "uploaded"
-    content_type = file.content_type or "application/octet-stream"
-    file_bytes = await file.read()
+    
+    # 1. 파일 임시 저장
+    target_path = Path(raw_path)
+    if not target_path.exists():
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        await file.seek(0)
+        with open(target_path, "wb") as buffer:
+             shutil.copyfileobj(file.file, buffer)
 
     try:
-        page_texts, meta = _extract_text_and_meta(file_bytes, filename, content_type)
+        # 2. [통합] 공통 파서 사용
+        text_all, tables, pages_text_dict, total_pages = await parse_file_content(target_path)
     except Exception as exc:
-        logger.exception("텍스트 추출 실패")
+        logger.exception("파일 파싱 실패")
         raise DocumentProcessingError("extract_text", str(exc)) from exc
 
-    combined_text = "\n\n".join(page_texts).strip()
+    combined_text = text_all + "\n\n" + "\n\n".join(t.get("text","") for t in (tables or []))
+    combined_text = combined_text.strip()
+    
     if not combined_text:
         raise DocumentProcessingError("extract_text", "추출된 텍스트가 없습니다.")
+        
+    page_texts_list = []
+    if pages_text_dict:
+        sorted_pages = sorted(pages_text_dict.keys())
+        for p in sorted_pages:
+            page_texts_list.append(pages_text_dict[p])
+    else:
+        page_texts_list = [combined_text]
 
     word_count = len(combined_text.split())
     token_est = _estimate_tokens(combined_text)
@@ -231,9 +283,30 @@ async def upload_document(
         .replace("PM", "오후")
     )
 
-    doc_id = str(uuid.uuid4())
+    # doc_id 결정: custom_doc_id가 있으면 사용, 없으면 UUID
+    doc_id = custom_doc_id if custom_doc_id else str(uuid.uuid4())
+    
+    _save_full_text_to_disk(doc_id, combined_text)
+    
+    # 3. [관리자 전용] 보안 등급 계산 (override 우선)
+    security_level = 0
+    security_levels_map = {}
+    
+    if override_security_levels:
+        security_levels_map = override_security_levels
+        security_level = max(security_levels_map.values()) if security_levels_map else 1
+    elif security_rules:
+        task_types = ["doc_gen", "summary", "qna"]
+        for task in task_types:
+            lvl = determine_level_for_task(
+                combined_text,
+                security_rules.get(task, {"maxLevel": 1, "levels": {}})
+            )
+            security_levels_map[task] = lvl
+        security_level = max(security_levels_map.values()) if security_levels_map else 1
+    
     try:
-        chunk_records = _build_chunk_records(page_texts)
+        chunk_records = _build_chunk_records(page_texts_list)
     except Exception as exc:
         logger.exception("청크 분할 실패")
         raise DocumentProcessingError("chunking", str(exc)) from exc
@@ -258,14 +331,25 @@ async def upload_document(
                 continue
             target_workspace_id = int(workspace_id)
             break
+            
+    if doc_type == DocumentType.TEMP and target_workspace_id is not None:
+        final_doc_type = DocumentType.WORKSPACE
+    else:
+        final_doc_type = doc_type
 
-    doc_type = DocumentType.WORKSPACE if target_workspace_id is not None else DocumentType.TEMP
     doc_payload: Dict[str, Any] = {
-        "description": meta.get("description"),
-        "docAuthor": meta.get("docAuthor"),
+        "description": "Uploaded Document",
+        "docAuthor": "User",
         "uploaded_at": now_str,
+        "security_levels": security_levels_map,
+        "tables": tables or [],
     }
-    if doc_type is DocumentType.TEMP:
+    
+    # [추가] extra_payload 병합
+    if extra_payload:
+        doc_payload.update(extra_payload)
+    
+    if final_doc_type is DocumentType.TEMP:
         expires_at = (
             datetime.now(timezone.utc) + timedelta(hours=TEMP_TTL_HOURS)
         ).isoformat()
@@ -274,11 +358,12 @@ async def upload_document(
     try:
         upsert_document(
             doc_id=doc_id,
-            doc_type=doc_type.value,
+            doc_type=final_doc_type.value,
             filename=filename,
             payload=doc_payload,
             workspace_id=target_workspace_id,
             source_path=raw_path,
+            security_level=security_level,
         )
         bulk_upsert_document_metadata(
             doc_id=doc_id,
@@ -291,6 +376,7 @@ async def upload_document(
                         "path": raw_path,
                         "title": filename,
                         "published": now_str,
+                        "security_levels": security_levels_map,
                     },
                 }
                 for rec in chunk_records
@@ -300,7 +386,7 @@ async def upload_document(
         logger.exception("문서 메타데이터 저장 실패")
         raise DocumentProcessingError("database", str(exc)) from exc
 
-    collection_name = resolve_collection(doc_type.value)
+    collection_name = resolve_collection(final_doc_type.value)
     client = get_milvus_client()
     emb_dim = len(vectors[0]) if vectors else 0
     ensure_collection_and_index(
@@ -311,22 +397,25 @@ async def upload_document(
     )
 
     milvus_rows = []
-    for rec, vec in zip(chunk_records, vectors):
-        milvus_rows.append(
-            {
-                "embedding": vec,
-                "path": raw_path,
-                "chunk_idx": int(rec["chunk_index"]),
-                "task_type": "qna",
-                "security_level": 0,
-                "doc_id": doc_id,
-                "version": 1,
-                "page": int(rec["page"]),
-                "workspace_id": target_workspace_id if target_workspace_id is not None else 0,
-                "text": rec["text"],
-            }
-        )
-    logger.info(f"###############\n\n\worksapce_id: {workspace_id}\n\n\n###############")
+    target_tasks = list(security_levels_map.keys()) if security_levels_map else ["qna"]
+
+    for task in target_tasks:
+        lvl = security_levels_map.get(task, security_level) if security_levels_map else security_level
+        for rec, vec in zip(chunk_records, vectors):
+            milvus_rows.append(
+                {
+                    "embedding": vec,
+                    "path": raw_path,
+                    "chunk_idx": int(rec["chunk_index"]),
+                    "task_type": task,
+                    "security_level": lvl,
+                    "doc_id": doc_id,
+                    "version": 1,
+                    "page": int(rec["page"]),
+                    "workspace_id": target_workspace_id if target_workspace_id is not None else 0,
+                    "text": rec["text"],
+                }
+            )
 
     try:
         insert_result = client.insert(collection_name=collection_name, data=milvus_rows)
@@ -351,22 +440,28 @@ async def upload_document(
 
     primary_keys = [str(pk) for pk in primary_keys_raw if pk is not None]
     vector_records = []
-    for idx, rec in enumerate(chunk_records):
-        vector_id = primary_keys[idx] if idx < len(primary_keys) else None
-        if vector_id is None:
-            logger.warning(
-                "[upload_document] primary key 누락: doc_id=%s chunk_idx=%s",
-                doc_id,
-                rec["chunk_index"],
+    
+    pk_idx = 0
+    for task in target_tasks:
+        for rec in chunk_records:
+            if pk_idx >= len(primary_keys):
+                logger.warning(
+                    "[upload_document] primary key 누락: doc_id=%s task=%s chunk_idx=%s",
+                    doc_id, task, rec["chunk_index"],
+                )
+                break
+            vector_id = primary_keys[pk_idx]
+            pk_idx += 1
+
+            vector_records.append(
+                {
+                    "vector_id": vector_id,
+                    "page": rec["page"],
+                    "chunk_index": rec["chunk_index"],
+                    "task_type": task,
+                    "collection": collection_name,
+                }
             )
-            continue
-        vector_records.append(
-            {
-                "vector_id": vector_id,
-                "page": rec["page"],
-                "chunk_index": rec["chunk_index"],
-            }
-        )
     try:
         if vector_records:
             insert_document_vectors(
@@ -402,16 +497,16 @@ async def upload_document(
         "documents": [
             {
                 "docId": doc_id,
-                "url": "", # 이미지 업로드일 경우
+                "url": "",
                 "location": raw_path,
                 "title": filename,
-                "docAuthor": meta.get("docAuthor"),
-                "description": meta.get("description"),
-                "docSource": meta.get("docSource"),
+                "docAuthor": "User",
+                "description": "Uploaded Document",
+                "docSource": "file",
                 "published": now_str,
                 "wordCount": word_count,
                 "token_count_estimate": token_est,
-                "docType": doc_type.value,
+                "docType": final_doc_type.value,
             }
         ],
     }

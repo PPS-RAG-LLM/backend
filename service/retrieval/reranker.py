@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Tuple
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
@@ -16,9 +16,8 @@ from utils import logger
 LOGGER = logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_RETRIEVAL_CFG = app_config.get("retrieval", {}) or {}
-_RETRIEVAL_PATHS = _RETRIEVAL_CFG.get("paths", {}) or {}
-RERANK_MODEL_PATH = (PROJECT_ROOT / Path(_RETRIEVAL_PATHS.get("rerank_model_path", "storage/rerank_model/Qwen3-Reranker-0.6B"))).resolve()
+_RETRIEVAL_CFG = app_config.get("models_dir", {}) or {}
+RERANK_MODEL_PATH = (PROJECT_ROOT / Path(_RETRIEVAL_CFG.get("rerank_model_path"))).resolve()
 
 _RERANK_CACHE: dict[str, Tuple[Any, Any, torch.device, int, int]] = {}
 _ACTIVE_RERANK_KEY: str | None = None

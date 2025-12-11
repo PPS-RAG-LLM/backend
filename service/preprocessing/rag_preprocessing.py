@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import logging
 import shutil
+import asyncio
 from collections import defaultdict
 
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple, Dict
 
 from tqdm import tqdm  # type: ignore
 
@@ -71,6 +72,36 @@ def extract_any(path: Path) -> tuple[str, list[dict]]:
         return "", []
     # 모르는 확장자는 텍스트로 시도
     return extract_plain_text(path)
+
+
+async def parse_file_content(file_path: Path) -> Tuple[str, List[Dict[str, Any]], Dict[int, str], int]:
+    """
+    [공통] 단일 파일 파싱 함수
+    파일 경로를 받아 텍스트, 표, 페이지별 텍스트, 전체 페이지 수를 반환합니다.
+    User/Admin 업로드 모두에서 사용합니다.
+    Block되는 작업을 피하기 위해 asyncio.to_thread 사용
+    """
+    def _sync_parse():
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        file_extension = ext(file_path)
+        pages_text_dict = {}
+        total_pages = 0
+        
+        if file_extension == ".pdf":
+            text, tables, pages_text_dict, total_pages = extract_pdf_with_tables(file_path)
+        else:
+            text, tables = extract_any(file_path)
+            # PDF가 아닌 경우 페이지 정보가 명확하지 않을 수 있어 기본값 설정
+            if not text and not tables:
+                 # 빈 파일 처리
+                 pass
+            total_pages = 1 
+            
+        return text, tables, pages_text_dict, total_pages
+
+    return await asyncio.to_thread(_sync_parse)
 
 
 async def extract_documents(target_rel_paths: Optional[List[str]] = None):
