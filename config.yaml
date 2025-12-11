@@ -46,9 +46,9 @@ workspace:
   temperature: 0.7
 
 models_dir:
-  llm_models_path: storage/models/llm
-  embedding_model_path: storage/models/embedding
-  rerank_model_path: storage/models/embedding-rerank/Qwen3-Reranker-0.6B
+  llm_models_path: storage/models
+  embedding_model_path: storage/embedding-models
+  rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
 
 # 문서 저장경로
 admin_raw_data_dir: storage/documents/raw_files/admin_raw_data

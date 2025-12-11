@@ -365,16 +365,63 @@ def _insert_dataset_if_needed(conn, path: str, category: str) -> int:
         exist = s.execute(stmt).scalars().first()
         if exist:
             return int(exist.id)
-        row = FineTuneDataset(
-            name=os.path.basename(path),
-            category=category,
-            path=rel_path,
-            record_count=None,
-        )
-        s.add(row)
-        s.commit()
-        s.refresh(row)
-        return int(row.id)
+        
+        # PostgreSQL 시퀀스 동기화 문제 해결을 위한 예외 처리
+        try:
+            row = FineTuneDataset(
+                name=os.path.basename(path),
+                category=category,
+                prompt_id=None,  # 새로 추가된 필드 (qna는 None 가능)
+                path=rel_path,
+                record_count=None,
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return int(row.id)
+        except Exception as e:
+            # 중복 키 에러가 발생한 경우, 롤백 후 기존 레코드 찾기
+            s.rollback()
+            logger.warning(f"Dataset insert failed (likely sequence sync issue): {e}")
+            
+            # 다시 한번 기존 레코드 찾기
+            stmt = select(FineTuneDataset).where(FineTuneDataset.path == rel_path)
+            exist = s.execute(stmt).scalars().first()
+            if exist:
+                logger.info(f"Found existing dataset with id={exist.id} for path={rel_path}")
+                return int(exist.id)
+            
+            # 그래도 없으면 최대 ID를 찾아서 수동으로 생성
+            try:
+                from sqlalchemy import func, text
+                # 현재 최대 ID 확인
+                max_id = s.execute(select(func.max(FineTuneDataset.id))).scalar() or 0
+                next_id = max_id + 1
+                
+                # ID를 명시적으로 설정해서 재시도
+                row = FineTuneDataset(
+                    id=next_id,
+                    name=os.path.basename(path),
+                    category=category,
+                    prompt_id=None,
+                    path=rel_path,
+                    record_count=None,
+                )
+                s.add(row)
+                s.commit()
+                s.refresh(row)
+                
+                # 시퀀스를 다음 ID로 안전하게 업데이트
+                s.execute(text(f"SELECT setval('fine_tune_datasets_id_seq', {next_id}, true);"))
+                s.commit()
+                logger.info(f"Updated sequence to next value: {next_id + 1}")
+                
+                logger.info(f"Created dataset with manually assigned id={next_id}")
+                return int(row.id)
+            except Exception as e2:
+                s.rollback()
+                logger.error(f"Failed to create dataset with manual ID: {e2}")
+                raise
 
 def _insert_job(conn, category: str, req: FineTuneRequest, job_id: str, save_name_with_suffix: str, dataset_id: int,
                 initial_status: str = "queued", scheduled_at: Optional[str] = None) -> int:
