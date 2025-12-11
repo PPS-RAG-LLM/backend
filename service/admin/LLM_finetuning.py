@@ -1,11 +1,7 @@
 # service/admin/LLM_finetuning.py
 from __future__ import annotations
 
-# ✅ Unsloth는 transformers/peft 보다 먼저 import
-try:
-    import unsloth  # noqa: F401
-except Exception:
-    pass
+# Unsloth는 필요시에만 MXFP4 분기에서 import (Gemma 패치 충돌 방지)
 
 import os
 # 🔧 CUDA 메모리 단편화 완화 (권장)
@@ -79,7 +75,7 @@ BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve(
 # Force DB to pps_rag.db across the process (can be overridden by env before start)
 import os as _os
 _os.environ.setdefault("COREIQ_DB", str(BASE_BACKEND / "storage" / "pps_rag.db"))
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "model"))
+STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "models"))
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
 # ===== SQLAlchemy ORM (Session) =====
@@ -672,7 +668,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
 
         # ===== Imports =====
         try:
-            from unsloth import FastLanguageModel  # type: ignore
             import pandas as pd
             import torch
             from transformers import (
@@ -775,6 +770,8 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         # ===== 모델/토크나이저 로드 =====
         # gpt-oss(MXFP4) → Unsloth
         if tuning_type == "QLORA" and is_mxfp4:
+            # 🎯 여기서만 unsloth import → Gemma/Qwen에는 패치가 적용되지 않음
+            from unsloth import FastLanguageModel  # type: ignore
             max_len = int(job.request.get("max_len", 3072))  # 💡 기본 3072로 살짝 낮춰 OOM 예방
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_path,
@@ -1339,3 +1336,72 @@ def reset_fine_tune_tables():
         conn.commit()
     finally:
         conn.close()
+
+def list_feedback_datasets() -> dict:
+    """
+    ./storage/train_data 안에서 파일명 패턴
+    'feedback_{task}_p{prompt}.csv'에 매칭되는 모든 CSV를 테스크별로 반환.
+    반환 경로는 상대경로('./storage/train_data/...')를 제공한다.
+    """
+    REL_ROOT = "./storage/train_data"
+
+    try:
+        names = sorted(os.listdir(TRAIN_DATA_ROOT))
+    except FileNotFoundError:
+        names = []
+
+    entries = []
+    for name in names:
+        m = _FEEDBACK_FILE_RE.match(name)
+        if not m:
+            continue
+        task = m.group(1).lower()
+        prompt = int(m.group(2))
+        abs_path = os.path.join(TRAIN_DATA_ROOT, name)
+        if not os.path.isfile(abs_path):
+            continue
+        st = os.stat(abs_path)
+        mtime_dt = datetime.fromtimestamp(st.st_mtime)
+        entries.append({
+            "task": task,                               # qna | doc_gen | summary
+            "file": name,                               # ex) feedback_qna_p0.csv
+            "prompt": prompt,                           # 정수 p값
+            "bytes": st.st_size,                        # 파일 크기
+            "mtime": mtime_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "mtime_iso": mtime_dt.isoformat(),
+            "path": f"{REL_ROOT}/{name}",               # 상대경로 (Docker 고려)
+            "downloadUrl": f"/v1/admin/llm/feedback-datasets?file={quote_plus(name)}",
+        })
+
+    groups = {"qna": [], "doc_gen": [], "summary": []}
+    for e in entries:
+        groups[e["task"]].append(e)
+    for k in groups:
+        groups[k].sort(key=lambda x: x["prompt"])
+
+    return {
+        "root": REL_ROOT,
+        "pattern": "feedback_{task}_p{prompt}.csv",
+        "total": len(entries),
+        "counts": {k: len(v) for k, v in groups.items()},
+        "groups": groups,
+    }
+
+def resolve_feedback_download(file: str) -> tuple[str, str]:
+    """
+    다운로드용 파일 검증/해결:
+    - basename만 허용 (경로 탈출 방지)
+    - 파일명 패턴 확인
+    - ./storage/train_data 내부 존재 확인
+    성공 시: (abs_path, filename) 반환
+    """
+    if os.path.basename(file) != file:
+        raise BadRequestError("basename만 허용합니다.")
+    m = _FEEDBACK_FILE_RE.match(file)
+    if not m:
+        raise BadRequestError("잘못된 파일명 형식입니다. (feedback_{task}_p{n}.csv)")
+    abs_path = os.path.join(TRAIN_DATA_ROOT, file)
+    if not os.path.isfile(abs_path):
+        # 라우터에서 404로 매핑하기 위해 표준 예외 사용
+        raise FileNotFoundError(f"not found in {TRAIN_DATA_ROOT}: {file}")
+    return abs_path, file

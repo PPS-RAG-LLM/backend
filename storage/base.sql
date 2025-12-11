@@ -46,19 +46,12 @@ INSERT INTO
     )
 VALUES (1,'huggingface','Qwen3-8B',0,'./storage/models/Qwen3-8B',
         'all','base',1,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        -- (2,'huggingface','Qwen2.5-7B-Instruct-1M',0,'./storage/models/Qwen2.5-7B-Instruct-1M',
-        -- 'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        -- (3,'huggingface','Qwen3-8B',0,'./storage/models/Qwen3-8B',
-        -- 'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        -- (4,'huggingface','Qwen3-Omni-30B-A3B-Instruct',0,'./storage/models/Qwen3-Omni-30B-A3B-Instruct',
-        -- 'qna','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (2,'huggingface','Qwen3-14B',0,'./storage/models/Qwen3-14B',
         'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (3,'huggingface','Gemma3-27B',0,'./storage/models/Gemma3-27B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
-        --(4,'huggingface','Qwen3-vl-32B',0,'./storage/models/Qwen3-vl-32B',
-        --'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05')
-        ;
+        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05');
+  
+
         
 
 INSERT INTO
