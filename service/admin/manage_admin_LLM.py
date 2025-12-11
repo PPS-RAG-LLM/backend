@@ -82,10 +82,10 @@ _DEFAULT_TOPK: int = 5
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
 
 # 레거시 위치(호환용): ./storage/models/llm
-LLM_MODEL_DIR = Path(app_config.get("llm_models_path")).resolve()
+_RETRIEVAL_CFG = app_config.get("models_dir", {}) or {}
+LLM_MODEL_DIR = (BASE_BACKEND / Path(_RETRIEVAL_CFG.get("llm_models_path"))).resolve()
+
 LLM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-# DB 경로(환경변수로 오버라이드 가능)
-DB_PATH = Path(app_config["database"]["path"])
 
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qna
 
