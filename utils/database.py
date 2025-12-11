@@ -61,12 +61,3 @@ def init_db():
 def get_session():
     """새로운 SQLAlchemy 세션 반환"""
     return SessionLocal()
-
-def get_db():
-    """
-    [주의] 기존 sqlite3 커넥션을 반환하던 함수입니다.
-    기존 코드 호환성을 위해 남겨두지만, 가급적 get_session()을 사용하도록 리팩토링해야 합니다.
-    """
-    # 임시로 raw connection을 반환하거나, 에러를 발생시켜 수정을 유도합니다.
-    # Postgres에서 raw connection을 직접 쓰는 것은 권장되지 않습니다.
-    return engine.raw_connection()

@@ -2,7 +2,7 @@ from .logger import logger
 from .time import  now_kst_string, now_kst
 from .slug import generate_unique_slug, generate_thread_slug, make_safe_filename
 from .middleware import ProcessTimeMiddleware
-from .database import get_db, init_db
+from .database import  init_db
 from .vaildator import validate_category_subcategory, validate_category
 from .model_load import get_or_load_embedder_async
 
@@ -24,7 +24,6 @@ __all__ = [
 	"generate_unique_slug", 
 	"generate_thread_slug",
 	"ProcessTimeMiddleware",
-	"get_db", 
 	"init_db",
 	"free_torch_memory",
 	"load_embedding_model",	
