@@ -47,10 +47,16 @@ def init_db():
                 seed_sql = base_sql_path.read_text(encoding="utf-8")
                 
                 # 주의: base.sql 파일 내의 문법이 Postgres와 호환되어야 함
-                # text()로 감싸서 실행하거나, ; 단위로 쪼개서 실행해야 할 수 있음
-                # 단순 INSERT문들이라면 아래와 같이 실행 가능
-                conn.execute(text(seed_sql))
-                conn.commit()
+                # [수정] SQLAlchemy의 text()는 콜론(:)을 변수로 인식하므로,
+                # raw_connection을 사용하여 직접 실행합니다.
+                raw_conn = engine.raw_connection()
+                try:
+                    cursor = raw_conn.cursor()
+                    cursor.execute(seed_sql)
+                    raw_conn.commit()
+                    print("✅ 초기 데이터 적재 완료")
+                finally:
+                    raw_conn.close()
 
 def get_session():
     """새로운 SQLAlchemy 세션 반환"""

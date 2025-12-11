@@ -45,11 +45,11 @@ INSERT INTO
         "created_at"
     )
 VALUES  (1,'huggingface','Qwen3-14B',0,'./storage/models/llm/Qwen3-14B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        'all','base',false,true,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (2,'huggingface','Qwen3-8B',0,'./storage/models/llm/Qwen3-8B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
+        'all','base',false,true,'2025-09-03 07:52:05','2025-09-03 07:52:05'),
         (3,'huggingface','Gemma3-27B',0,'./storage/models/llm/Gemma3-27B',
-        'all','base',0,1,'2025-09-03 07:52:05','2025-09-03 07:52:05')
+        'all','base',false,true,'2025-09-03 07:52:05','2025-09-03 07:52:05');
         
 
 INSERT INTO
@@ -66,7 +66,7 @@ VALUES (1,'hybrid',512,64,'qwen3_0_6b','2025-08-13 13:54:55');
 -- (선택) doc_gen 기본값을 하나로 제한하는 인덱스
 CREATE UNIQUE INDEX IF NOT EXISTS uq_system_prompt_doc_gen_default
     ON "system_prompt_template" ("category", "name")
-    WHERE "category"='doc_gen' AND "is_default" = 1;
+    WHERE "category"='doc_gen' AND "is_default" IS TRUE;
 
 INSERT INTO
     "system_prompt_template" (
@@ -91,7 +91,7 @@ VALUES
         <context> 또는 <document>가 존재하지 않는 경우 : 사용자가 요청한 <user_prompt>에 따라 응답합니다.
 
         질문이 모호하면 추가 질문으로 의도 명확히 하기 사용자가 원할 경우 심화 정보 제공',
-        '',0,1),
+        '',false,true),
     (81, 'qna_prompt', 'qna',
         'You are the second AI assistant, designed to provide kind and easy-to-understand explanations.
         Respond to the user’s questions or requests accurately and concisely, and whenever possible, include helpful background knowledge and examples.
@@ -103,77 +103,77 @@ VALUES
         - When no <context> or <document> exists: respond directly according to the user’s <user_prompt>.
         - If a question is ambiguous, ask clarifying questions to understand the intent.
         - If the user wants it, provide more in-depth or advanced information.',
-        '',1,1),
+        '',true,true),
     (90,'summary_prompt','summary',
         '당신은 요약 전문 AI 어시스턴트 입니다. 사용자가 요청한 <context> 또는 <document>를 <user_prompt>에 따라 요약하세요.',
-        '',0,1),
+        '',false,true),
     (91,'summary_prompt','summary',
         'You are a professional summarizing assistant. Summarize the user’s <context> or <document> based on their <user_prompt>.',
-        '',1,1),
+        '',true,true),
 
 -- doc_gen 카테고리 템플릿 8건 (business_trip 2, meeting 3, 보고서 3)
     (101, 'business_trip', 'doc_gen',
      '당신은 기업 출장 계획서를 작성하는 AI 어시스턴트입니다. [출장제목], [출장기간], [출장목적] 정보를 활용해 체계적인 문서를 작성하세요.',
      '문서는 개요, 일정, 예산, 준비물 섹션을 포함합니다.',
-      1, 1),
+      true, true),
     (102, 'business_trip', 'doc_gen',
      '당신은 간단한 출장 계획 메모를 작성하는 도우미입니다. 입력된 변수만 사용해서 핵심 일정과 준비물을 요약하세요.',
      '표 형식 일정과 준비물 체크리스트를 포함하세요.',
-      0, 1),
+      false, true),
     (103, 'meeting', 'doc_gen',
      '당신은 공식 회의록을 작성하는 AI 비서입니다. [회의명], [회의일시], [참석자], [주요논의] 항목을 활용해 명확한 회의록을 만드세요.',
      '요약, 상세 논의, 결정 사항 섹션을 포함하세요.',
-      1, 1),
+      true, true),
     (104, 'meeting', 'doc_gen',
      '당신은 의사결정에 초점을 둔 회의록을 작성합니다. 제공된 정보를 바탕으로 핵심 결론만 정리하세요.',
      '결정 사항과 근거를 bullet로 작성하세요.',
-      0, 1),
+      false, true),
     (105, 'meeting', 'doc_gen',
      '당신은 후속 조치 중심의 회의노트를 작성하는 도우미입니다. 후속 일정과 담당자를 명확히 정리하세요.',
      '액션 아이템 표를 포함하세요.',
-      0, 1),
+      false, true),
     (106, 'report', 'doc_gen',
      '당신은 주간 업무 보고서를 작성하는 AI 비서입니다. [보고제목], [보고기간], [성과요약], [주요지표]를 활용해 구조화된 보고서를 작성하세요.',
      '성과 요약, 지표 표, 향후 계획을 포함하세요.',
-      1, 1),
+      true, true),
     (107, 'report', 'doc_gen',
      '당신은 리스크 중심 보고서를 작성합니다. 제공된 정보를 토대로 위험과 대응 방안을 명확히 정리하세요.',
      '리스크와 대응 방안을 표로 작성하세요.',
-      0, 1),
+      false, true),
     (108, 'report', 'doc_gen',
      '당신은 이슈 보고서를 작성하는 도우미입니다. 발생한 이슈와 요청 사항을 명확히 정리해 관리자에게 전달하세요.',
      '요약, 상세 이슈, 요청 사항 섹션을 포함하세요.',
-      0, 1);
+      false, true);
 
 -- 프롬프트에 필요한 변수 정의
 INSERT INTO
 "system_prompt_variables" ("id","type","required","key","value","description")
 VALUES
-(201,'text', 0, '출장제목', '뉴욕 해외 파트너십 체결 출장', '출장 문서의 제목'),
-(202,'start_date', 1, '시작일', '2025-10-03', '시작일시'),
-(203,'end_date', 1, '종료일', '2025-10-12', '종료일시'),
-(204,'text', 0, '출장목적', '해외 파트너와 신규 공급 계약 협의', '출장의 목적 및 기대 효과'),
-(205,'text', 0, '주요일정', '10/04 파트너사 미팅 · 10/06 공장 실사 · 10/08 협상 총괄 회의', '주요 일정 요약'),
-(206,'text', 0, '준비물', '계약서 초안, 제품 샘플, 프레젠테이션 자료', '준비해야 할 물품 목록'),
-(207,'text', 0, '결재자', '홍길동 전략사업본부장', '결재를 맡은 책임자'),
-(208,'text', 0, '회의명', '북미 시장 진출 전략 회의', '회의의 제목 또는 안건'),
-(209,'datetime', 1, '회의일시', '2025-10-05T14:00:00', '회의가 진행된 일시'),
-(210,'text', 0, '참석자', '박유진, 김태호, Annie Smith, John Park', '참석자 명단'),
-(211,'text', 0, '주요논의', '미국 시장 론칭 일정과 현지 마케팅 전략 수립', '핵심 논의 내용 요약'),
-(212,'text', 0, '결정사항', '11월 내 계약 체결, 초기 물량 5,000대 공급 확정', '회의에서 확정된 결정 사항'),
-(213,'text', 0, '후속조치', '각 부서별 실행 계획서 10/15까지 제출', '회의 후 수행해야 할 조치'),
-(214,'text', 0, '발표자료', '시장 조사 리포트, 제품 로드맵 슬라이드', '공유된 발표 자료 목록'),
-(215,'text', 0, '참고자료', '2024 글로벌 실적 보고서, 경쟁사 분석', '회의 참고 자료'),
-(216,'text', 0, '담당자', '박유진 해외사업팀장', '후속 조치 담당자'),
-(217,'text', 0, '보고제목', '2025년 4분기 미국 시장 진출 계획 보고', '보고서 제목'),
-(219,'text', 0, '성과요약', '현지 파트너 3곳과 사전 MOU 체결 완료', '핵심 성과 요약'),
-(220,'text', 0, '주요지표', '신규 리드 45건, 예상 매출 12억원, 고객 만족도 92점', '성과를 보여주는 주요 지표'),
-(221,'text', 0, '리스크', 'FDA 인증 지연 가능성 및 환율 변동', '인식된 리스크 요약'),
-(222,'text', 0, '대응방안', '인증 전문 대행사 선정 및 환헤지 전략 검토', '리스크 대응 계획'),
-(223,'text', 0, '이슈', '물류 창고 확보 지연으로 일정 재조정 필요', '발생한 주요 이슈'),
-(224,'text', 0, '요청사항', '마케팅 예산 3억원 추가 편성 승인 요청', '추가 요청 또는 필요 지원'),
-(225,'text', 0, '작성부서', '해외사업개발팀', '보고서를 작성한 부서'),
-(226,'textarea', 1, '요청사항', '파트너 계약 마무리를 위한 법무 검토 지원이 필요합니다.', '요청사항을 입력하세요');
+(201,'text', false, '출장제목', '뉴욕 해외 파트너십 체결 출장', '출장 문서의 제목'),
+(202,'start_date', true, '시작일', '2025-10-03', '시작일시'),
+(203,'end_date', true, '종료일', '2025-10-12', '종료일시'),
+(204,'text', false, '출장목적', '해외 파트너와 신규 공급 계약 협의', '출장의 목적 및 기대 효과'),
+(205,'text', false, '주요일정', '10/04 파트너사 미팅 · 10/06 공장 실사 · 10/08 협상 총괄 회의', '주요 일정 요약'),
+(206,'text', false, '준비물', '계약서 초안, 제품 샘플, 프레젠테이션 자료', '준비해야 할 물품 목록'),
+(207,'text', false, '결재자', '홍길동 전략사업본부장', '결재를 맡은 책임자'),
+(208,'text', false, '회의명', '북미 시장 진출 전략 회의', '회의의 제목 또는 안건'),
+(209,'datetime', true, '회의일시', '2025-10-05T14:00:00', '회의가 진행된 일시'),
+(210,'text', false, '참석자', '박유진, 김태호, Annie Smith, John Park', '참석자 명단'),
+(211,'text', false, '주요논의', '미국 시장 론칭 일정과 현지 마케팅 전략 수립', '핵심 논의 내용 요약'),
+(212,'text', false, '결정사항', '11월 내 계약 체결, 초기 물량 5,000대 공급 확정', '회의에서 확정된 결정 사항'),
+(213,'text', false, '후속조치', '각 부서별 실행 계획서 10/15까지 제출', '회의 후 수행해야 할 조치'),
+(214,'text', false, '발표자료', '시장 조사 리포트, 제품 로드맵 슬라이드', '공유된 발표 자료 목록'),
+(215,'text', false, '참고자료', '2024 글로벌 실적 보고서, 경쟁사 분석', '회의 참고 자료'),
+(216,'text', false, '담당자', '박유진 해외사업팀장', '후속 조치 담당자'),
+(217,'text', false, '보고제목', '2025년 4분기 미국 시장 진출 계획 보고', '보고서 제목'),
+(219,'text', false, '성과요약', '현지 파트너 3곳과 사전 MOU 체결 완료', '핵심 성과 요약'),
+(220,'text', false, '주요지표', '신규 리드 45건, 예상 매출 12억원, 고객 만족도 92점', '성과를 보여주는 주요 지표'),
+(221,'text', false, '리스크', 'FDA 인증 지연 가능성 및 환율 변동', '인식된 리스크 요약'),
+(222,'text', false, '대응방안', '인증 전문 대행사 선정 및 환헤지 전략 검토', '리스크 대응 계획'),
+(223,'text', false, '이슈', '물류 창고 확보 지연으로 일정 재조정 필요', '발생한 주요 이슈'),
+(224,'text', false, '요청사항', '마케팅 예산 3억원 추가 편성 승인 요청', '추가 요청 또는 필요 지원'),
+(225,'text', false, '작성부서', '해외사업개발팀', '보고서를 작성한 부서'),
+(226,'textarea', true, '요청사항', '파트너 계약 마무리를 위한 법무 검토 지원이 필요합니다.', '요청사항을 입력하세요');
 
 -- 템플릿과 변수 매핑
 INSERT INTO

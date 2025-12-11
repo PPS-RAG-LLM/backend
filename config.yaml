@@ -21,8 +21,6 @@ server:
 
 database:
   url: "postgresql://n-iq:pps5763@localhost:5432/pps_rag"
-  path: storage/pps_rag.db
-  schema_path: storage/db_models.py
 
 provider:
   openai:

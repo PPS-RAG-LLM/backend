@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  # 데이터베이스 서비스 정의
+  db:
+    image: postgres:15
+    container_name: pps-postgres  # 컨테이너 이름 고정
+    restart: always
+    environment:
+      POSTGRES_USER: n-iq
+      POSTGRES_PASSWORD: "pps5763"     # 비밀번호 (따옴표 권장)
+      POSTGRES_DB: pps_rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # 데이터 영구 저장 (컨테이너 삭제돼도 유지됨)
+
+# 볼륨 정의 (데이터 저장소)
+volumes:
+  postgres_data:

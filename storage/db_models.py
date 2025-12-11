@@ -396,7 +396,7 @@ class RagSettings(Base):
     chunk_size = Column(Integer, nullable=False, server_default=text("512"))
     overlap = Column(Integer, nullable=False, server_default=text("64"))
     embedding_key = Column(
-        Text, nullable=False, server_default=text("unknown_model")
+        Text, nullable=False, server_default=text("'unknown'")  
     )
     updated_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
