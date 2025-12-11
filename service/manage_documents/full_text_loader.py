@@ -8,7 +8,6 @@ import json
 
 logger = logger(__name__)
 
-FULL_TEXT_DIR = Path(config.get("full_text_dir", "storage/documents/full_text"))
 
 
 def get_full_documents_texts(workspace_id: int) -> List[Dict[str, Any]]:
@@ -34,7 +33,7 @@ def get_full_documents_texts(workspace_id: int) -> List[Dict[str, Any]]:
                 continue
 
             # 2. .txt 파일 경로 확인
-            text_file = FULL_TEXT_DIR / f"{doc_id}.txt"
+            text_file = Path(config.get("full_text_dir", "storage/documents/full_text")) / f"{doc_id}.txt"
 
             full_text = ""
             if text_file.exists():

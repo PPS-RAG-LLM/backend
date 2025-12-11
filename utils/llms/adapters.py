@@ -40,8 +40,8 @@ def _resolve_model_path(local_path: str) -> str:
         abs_path = Path(local_path)
     else:
         s = local_path.lstrip("./")
-        if "storage/models/" in s :
-            suffix = s.split("storage/models/", 1)[1].strip("/")
+        if "storage/models/llm/" in s :
+            suffix = s.split("storage/models/llm/", 1)[1].strip("/")
             abs_path = (base / suffix)
         else:
             abs_path = base / os.path.basename(s)

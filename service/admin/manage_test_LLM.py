@@ -6,7 +6,10 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
+from io import BytesIO
 import uuid
+from starlette.datastructures import UploadFile
+
 from config import config as app_config
 from repository.llm_eval_runs import delete_past_eval_runs, find_reusable_run, insert_llm_eval_run
 from repository.llm_models import repo_find_best_mapped_model, repo_find_fallback_model
@@ -21,6 +24,7 @@ from repository.rag_settings import get_rag_settings_row
 from storage.db_models import DocumentType
 from service.retrieval.interface import SearchRequest, retrieval_service
 from service.vector_db import get_milvus_client
+from service.manage_documents.documents import upload_documents # 통합 업로드 함수
 
 logger = logging.getLogger(__name__)
 
@@ -202,29 +206,55 @@ def list_shared_files() -> Dict[str, Any]:
 async def upload_shared_files(mem_files: List[tuple[str, bytes]]) -> Dict[str, Any]:
     """
     mem_files: [(filename, bytes), ...]
-    - VAL_DIR에 파일 저장(동일 파일명 존재 시 덮어씌움)
-    - 공유 세션(sid)에 인제스트
+    - LLM_TEST_DIR에 파일 저장
+    - 공유 세션(sid)에 인제스트 (upload_documents 사용)
     """
-    saved: List[str] = []
+    saved_names: List[str] = []
+    raw_paths: List[str] = []
+    upload_files: List[UploadFile] = []
+
     for name, data in mem_files:
         name = Path(name).name.strip()
         if not name:
             continue
         dst = LLM_TEST_DIR / name
         dst.write_bytes(data)
-        saved.append(str(dst))
+        saved_names.append(name)
+        raw_paths.append(str(dst))
+        
+        # upload_documents를 위한 임시 UploadFile 객체 생성
+        u_file = UploadFile(filename=name, file=BytesIO(data))
+        upload_files.append(u_file)
 
-    if not saved:
+    if not saved_names:
         return {"success": False, "error": "no valid files"}
 
     sid = _ensure_shared_session()
+    all_rules = get_security_level_rules_all()
 
-    # 인제스트 (doc_gen/summary/qna 모두 검색 가능하도록 task_types=None)
-    res = await ingest_test_pdfs(sid, saved, task_types=None)
+    def _doc_id_gen(filename_stem: str) -> str:
+        try:
+            base_id, _ = parse_doc_version(filename_stem)
+        except Exception:
+            base_id = filename_stem
+        return _session_doc_id(sid, base_id)
+
+    # 통합 업로드 함수 호출
+    res = await upload_documents(
+        user_id=1,  # 관리자
+        files=upload_files,
+        raw_paths=raw_paths,
+        add_to_workspaces=None,
+        doc_type=DocumentType.LLM_TEST,
+        security_rules=all_rules,
+        extra_payload={"session_id": sid},
+        doc_id_generator=_doc_id_gen,
+    )
+
     return {
         "success": True,
         "sid": sid,
-        "saved": [Path(p).name for p in saved],
+        "saved": saved_names,
         "ingest": res,
     }
 
@@ -281,7 +311,10 @@ async def ensure_eval_on_shared_session(
     - rag_refs에는 RAG 히트의 '실제 출처'를 저장 (예: milvus://<sid>/<doc_id>)
     """
     cat = _norm_category(category)
-    sub = (subcategory or "").strip().lower() or None
+    if cat != "doc_gen":
+        sub = None          # doc_gen이 아니면 subcategory는 무조건 None
+    else:
+        sub = (subcategory or "").strip().lower() or None
     user_prompt = (user_prompt or "").strip()
 
     # 현재 공유 세션 및 파일 목록(정규화)
@@ -399,18 +432,18 @@ async def ensure_eval_on_shared_session(
     llm_id = int(mrow["id"]) if mrow else None
 
     run_id = insert_llm_eval_run(
-        llm_id=llm_id,
-        prompt_id=int(prompt_id),
-        category=cat,
-        subcategory=(sub or tmpl_name),
-        model_name=model_name,
-        prompt_text=full_prompt,
-        user_prompt=user_prompt,
-        rag_json=rag_json,
-        answer=answer,
-        acc=acc,
-        meta_json=json.dumps({"source": "ensure-on-shared", "sid": sid, "top_k": top_k, "user_level": user_level}, ensure_ascii=False),
-        pdf_json=pdf_json
+        llm_id      = llm_id,
+        prompt_id   = int(prompt_id),
+        category    = cat,
+        subcategory = sub if cat == "doc_gen" else None,
+        model_name  = model_name,
+        prompt_text = full_prompt,
+        user_prompt = user_prompt,
+        rag_json    = rag_json,
+        answer      = answer,
+        acc         = acc,
+        meta_json   = json.dumps({"source": "ensure-on-shared", "sid": sid, "top_k": top_k, "user_level": user_level}, ensure_ascii=False),
+        pdf_json    = pdf_json
     )
 
     return {
@@ -489,7 +522,7 @@ def create_test_session() -> Dict:
     # DB 에는 경로 대신 'virtual' 또는 빈 문자열
     # 혹은 나중에 원본 폴더(VAL_DIR)를 참조하기 위한 용도로 VAL_DIR 경로를 저장해도 됨
     # 여기서는 단순히 str(VAL_DIR)을 넣어 "이 세션은 이 폴더를 쓴다"는 의미로 남기거나
-    # 아예 필요 없다면 빈 문자열로 처리 ㅇ
+    # 아예 필요 없다면 빈 문자열로 처리 
     common_dir = str(LLM_TEST_DIR) 
     obj = insert_test_session(sid, common_dir, LLM_TEST_COLLECTION)
     return _serialize_session(obj)
@@ -510,18 +543,8 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
     if coll not in client.list_collections():
         return {"deleted": 0, "requested": len(file_names), "error": "collection not found"}
 
-    # 검증
-    task_filter = ""
-    if task_type:
-        if task_type not in TASK_TYPES:
-            return {"deleted": 0, "requested": len(file_names), "error": f"invalid taskType: {task_type}"}
-        task_filter = f" && task_type == '{task_type}'"
-
-    deleted_total = 0
-    per_file: dict[str, int] = {}
-
+    # 1. 삭제 대상 ID 수집 (DB 호출 없이 메모리에서 계산)
     doc_ids_to_remove: set[str] = set()
-
     for name in (file_names or []):
         stem = Path(name).stem
         try:
@@ -530,84 +553,37 @@ async def delete_test_files_by_names(sid: str, file_names: List[str], task_type:
             base_id = stem
         doc_key = _session_doc_id(sid, base_id)
         doc_ids_to_remove.add(doc_key)
-        try:
-            filt = f"doc_id == '{doc_key}'{task_filter}"
-            client.delete(collection_name=coll, filter=filt)
-            deleted_total += 1
-            per_file[name] = per_file.get(name, 0) + 1
-        except Exception:
-            logger.exception("[test-delete] failed: %s", name)
-            per_file[name] = per_file.get(name, 0)
 
+    deleted_total = 0
+
+    # 2. Milvus DB 일괄 삭제 (Batch Delete)
+    if doc_ids_to_remove:
+        # doc_id in ['id1', 'id2', ...] 형태로 필터 구성
+        ids_str = ", ".join([f"'{eid}'" for eid in doc_ids_to_remove])
+        filt = f"doc_id in [{ids_str}]"
+
+        if task_type:
+            if task_type not in TASK_TYPES:
+                return {"deleted": 0, "requested": len(file_names), "error": f"invalid taskType: {task_type}"}
+            filt += f" && task_type == '{task_type}'"
+        
+        try:
+            client.delete(collection_name=coll, filter=filt)
+            deleted_total = len(doc_ids_to_remove)
+        except Exception:
+            logger.exception("[test-delete] failed batch delete")
+
+    # 3. 최적화: 무거운 release/load 제거하고 flush만 수행
     try:
         client.flush(coll)
     except Exception:
         pass
-    try:
-        client.release_collection(collection_name=coll)
-    except Exception:
-        pass
-    try:
-        client.load_collection(collection_name=coll)
-    except Exception:
-        pass
-
+    
+    # 4. RDB 메타데이터 일괄 삭제
     if doc_ids_to_remove:
         try:
             delete_documents_by_type_and_ids(LLM_TEST_DOC_TYPE, list(doc_ids_to_remove))
         except Exception:
             logger.exception("[test-delete] failed to remove document metadata")
 
-    return {"deleted": deleted_total, "requested": len(file_names), "taskType": task_type, "perFile": per_file, "sid": sid}
-    
-# --- add: ingest_test_pdfs ---
-async def ingest_test_pdfs(sid: str, pdf_paths: List[str], task_types: Optional[List[str]] = None):
-    meta = get_test_session(sid)
-    if not meta:
-        return {"error": "invalid sid"}
-
-    coll = meta.get("collection")
-    settings = get_rag_settings_row()
-    all_rules = get_security_level_rules_all()
-    tasks = task_types or list(TASK_TYPES)
-
-    def _doc_id_gen(base: str) -> str:
-        return _session_doc_id(sid, base)
-        
-    def _post_ingest(info: Dict):
-        # info has file, doc_id, version, levels, chunks, source_path
-        _record_llm_test_document(
-            doc_id=info["doc_id"],
-            filename=info["file"],
-            sid=sid,
-            rel_text_path=str(Path(info["source_path"]).as_posix()), 
-            source_path=info["source_path"],
-            sec_map=info["levels"],
-            version=info["version"]
-        )
-
-    def _batch_callback(records: List[Dict[str, Any]], doc_id: str):
-        if not records:
-            return
-        try:
-            insert_document_vectors(
-                doc_id=doc_id,
-                collection=coll,
-                embedding_version=str(settings["embedding_key"]),
-                vectors=records,
-            )
-        except Exception:
-            logger.exception(f"document_vectors 기록 실패(doc_id={doc_id})")
-
-    res = await retrieval_service.ingest_documents(
-        inputs=pdf_paths,
-        collection_name=coll,
-        task_types=tasks,
-        security_level_config=all_rules,
-        doc_id_generator=_doc_id_gen,
-        pre_ingest_callback=_post_ingest,
-        post_ingest_callback=_post_ingest,
-        batch_callback=_batch_callback,
-    )
-
-    return {"message": "세션 인제스트 완료", "sid": sid, "inserted_chunks": res.get("inserted_chunks", 0)}
+    return {"deleted": deleted_total, "requested": len(file_names), "sid": sid}

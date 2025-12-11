@@ -651,7 +651,7 @@ class LlmEvalRun(Base):
 
     # 필수 메타
     category = Column(Text, nullable=False)         # 'qna' | 'qna' | 'doc_gen' | 'summary'
-    subcategory = Column(Text)                      # 템플릿 name(세부테스크)
+    subcategory = Column(Text, nullable=True)       # 템플릿 name(세부테스크)
     model_name = Column(Text, nullable=False)       # 조회 편의용 중복 저장
 
     # 프롬프트/답변

@@ -355,8 +355,7 @@ def delete_documents(doc_ids: List[str]) -> int:
     # [추가] 텍스트 파일 삭제
     for doc_id in doc_ids:
         try:
-            full_text_dir = Path(config.get("full_text_dir", "storage/documents/full_text"))
-            txt_path = full_text_dir / f"{doc_id}.txt"
+            txt_path = Path(config.get("full_text_dir", "storage/documents/full_text")) / f"{doc_id}.txt"
             if txt_path.exists():
                 txt_path.unlink()
         except Exception as e:

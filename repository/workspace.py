@@ -11,7 +11,6 @@ from storage.db_models import (
     WorkspaceUser,
     LlmModel,
     SystemPromptTemplate,
-    User,
 )
 from sqlalchemy import select, update, delete, func
 from errors import DatabaseError

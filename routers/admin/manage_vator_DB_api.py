@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Body, status, Query, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, Depends, Request, Body, status, Query, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Literal
 import json as _json
@@ -30,7 +30,10 @@ from service.admin.manage_vator_DB import (
 from service.preprocessing.rag_preprocessing import extract_documents
 from storage.db_models import DocumentType
 from utils import logger
+from utils.auth.session import get_user_id_from_cookie
 from utils.documents import save_raw_file
+from service.manage_documents.documents import upload_documents # [추가] 통합 업로드 함수
+
 router = APIRouter(
     prefix="/v1",
     tags=["Admin Document - RAG"],
@@ -237,34 +240,40 @@ async def get_security_levels(taskType: Optional[TaskLiteral] = None):
 # ============================
 
 @router.post("/admin/vector/full-ingest", summary="전체 파일 추출 및 저장 인제스트") # TODO : MinIO 마이그레이션 필요
-async def rag_full_ingest(files: List[UploadFile] = File(...)):
-    # 1) RAW 저장
-    # 기본적으로 securityLevel1 폴더에 저장
+async def rag_full_ingest(
+    user_id: int = Depends(get_user_id_from_cookie), 
+    files: List[UploadFile] = File(...)
+    ):
+    # 1) 저장 경로 준비 (기존 로직 유지: securityLevel1)
     target_folder = ADMIN_RAW_DATA_DIR / "securityLevel1"
-    rel_paths = []
+    target_folder.mkdir(parents=True, exist_ok=True)
+
+    raw_paths = []
+    saved_original_names = []
+
     for f in files:
-        content = await f.read()
-        filename = save_raw_file(f.filename, folder=target_folder, content=content)
-        # process_saved_raw_files는 ADMIN_RAW_DATA_DIR 기준 상대 경로를 필요로 함
-        rel_paths.append(f"securityLevel1/{filename}")
+        filename = f.filename or "unknown"
+        # upload_documents 내부에서 파일을 저장하므로 경로만 지정
+        file_path = target_folder / filename
+        raw_paths.append(str(file_path))
+        saved_original_names.append(filename)
 
-    extract_result = await extract_documents(rel_paths)
-    # 3) 인제스트
-    settings = get_rag_settings_row()
+    # 2) 통합 업로드 함수 호출
+    # 기존 로직이 securityLevel1 폴더에 저장했으므로, 보안 등급을 1로 강제 설정하여 일관성 유지
+    default_levels = {"qna": 1, "summary": 1, "doc_gen": 1}
 
-    # 2) 추출
-
-    ingest_result = await ingest_embeddings(
-        model_key=settings["embedding_key"],
-        # max_token=int(settings["chunk_size"]),
-        # overlab=int(settings["overlap"]),
+    result = await upload_documents(
+        user_id=user_id,
+        files=files,
+        raw_paths=raw_paths,
+        add_to_workspaces=None,
+        doc_type=DocumentType.ADMIN,  # 관리자 문서
+        override_security_levels=default_levels
     )
-    logger.debug(f"\n\n[API] ingest_result: {ingest_result}\n\n")
-    return {
-        "uploaded": rel_paths,
-        "extract": extract_result,
-        "ingest": ingest_result,
-    }
+    ingest_result = {"save": saved_original_names, "ingest": result}
+    logger.info(f"[API] rag_full_ingest 호출 완료, 결과 ingest_result=\n\n{ingest_result}\n")
+
+    return ingest_result
 
 
 @router.post("/admin/vector/execute",summary="관리자 검색")
@@ -447,9 +456,10 @@ def _parse_level_for_tasks_flex(
     raise ValueError('level_for_tasks 파싱 실패. 예) {"qna":2,"summary":1} 또는 "qna:2,summary:1" 또는 "2"')
     
 @router.post("/admin/vector/override-levels-upload", 
-    summary="파일 업로드 후 레벨 지정하여 바로 전처리 및 인제스트 (full-ingest 방식)"
+    summary="파일 업로드 후 레벨 지정하여 바로 전처리 및 인제스트 (통합 업로드 방식)"
     )
 async def override_levels_upload_form(
+    user_id: int = Depends(get_user_id_from_cookie),
     files: List[UploadFile] = File(...),
     tasks: Optional[str] = Form(None),
     level_for_tasks: Optional[str] = Form(None),
@@ -486,30 +496,37 @@ async def override_levels_upload_form(
         raise HTTPException(status_code=400, detail=str(e))
 
     # 저장할 폴더 결정: 지정된 레벨 중 가장 높은 레벨 폴더에 저장 (또는 단일 레벨)
-    # 만약 qna=1, summary=2 라면 securityLevel2 에 저장하여 높은 보안을 따름
     effective_levels = [v for k, v in lvmap.items() if (not tlist) or (k in tlist)]
     max_lvl = max(effective_levels) if effective_levels else 1
+    
+    # 2) 저장 경로 준비 (documents.py의 upload_documents는 raw_paths를 받음)
+    # 기존 로직과 동일한 폴더 구조 유지: ADMIN_RAW_DATA_DIR / securityLevel{max_lvl}
     target_folder = ADMIN_RAW_DATA_DIR / f"securityLevel{max_lvl}"
+    target_folder.mkdir(parents=True, exist_ok=True)
 
-    # 2) 파일 저장
-    saved_original_names: List[str] = []
-    saved_rel_paths : List[str] = []
+    raw_paths = []
+    saved_original_names = []
+
     for f in files:
-        # 수정된 부분: folder를 동적으로 지정
-        content = await f.read()
-        filename = save_raw_file(f.filename, folder=target_folder, content=content)
-        saved_original_names.append(f.filename)
+        filename = f.filename or "unknown"
+        # upload_documents 내부에서 파일을 저장하므로 여기서는 경로만 지정해줌
+        # 파일명 충돌 방지를 위해 기존 save_raw_file 로직을 따를 수도 있으나,
+        # upload_documents는 주어진 경로에 파일을 씀.
+        # 여기서는 파일명 그대로 사용하거나 필요시 중복 처리 필요.
+        # 일단 파일명 그대로 사용
+        file_path = target_folder / filename
+        raw_paths.append(str(file_path))
+        saved_original_names.append(filename)
         
-        # process_saved_raw_files는 ADMIN_RAW_DATA_DIR 기준 상대 경로를 필요로 함
-        # target_folder는 ADMIN_RAW_DATA_DIR / f"securityLevel{max_lvl}"
-        rel_path = f"securityLevel{max_lvl}/{filename}"
-        saved_rel_paths.append(rel_path)
-
-    processed_docs = await process_saved_raw_files(saved_rel_paths)
-    target_tokens = [doc["doc_id"] for doc in processed_docs] or saved_original_names
-    logger.debug(f"🎯 [API] target_tokens: {target_tokens}")
-
-    # 3) 인제스트 요청
-    req = OverrideLevelsRequest(files=target_tokens, level_for_tasks=lvmap, tasks=tlist)
-    result = await override_levels_and_ingest(req)
+    # 3) 통합 업로드 함수 호출
+    # override_security_levels 파라미터를 통해 강제 레벨 적용
+    result = await upload_documents(
+        user_id=user_id,
+        files=files,
+        raw_paths=raw_paths,
+        add_to_workspaces=None,
+        doc_type=DocumentType.ADMIN,  # 관리자 문서
+        override_security_levels=lvmap # 강제 레벨
+    )
+    
     return {"saved": saved_original_names, "ingest_result": result}

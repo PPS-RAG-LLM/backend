@@ -81,8 +81,8 @@ _DEFAULT_TOPK: int = 5
 # Backend root (상대 경로 기준 루트)
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
 
-# 레거시 위치(호환용): ./storage/models
-LLM_MODEL_DIR = Path(app_config.get("llm_models_path", "storage/models")).resolve()
+# 레거시 위치(호환용): ./storage/models/llm
+LLM_MODEL_DIR = Path(app_config.get("llm_models_path")).resolve()
 LLM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 # DB 경로(환경변수로 오버라이드 가능)
 DB_PATH = Path(app_config["database"]["path"])
@@ -163,13 +163,13 @@ class DeleteModelBody(BaseModel):
 # 공통 정규화 함수 추가
 def _canon_storage_path(p: str) -> str:
     """
-    같은 모델 디렉터리를 항상 /storage/models/<basename> 로 통일.
+    같은 모델 디렉터리를 항상 /storage/models/llm/<basename> 로 통일.
     해당 경로에 config.json 이 있으면 그 경로를 반환, 없으면 원본 반환.
     """
     try:
         p = (p or "").strip().replace("\\", "/")
         base = os.path.basename(p.rstrip("/"))
-        cand = f"/storage/models/{base}"
+        cand = f"/storage/models/llm/{base}"
         if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")):
             return cand
     except Exception:
@@ -310,6 +310,7 @@ def _now_iso() -> str:
 def _get_cache(name: str) -> Optional[str]:
     """cache_data 테이블에서 캐시 데이터를 조회합니다."""
     return repo_get_cache(name)
+    
 def _norm_category(category: str) -> str:
     """
     외부 표기는 qna, 내부 스키마/기존 코드는 qna.
@@ -752,7 +753,7 @@ def _db_get_model_path(model_name: str) -> Optional[str]:
         if not val:
             return None
 
-        # Handle standardized relative paths like ./service/storage/models/...
+        # Handle standardized relative paths like ./service/storage/models/llm/...
         if val.startswith("./"):
             leg = LLM_MODEL_DIR / os.path.basename(val)
             if (leg / "config.json").is_file():
@@ -828,11 +829,11 @@ def _preload_via_adapters(model_name: str) -> bool:
             logging.getLogger(__name__).warning("[preload] config.json not found: %s", raw_path)
             return False
 
-        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/models/<basename>')
+        # 2) utils 쪽에서 사용하는 보이는 경로로 매핑 (예: '/storage/models/llm/<basename>')
         def _adapter_visible_path(p: str) -> str:
             try:
                 base = os.path.basename(p.rstrip("/"))
-                cand = f"/storage/models/{base}"
+                cand = f"/storage/models/llm/{base}"
                 return cand if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "config.json")) else p
             except Exception:
                 return p

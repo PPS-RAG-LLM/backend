@@ -20,6 +20,7 @@ server:
   cookie_samesite: "lax"  # [수정] "none"으로 하면 secure: true가 필수라 "lax"가 무난
 
 database:
+  url: "postgresql://n-iq:pps5763@localhost:5432/pps_rag"
   path: storage/pps_rag.db
   schema_path: storage/db_models.py
 
@@ -47,16 +48,16 @@ workspace:
   temperature: 0.7
 
 models_dir:
-  llm_models_path: storage/models
-  embedding_model_path: storage/embedding-models
-  rerank_model_path: storage/rerank_model/Qwen3-Reranker-0.6B
-# model_root_dir: storage/embedding-models
+  llm_models_path: storage/models/llm
+  embedding_model_path: storage/models/embedding
+  rerank_model_path: storage/models/embedding-rerank/Qwen3-Reranker-0.6B
 
-admin_raw_data_dir: storage/raw_files/admin_raw_data
-user_raw_data_dir: storage/raw_files/user_raw_data
-test_llm_raw_data_dir: storage/raw_files/test_llm
-
-full_text_dir : storage/documents/full_text # 문서생성 / 텍스트 요약 전체 텍스트 저장 경로
+# 문서 저장경로
+admin_raw_data_dir: storage/documents/raw_files/admin_raw_data
+user_raw_data_dir: storage/documents/raw_files/user_raw_data
+test_llm_raw_data_dir: storage/documents/raw_files/test_llm
+# 문서생성 / 텍스트 요약 전체 텍스트 저장 경로
+full_text_dir : storage/documents/full_text 
 
 retrieval:
   temp_ttl_hours: 12

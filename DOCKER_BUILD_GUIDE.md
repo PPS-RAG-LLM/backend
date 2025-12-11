@@ -95,7 +95,7 @@ docker ps -a
 
 ## 현재 설정
 
-- ✅ 모델 파일 포함 (storage/models/, storage/embedding-models/, storage/rerank_model/)
+- ✅ 모델 파일 포함 (storage/models/, storage/embedding-models/, storage/models/embedding-rerank)
 - ✅ 불필요한 파일 제외 (.dockerignore 최적화)
 - ✅ 모델을 별도 레이어로 분리 (캐싱 최적화)
 - ✅ 빌드 스크립트 제공 (docker-build.sh)

@@ -1,85 +1,66 @@
-import sqlite3, pathlib
+import pathlib
 from config import config
 
 # SQLAlchemy 추가
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-db = config["database"]
+# 1. 설정 가져오기 (config.yaml에 url이 있다고 가정)
+# 만약 config 구조가 다르다면 적절히 수정하세요.
+# 예: DATABASE_URL = f"postgresql://{user}:{pw}@{host}:{port}/{db_name}"
+db_conf = config.get("database", {})
+DATABASE_URL = db_conf.get("url")
 
-# ORM 엔진/세션/베이스
-DATABASE_URL = f"sqlite:///{db['path']}"
+# 2. 엔진 생성 (SQLite 전용 옵션 제거)
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    pool_size=20,        # 커넥션 풀 크기 설정
+    max_overflow=0,
+    pool_pre_ping=True,  # 연결 끊김 방지
     future=True,
 )
+
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
 Base = declarative_base()
 
-_INITIALIZED = False
-
-# SQLite 외래키 강제
-@event.listens_for(Engine, "connect")
-def _set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON;")
-    cursor.close()
 
 
 def init_db():
     """
-    - ORM 모델(`storage/db_models.py`)만으로 테이블 생성(create_all)
-    - `users`가 비어있으면 `storage/base.sql`을 실행해 기본 데이터 시드
+    테이블을 생성하고, 데이터가 비어있으면 초기 데이터를 적재합니다.
     """
-    global _INITIALIZED
-    if _INITIALIZED:
-        return
-
-    # 1) 모델 등록 및 테이블 생성
-    import storage.db_models  # noqa: F401
+    # 1) 테이블 생성
+    import storage.db_models  # 모델 등록
     Base.metadata.create_all(bind=engine)
 
-    # 2) 필요 시 기본 데이터 시드
-    con = sqlite3.connect(db["path"])
-    con.execute("PRAGMA foreign_keys=ON;")
-    cur = con.cursor()
+    # 2) 데이터 시딩 (SQLAlchemy 엔진 사용)
+    with engine.connect() as conn:
+        # users 테이블 확인
+        # Postgres에서는 테이블명을 따옴표로 감쌀 때 대소문자 주의 ("users")
+        result = conn.execute(text('SELECT COUNT(*) FROM "users"'))
+        user_count = result.scalar()
 
-    # users 레코드 유무로 시드 필요 여부 판단(비어있으면 시드)
-    try:
-        cur.execute("SELECT COUNT(*) FROM users;")
-        (user_count,) = cur.fetchone() or (0,)
-    except sqlite3.OperationalError:
-        # users 테이블이 없으면(이상 케이스), create_all 이후 다시 생성 시도
-        con.close()
-        Base.metadata.create_all(bind=engine)
-        con = sqlite3.connect(db["path"])
-        con.execute("PRAGMA foreign_keys=ON;")
-        cur = con.cursor()
-        cur.execute("SELECT COUNT(*) FROM users;")
-        (user_count,) = cur.fetchone() or (0,)
-
-    if user_count == 0:
-        base_sql_path = pathlib.Path("storage/base.sql")
-        if base_sql_path.exists():
-            seed_sql = base_sql_path.read_text(encoding="utf-8")
-            con.executescript(seed_sql)
-            con.commit()
-
-    con.close()
-
-    _INITIALIZED = True
-
+        if user_count == 0:
+            base_sql_path = pathlib.Path("storage/base.sql")
+            if base_sql_path.exists():
+                print("초기 데이터를 적재합니다...")
+                seed_sql = base_sql_path.read_text(encoding="utf-8")
+                
+                # 주의: base.sql 파일 내의 문법이 Postgres와 호환되어야 함
+                # text()로 감싸서 실행하거나, ; 단위로 쪼개서 실행해야 할 수 있음
+                # 단순 INSERT문들이라면 아래와 같이 실행 가능
+                conn.execute(text(seed_sql))
+                conn.commit()
 
 def get_session():
-    """SQLAlchemy 세션을 반환(사용 후 close 필요). with 문 사용 권장."""
+    """새로운 SQLAlchemy 세션 반환"""
     return SessionLocal()
 
-
 def get_db():
-    """기존 sqlite3 연결 방식 - ORM 전환 중 호환성 유지용"""
-    conn = sqlite3.connect(db["path"])
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+    """
+    [주의] 기존 sqlite3 커넥션을 반환하던 함수입니다.
+    기존 코드 호환성을 위해 남겨두지만, 가급적 get_session()을 사용하도록 리팩토링해야 합니다.
+    """
+    # 임시로 raw connection을 반환하거나, 에러를 발생시켜 수정을 유도합니다.
+    # Postgres에서 raw connection을 직접 쓰는 것은 권장되지 않습니다.
+    return engine.raw_connection()

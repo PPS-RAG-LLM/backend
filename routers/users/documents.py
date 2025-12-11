@@ -31,7 +31,11 @@ async def upload_endpoint(
     rel_paths = [] # RAW 저장
     for f in files:
         data = await f.read()
-        rel_paths.append(save_raw_file(f.filename, folder=USER_RAW_DATA_DIR, content=data))
+        saved_name = save_raw_file(f.filename, folder=USER_RAW_DATA_DIR, content=data)
+        # 서비스 함수는 전체 경로(또는 상대경로)를 그대로 target_path로 사용하므로,
+        # 저장된 디렉토리(USER_RAW_DATA_DIR)를 포함한 경로를 넘겨야 루트 저장을 방지함.
+        full_path = USER_RAW_DATA_DIR / saved_name
+        rel_paths.append(str(full_path))
         await f.seek(0)
         
     return await upload_documents(

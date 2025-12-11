@@ -185,3 +185,6 @@ tabula==1.0.5
 milvus-cli==1.0.2
 tabulate==0.8.9
 pyjwt==2.10.1
+#postgreSQL
+psycopg2-binary==2.9.11
+psycopg==3.3.2
