@@ -35,6 +35,11 @@ class NotFoundError(BaseAPIException):
     def __init__(self, message: str = "요청한 리소스를 찾을 수 없습니다"):
         super().__init__(message, 404)
 
+class ConflictError(BaseAPIException):
+    """409 Conflict - 리소스 충돌 (중복 등)"""
+    def __init__(self, message: str = "이미 존재하는 리소스입니다"):
+        super().__init__(message, 409)
+
 
 class UnprocessableEntityError(BaseAPIException):
     """422 Unprocessable Entity - 처리할 수 없는 엔티티"""

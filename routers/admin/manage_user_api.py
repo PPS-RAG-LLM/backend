@@ -18,7 +18,8 @@ from service.admin.manage_user import (
     bulk_update_users,
     bulk_soft_delete,
 )
-
+from utils import logger
+logger = logger(__name__)
 router = APIRouter(
     prefix="/v1/admin/users",
     tags=["Admin Users"],
@@ -241,5 +242,6 @@ def api_bulk_update(payload: BulkUpdateIn = Body(..., description="일괄 변경
     description="여러 사용자를 한 번에 퇴사 처리합니다. `retired_at` 미지정 시 서버 현재시각(KST).",
 )
 def api_bulk_delete(payload: BulkDeleteIn = Body(..., description="일괄 퇴사 처리 페이로드(JSON)")):
+    logger.debug(f"Bulk delete users {payload.ids} with retired_at {payload.retired_at}")
     n = bulk_soft_delete(payload.ids, retired_at=payload.retired_at)
     return {"deleted": n}

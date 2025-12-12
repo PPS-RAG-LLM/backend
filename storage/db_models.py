@@ -176,7 +176,7 @@ class User(Base):
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
     expires_at = Column(
-        DateTime, server_default=text("CURRENT_TIMESTAMP")
+        DateTime, nullable=True
     )
 
     # 관계 정의
