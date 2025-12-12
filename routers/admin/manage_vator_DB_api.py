@@ -185,7 +185,7 @@ async def read_vector_settings():
 )
 async def list_embedding_models():
     """
-    ./storage/embedding-models 폴더 내의 모델 폴더명들을 반환.
+    ./storage/models/embedding 폴더 내의 모델 폴더명들을 반환.
     - embedding_ 접두사가 있으면 제거 (예: embedding_bge_m3 → bge_m3)
     """
     models = list_available_embedding_models()

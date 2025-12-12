@@ -34,7 +34,7 @@ def _resolve_model_path(local_path: str) -> str:
         raise NotFoundError("DB에 model_path가 비어 있습니다.")
     
     project_root = Path(__file__).resolve().parents[2]
-    base = Path((config.get("models") or {}).get("root") or (project_root / "storage" / "models"))
+    base = Path((config.get("models") or {}).get("root") or (project_root / "storage" / "models" / "llm"))
 
     if os.path.isabs(local_path):
         abs_path = Path(local_path)

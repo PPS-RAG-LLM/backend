@@ -71,7 +71,7 @@ docker build \
 docker run -d \
     -p 3007:3007 \
     -v /home/wzxcv123/NIQ/jo/backend/storage/models:/app/storage/models \
-    -v /home/wzxcv123/NIQ/jo/backend/storage/embedding-models:/app/storage/embedding-models \
+    -v /home/wzxcv123/NIQ/jo/backend/storage/models/embedding:/app/storage/models/embedding \
     --restart always \
     --name NIQ \
     niq:v0.0.1
@@ -95,7 +95,7 @@ docker ps -a
 
 ## 현재 설정
 
-- ✅ 모델 파일 포함 (storage/models/, storage/embedding-models/, storage/models/embedding-rerank)
+- ✅ 모델 파일 포함 (storage/models/, storage/models/embedding/, storage/models/embedding-rerank)
 - ✅ 불필요한 파일 제외 (.dockerignore 최적화)
 - ✅ 모델을 별도 레이어로 분리 (캐싱 최적화)
 - ✅ 빌드 스크립트 제공 (docker-build.sh)

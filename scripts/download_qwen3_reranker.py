@@ -42,11 +42,11 @@ def download_qwen3_reranker(
 ) -> dict[str, str]:
     """
     저장 경로: ./storage/models/embedding-rerank/Qwen3-Reranker-0.6B
-    /home/wzxcv123/NIQ/jo/backend/storage/rerank_model
+    /home/wzxcv123/NIQ/jo/backend/storage/models/embedding-rerank
     (리포지토리 루트 기준; 본 스크립트가 scripts/ 에 있다고 가정)
     """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    dst_root = os.path.join(repo_root, "storage", "rerank_model")
+    dst_root = os.path.join(repo_root, "storage", "models", "embedding-rerank")
     plan = {
         "model_id": "Qwen/Qwen3-Reranker-0.6B",
         "dst": os.path.join(dst_root, "Qwen3-Reranker-0.6B"),

@@ -55,7 +55,7 @@ _RETRIEVAL_CFG: Dict[str, Any] = app_config.get("retrieval", {}) or {}
 _RETRIEVAL_PATHS: Dict[str, str] = _RETRIEVAL_CFG.get("paths", {}) or {}
 _MILVUS_CFG: Dict[str, Any] = _RETRIEVAL_CFG.get("milvus", {}) or {}
 
-MODEL_ROOT_DIR = Path(app_config.get("models_dir", {}).get("embedding_model_path", "storage/embedding-models"))
+MODEL_ROOT_DIR = Path(app_config.get("models_dir", {}).get("embedding_model_path", "storage/models/embedding"))
 ADMIN_RAW_DATA_DIR = Path(app_config.get("admin_raw_data_dir", "storage/raw_files/admin_raw_data"))
 
 DATABASE_CFG = app_config.get("database", {}) or {}
@@ -398,7 +398,7 @@ def set_vector_settings(embed_model_key: Optional[str] = None,
 
 def list_available_embedding_models() -> List[str]:
     """
-    ./storage/embedding-models 폴더 내의 모델 폴더명들을 반환.
+    ./storage/models/embedding 폴더 내의 모델 폴더명들을 반환.
     - embedding_ 접두사가 있으면 제거 (예: embedding_bge_m3 → bge_m3)
     - 폴더만 반환 (파일 제외)
     """

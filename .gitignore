@@ -20,7 +20,7 @@ user_data/
 .vscode/
 *.th
 pretrain/
-storage/embedding-models/*
+storage/models/embedding/*
 storage/models/*
 storage/documents/*
 system/

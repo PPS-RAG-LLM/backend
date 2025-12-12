@@ -17,7 +17,7 @@ _USER_DOCS_CFG = app_config.get("user_documents", {}) or {}
 
 
 def _resolve_model_root() -> Path:
-    path_value = app_config.get("models_dir", {}).get("embedding_model_path", "storage/embedding-models")
+    path_value = app_config.get("models_dir", {}).get("embedding_model_path", "storage/models/embedding")
     rel = Path(path_value)
     base = (PROJECT_ROOT / rel)
     return base.resolve()
@@ -32,7 +32,7 @@ _EMBED_LOCK = threading.Lock()
 def resolve_model_input(model_key: Optional[str]) -> Tuple[str, Path]:
     """
     주어진 모델 키(embedding_models.name)를 실제 로컬 디렉토리에 매핑.
-    1) DB의 model_path가 우선이며, 없을 경우 storage/embedding-models 폴더를 탐색.
+    1) DB의 model_path가 우선이며, 없을 경우 storage/models/embedding 폴더를 탐색.
     """
     key = (model_key or "bge").lower()
     try:

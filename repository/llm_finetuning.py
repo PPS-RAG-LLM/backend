@@ -73,7 +73,7 @@ def finish_job_success(
             provider="local",  # 로컬 학습 모델
             name=save_name,
             revision=0,
-            model_path=f"./storage/models/{save_name}", # 규칙에 따른 경로
+            model_path=f"./storage/models/llm/{save_name}", # 규칙에 따른 경로
             category=category,
             type=tuning_type.lower(), # lora, qlora, full
             is_active=True,
@@ -98,7 +98,7 @@ def finish_job_success(
             model_id=new_llm.id,
             job_id=job.id,
             provider_model_id=save_name,
-            lora_weights_path=f"./storage/models/{save_name}" if tuning_type in ("LORA", "QLORA") else None,
+            lora_weights_path=f"./storage/models/llm/{save_name}" if tuning_type in ("LORA", "QLORA") else None,
             type=tuning_type,
             rouge1_f1=rouge_score,
             is_active=True

@@ -781,7 +781,7 @@ def _to_rel_under_storage_root(p: str) -> str:
         try:
             rp = os.path.relpath(p, str(LLM_MODEL_DIR))
             if rp not in (".", ""):
-                return f"./storage/models/{rp}".replace("\\", "/")
+                return f"./storage/models/llm/{rp}".replace("\\", "/")
         except Exception:
             pass
     except Exception:
