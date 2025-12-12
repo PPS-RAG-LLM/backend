@@ -20,11 +20,15 @@ server:
   cookie_samesite: "lax"  # [수정] "none"으로 하면 secure: true가 필수라 "lax"가 무난
 
 database:
-  url: "postgresql://n-iq:pps5763@localhost:5432/pps_rag"
+  user: ${RDB_USER}
+  password: ${RDB_PASSWORD}
+  host: 127.0.0.1
+  port: 8003
+  database: ${RDB_NAME}
 
 provider:
   openai:
-    api_key: !ENV ${OPENAI_API_KEY}
+    api_key: ${OPENAI_API_KEY}
     base_url: "https://api.openai.com/v1"
   huggingface: {}
   # ollama:
