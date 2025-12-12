@@ -43,6 +43,8 @@ default:
   max_tokens: 20000
 
 workspace:
+  provider: "huggingface"
+  chat_mode: "chat"
   chat_history: 20
   query_refusal_response: "There is no information about this topic."
   top_n: 4

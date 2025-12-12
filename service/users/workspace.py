@@ -55,40 +55,28 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         system_prompt = None
         chat_history  = 0
 
-    # 3) 요청 본문으로 오버라이드 (provider/chat_model은 오버라이드 불가)
-    chat_mode               = payload.get("chatMode")
-    temperature             = defaults["temperature"]
-    similarity_threshold    = defaults["similarity_threshold"]
-    top_n                   = defaults["top_n"]
-    query_refusal_response  = defaults["query_refusal_response"]
-    search_type             = db_settings.get("searchType")
-
-    if chat_mode not in ("chat", "query"):
-        raise BadRequestError("chatMode must be 'chat' or 'query'")
-    if not isinstance(top_n, int) or top_n <= 0:
-        raise BadRequestError("topN must be a positive integer")
-
     slug = generate_unique_slug(name)
 
+    # 기본값 함께 워크스페이스 생성 시 저장
     ws_id = insert_workspace(
         name                    = name,
         slug                    = slug,
         category                = category,
-        temperature             = temperature,
         chat_history            = chat_history,
         system_prompt           = system_prompt,
-        provider                = "huggingface",
-        similarity_threshold    = similarity_threshold,
-        top_n                   = top_n,
-        chat_mode               = chat_mode,
-        query_refusal_response  = query_refusal_response,
-        vector_search_mode      = search_type,
+        temperature             = defaults["temperature"],
+        provider                = defaults["provider"],
+        similarity_threshold    = defaults["similarity_threshold"],
+        top_n                   = defaults["top_n"],
+        chat_mode               = defaults["chat_mode"],
+        query_refusal_response  = defaults["query_refusal_response"],
+        vector_search_mode      = db_settings.get("searchType"),
     )
 
     link_workspace_to_user(user_id=user_id, workspace_id=ws_id)
 
     logger.debug(f"Creating default thread for {category} workspace: name={name}")
-    if category =="qna":
+    if category == "qna":
         thread_name = f"thread-{name}"
         thread_slug = generate_thread_slug(thread_name)
         logger.info(f"thread_name: {thread_name}, thread_slug: {thread_slug}")
@@ -103,11 +91,11 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
         raise InternalServerError("workspace retrieval failed")
 
     result = {
-        "id": ws["id"],
-        "category": ws["category"],
-        "name": ws["name"],
-        "slug": ws["slug"],
-        "createdAt": ws["created_at"],
+        "id"        : ws["id"],
+        "category"  : ws["category"],
+        "name"      : ws["name"],
+        "slug"      : ws["slug"],
+        "createdAt" : ws["created_at"],
     }
     logger.info({"workspace_created": result})
     return result
@@ -123,19 +111,19 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
         else:
             threads = []
         items.append({
-            "id": ws["id"],
-            "category": ws["category"],
-            "name": ws["name"],
-            "slug": ws["slug"],
-            "createdAt": ws["created_at"],
-            "updatedAt": ws["updated_at"],
+            "id"        : ws["id"],
+            "category"  : ws["category"],
+            "name"      : ws["name"],
+            "slug"      : ws["slug"],
+            "createdAt" : ws["created_at"],
+            "updatedAt" : ws["updated_at"],
             "threads": [
                 {
-                    "id": thread["id"],
-                    "name": thread["name"],
-                    "thread_slug": thread["slug"],
-                    "createdAt": thread["created_at"],
-                    "updatedAt": thread["updated_at"],
+                    "id"            : thread["id"],
+                    "name"          : thread["name"],
+                    "thread_slug"   : thread["slug"],
+                    "createdAt"     : thread["created_at"],
+                    "updatedAt"     : thread["updated_at"],
                 } for thread in threads
             ],
         })
@@ -156,22 +144,22 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
     # from repository.documents import get_documents_by_workspace_id
     # threads = get_threads_by_workspace_id(workspace_id)
     return {
-        "id": ws["id"],
-        "name": ws["name"],
-        "category": ws["category"],
-        "slug": ws["slug"],
-        "createdAt": ws["created_at"],
-        "updatedAt": ws["updated_at"],
-        "temperature": ws["temperature"],
-        "chatHistory": ws["chat_history"],
-        "systemPrompt": ws["system_prompt"],
-        "provider": ws["provider"],
-        "chatModel": ws["chat_model"],
-        "topN": ws["top_n"],
-        "chatMode": ws["chat_mode"],
-        "queryRefusalResponse": ws["query_refusal_response"],
-        "vectorSearchMode": ws["vector_search_mode"],
-        "similarityThreshold": ws["similarity_threshold"],
+        "id"                    : ws["id"],
+        "name"                  : ws["name"],
+        "category"              : ws["category"],
+        "slug"                  : ws["slug"],
+        "createdAt"             : ws["created_at"],
+        "updatedAt"             : ws["updated_at"],
+        "temperature"           : ws["temperature"],
+        "chatHistory"           : ws["chat_history"],
+        "systemPrompt"          : ws["system_prompt"],
+        "provider"              : ws["provider"],
+        "chatModel"             : ws["chat_model"],
+        "topN"                  : ws["top_n"],
+        "chatMode"              : ws["chat_mode"],
+        "queryRefusalResponse"  : ws["query_refusal_response"],
+        "vectorSearchMode"      : ws["vector_search_mode"],
+        "similarityThreshold"   : ws["similarity_threshold"],
         "vectorCount": ws["vector_count"],
     }
 

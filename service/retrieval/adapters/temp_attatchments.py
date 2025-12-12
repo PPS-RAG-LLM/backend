@@ -31,21 +31,21 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
 
     def search(
         self,
-        query: str,
-        top_k: int,
+        query       : str,
+        top_k       : int,
         *,
-        doc_ids: List[str],
-        threshold: float = 0.0,
-        mode: str = "hybrid",
+        doc_ids     : List[str],
+        threshold   : float = 0.0,
+        mode        : str = "hybrid",
         workspace_id: Optional[int] = None,
-        model_key: Optional[str] = None,
+        model_key   : Optional[str] = None,
     ) -> List[RetrievalResult]:
         if not doc_ids:
             return []
         if model_key:
             try:
-                tok, model, device = _get_or_load_embedder(model_key)
-                query_vec = hf_embed_text(tok, model, device, query).tolist()
+                tok, model, device  = _get_or_load_embedder(model_key)
+                query_vec           = hf_embed_text(tok, model, device, query).tolist()
             except Exception as e:
                 logger.warning(f"[TempAttachments] Failed to load model {model_key}, fallback to default: {e}")
                 query_vec = embed_text(query).tolist()
@@ -53,7 +53,8 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
             query_vec = embed_text(query).tolist()
 
         filter_expr = self._build_filter_expr(doc_ids=doc_ids, workspace_id=workspace_id)
-        client = get_milvus_client()
+        client      = get_milvus_client()
+
         if workspace_id:
             output_fields = list(DEFAULT_OUTPUT_FIELDS) + ["workspace_id"]
         else:
@@ -66,28 +67,27 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
         logger.debug(f"LIMIT: {top_k}")
         logger.debug(f"COLLECTION_NAME: {self.collection_name}")
 
-        if mode == "hybrid":
+        if mode == "hybrid": # RRF Ranker 사용 시 점수가 매우 낮으므로(0.0~0.03 등) threshold 적용 제외
             raw_hits = run_hybrid_search(
                 client,
-                collection_name=self.collection_name,
-                query_vector=query_vec,
-                query_text=query,
-                limit=top_k,
-                filter_expr=filter_expr,
-                output_fields=output_fields,
+                collection_name = self.collection_name,
+                query_vector    = query_vec,
+                query_text      = query,
+                limit           = top_k,
+                filter_expr     = filter_expr,
+                output_fields   = output_fields,
             )
-            # [수정] RRF Ranker 사용 시 점수가 매우 낮으므로(0.0~0.03 등) threshold 적용 제외
             return self._normalize_hits(raw_hits, threshold=0.0)[: max(1, top_k)]
         else:
             raw_hits = run_dense_search(
                 client,
-                collection_name=self.collection_name,
-                query_vector=query_vec,
-                limit=top_k,
-                filter_expr=filter_expr,
-                output_fields=output_fields,
+                collection_name = self.collection_name,
+                query_vector    = query_vec,
+                limit           = top_k,
+                filter_expr     = filter_expr,
+                output_fields   = output_fields,
             )
-        return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)]
+        return self._normalize_hits(raw_hits, threshold=threshold)[: max(1, top_k)] 
 
     def _build_filter_expr(
         self, *, doc_ids: List[str], workspace_id: Optional[int]
@@ -109,32 +109,35 @@ class TempAttachmentsVectorAdapter(BaseRetrievalAdapter):
 
         results: List[RetrievalResult] = []
         for hit in flattened:
-            score = self._extract_score(hit)
+            score       = self._extract_score(hit)
             if score is None or score < threshold:
                 continue
-            doc_id = str(self._extract_field(hit, "doc_id") or "")
+
+            doc_id      = str(self._extract_field(hit, "doc_id") or "")
             if not doc_id:
                 continue
-            chunk_idx = self._extract_field(hit, "chunk_idx")
-            page = self._extract_field(hit, "page")
-            text = str(self._extract_field(hit, "text") or "").strip()
+
+            chunk_idx   = self._extract_field(hit, "chunk_idx")
+            page        = self._extract_field(hit, "page")
+            text        = str(self._extract_field(hit, "text") or "").strip()
             if not text:
                 continue
-            doc_meta = doc_map.get(doc_id, {})
-            title = doc_meta.get("filename") or doc_id
-            metadata = {
-                "workspace_id": doc_meta.get("workspace_id"),
-                "doc_type": doc_meta.get("doc_type"),
+
+            doc_meta    = doc_map.get(doc_id, {})
+            title       = doc_meta.get("filename") or doc_id
+            metadata    = {
+                "workspace_id"  : doc_meta.get("workspace_id"),
+                "doc_type"      : doc_meta.get("doc_type"),
             }
             results.append(
                 self._build_result(
-                    doc_id=doc_id,
-                    title=title,
-                    text=text,
-                    score=float(score),
-                    chunk_index=int(chunk_idx or 0),
-                    page=int(page) if page is not None else None,
-                    metadata=metadata,
+                    doc_id      = doc_id,
+                    title       = title,
+                    text        = text,
+                    score       = float(score),
+                    chunk_index = int(chunk_idx or 0),
+                    page        = int(page) if page is not None else None,
+                    metadata    = metadata,
                 )
             )
 
