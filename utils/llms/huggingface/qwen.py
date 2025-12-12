@@ -24,12 +24,14 @@ def load_qwen_instruct_7b(model_dir):
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    # 🎯 파인튜닝된 모델 호환성 개선 (FULL/LORA/QLORA 지원)
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         device_map="auto",
         local_files_only=True,
         trust_remote_code=True,
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.bfloat16,  # 파인튜닝과 동일한 dtype 사용
+        low_cpu_mem_usage=True,      # 메모리 최적화
     )
     model.eval()
     return model, tokenizer
@@ -50,35 +52,75 @@ def stream_chat(messages, **gen_kwargs):
         tokenize=True,
         add_generation_prompt=True,
         return_tensors="pt",
-        
-    ).to(model.device)
+    )
+    
+    # 🎯 Multi-GPU 모델 처리 개선
+    try:
+        # Multi-GPU 모델의 경우 첫 번째 device 사용
+        if hasattr(model, 'hf_device_map') and model.hf_device_map:
+            first_device = next(iter(model.hf_device_map.values()))
+            input_ids = input_ids.to(first_device)
+        else:
+            input_ids = input_ids.to(model.device)
+    except Exception:
+        # Fallback: GPU 0 사용
+        input_ids = input_ids.to("cuda:0" if torch.cuda.is_available() else "cpu")
 
     defaults = config.get("default", {}) or {}
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
+    # 🎯 파인튜닝된 모델 호환 generation parameters
     generation_args = {
         "input_ids": input_ids,
-        "temperature": gen_kwargs.get("temperature", defaults.get("temperature")),
-        "top_p": gen_kwargs.get("top_p", defaults.get("top_p")),
-        "max_new_tokens": defaults.get("max_tokens", 512),
-        "repetition_penalty": defaults.get("repetition_penalty", 1.05),
-        "no_repeat_ngram_size": defaults.get("no_repeat_ngram_size", 0),
+        "max_new_tokens": gen_kwargs.get("max_new_tokens", defaults.get("max_tokens", 512)),
         "do_sample": True,
-        "use_cache": True,
-        # ✅ EOS/PAD 명시 (조기 종료/무응답 방지)
+        "temperature": gen_kwargs.get("temperature", defaults.get("temperature", 0.7)),
+        "top_p": gen_kwargs.get("top_p", defaults.get("top_p", 0.8)),
+        "repetition_penalty": gen_kwargs.get("repetition_penalty", defaults.get("repetition_penalty", 1.05)),
+        "streamer": streamer,
+        # ✅ 파인튜닝된 모델 안정성 개선
         "eos_token_id": tokenizer.eos_token_id,
         "pad_token_id": tokenizer.pad_token_id,
-        "streamer": streamer,
+        "use_cache": True,
     }
+    
+    # 🛡️ 파인튜닝된 모델에서 문제되는 파라미터 제거
+    no_repeat_ngram = defaults.get("no_repeat_ngram_size", 0)
+    if no_repeat_ngram and no_repeat_ngram > 0:
+        generation_args["no_repeat_ngram_size"] = no_repeat_ngram
 
+    # 🎯 파인튜닝된 Multi-GPU 모델 안정적 처리
     try:
+        logger.debug(f"Starting generation with device: {input_ids.device}")
         thread = Thread(target=model.generate, kwargs=generation_args)
+        thread.daemon = True  # 메인 프로세스 종료 시 같이 종료
         thread.start()
+        
+        # 🛡️ 무한 대기 방지를 위한 타임아웃 처리
+        import time
+        start_time = time.time()
+        timeout_seconds = 300  # 5분 타임아웃
+        
         for text_token in streamer:
             if text_token:
                 yield text_token
+            
+            # 타임아웃 체크
+            if time.time() - start_time > timeout_seconds:
+                logger.warning(f"Generation timeout after {timeout_seconds}s - terminating")
+                break
+                
+    except Exception as e:
+        logger.error(f"Generation failed: {e}")
+        yield f"[오류] 생성 중 문제가 발생했습니다: {str(e)}"
     finally:
-        thread.join()
+        try:
+            # 스레드 정리 (타임아웃과 함께)
+            thread.join(timeout=10)
+            if thread.is_alive():
+                logger.warning("Generation thread did not terminate cleanly")
+        except Exception:
+            pass
         free_torch_memory()
 
 
