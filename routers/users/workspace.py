@@ -23,15 +23,6 @@ router_singular = APIRouter(tags=["Workspace"], prefix="/v1/workspace")
 
 class NewWorkspaceBody(BaseModel):
     name: str
-    similarityThreshold: Optional[float] = Field(0.25)
-    temperature: Optional[float] = Field(0.7)
-    chatHistory: Optional[int] = Field(20)
-    systemPrompt: Optional[str] = Field("")
-    queryRefusalResponse: Optional[str] = Field(
-        "There is no information about this topic."
-    )
-    chatMode: Optional[str] = Field(None, pattern="^(chat|query)$")
-    topN: Optional[int] = Field(4, gt=0)
 
 
 class Workspace(BaseModel):
