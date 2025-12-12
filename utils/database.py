@@ -5,11 +5,21 @@ from config import config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# 1. 설정 가져오기 (config.yaml에 url이 있다고 가정)
-# 만약 config 구조가 다르다면 적절히 수정하세요.
-# 예: DATABASE_URL = f"postgresql://{user}:{pw}@{host}:{port}/{db_name}"
+# 1. 설정 가져오기
 db_conf = config.get("database", {})
-DATABASE_URL = db_conf.get("url")
+
+# URL이 직접 있으면 그걸 쓰고, 없으면 조합
+if "url" in db_conf:
+    DATABASE_URL = db_conf["url"]
+else:
+    user = db_conf.get("user")
+    password = db_conf.get("password")
+    host = db_conf.get("host")
+    port = db_conf.get("port")
+    db_name = db_conf.get("database")
+    
+    # f-string으로 URL 조합
+    DATABASE_URL = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
 
 # 2. 엔진 생성 (SQLite 전용 옵션 제거)
 engine = create_engine(
@@ -46,9 +56,7 @@ def init_db():
                 print("초기 데이터를 적재합니다...")
                 seed_sql = base_sql_path.read_text(encoding="utf-8")
                 
-                # 주의: base.sql 파일 내의 문법이 Postgres와 호환되어야 함
-                # [수정] SQLAlchemy의 text()는 콜론(:)을 변수로 인식하므로,
-                # raw_connection을 사용하여 직접 실행합니다.
+                # raw_connection을 사용하여 직접 실행
                 raw_conn = engine.raw_connection()
                 try:
                     cursor = raw_conn.cursor()

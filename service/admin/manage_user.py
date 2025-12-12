@@ -60,6 +60,7 @@ class UserQuery:
             stmt = stmt.where(or_(User.username.ilike(like), User.name.ilike(like)))
         if self.active_only:
             stmt = stmt.where(User.expires_at.is_(None))
+        
         key = self.sort.lstrip("+-")
         desc = self.sort.startswith("-")
         sort_col = {
