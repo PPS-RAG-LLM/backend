@@ -50,7 +50,7 @@ class UserQuery:
         self.page_size = max(1, min(200, page_size))
         self.sort = sort
 
-    def apply(self, stmt):
+    def apply(self, stmt, with_sort: bool = True):
         if self.department:
             stmt = stmt.where(User.department == self.department)
         if self.position:
@@ -61,19 +61,20 @@ class UserQuery:
         if self.active_only:
             stmt = stmt.where(User.expires_at.is_(None))
         
-        key = self.sort.lstrip("+-")
-        desc = self.sort.startswith("-")
-        sort_col = {
-            "created_at": User.created_at,
-            "name": User.name,
-            "username": User.username,
-            "department": User.department,
-            "position": User.position,
-            "security_level": User.security_level,
-            "expires_at": User.expires_at,
-            "id": User.id,
-        }.get(key, User.created_at)
-        stmt = stmt.order_by(sort_col.desc() if desc else sort_col.asc())
+        if with_sort:
+            key = self.sort.lstrip("+-")
+            desc = self.sort.startswith("-")
+            sort_col = {
+                "created_at": User.created_at,
+                "name": User.name,
+                "username": User.username,
+                "department": User.department,
+                "position": User.position,
+                "security_level": User.security_level,
+                "expires_at": User.expires_at,
+                "id": User.id,
+            }.get(key, User.created_at)
+            stmt = stmt.order_by(sort_col.desc() if desc else sort_col.asc())
         return stmt
 
     def paginate(self, stmt):
@@ -83,9 +84,9 @@ class UserQuery:
 def list_users(qry: UserQuery) -> Tuple[List[User], int]:
     with get_session() as s:
         base = select(User)
-        base = qry.apply(base)
+        base = qry.apply(base, with_sort=True)
         count_stmt = select(func.count()).select_from(User)
-        count_stmt = qry.apply(count_stmt)
+        count_stmt = qry.apply(count_stmt, with_sort=False)
         total = s.execute(count_stmt).scalar_one()
         rows = s.execute(qry.paginate(base)).scalars().all()
         return rows, total
