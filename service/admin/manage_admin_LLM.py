@@ -80,15 +80,58 @@ _DEFAULT_TOPK: int = 5
 # Backend root (상대 경로 기준 루트)
 BASE_BACKEND = Path(__file__).resolve().parents[2]   # .../backend
 
-# 레거시 위치(호환용): ./storage/models/llm
-_RETRIEVAL_CFG = app_config.get("models_dir", {}) or {}
-LLM_MODEL_DIR = (BASE_BACKEND / Path(_RETRIEVAL_CFG.get("llm_models_path"))).resolve()
+# LLM 모델 루트 경로 (config.yaml에서 가져오기) - manage_test_LLM.py와 동일 패턴
+LLM_MODELS_ROOT = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
+LLM_MODELS_PATH = Path(LLM_MODELS_ROOT)
+# 호환성을 위한 별칭 (기존 코드에서 LLM_MODEL_DIR 사용하는 부분들)
+LLM_MODEL_DIR = (BASE_BACKEND / LLM_MODELS_PATH).resolve()
 
 LLM_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 ACTIVE_MODEL_CACHE_KEY_PREFIX = "active_model:"  # e.g. active_model:qna
 
 RAG_TOPK_CACHE_KEY = "rag_topk"
+
+def _get_unified_model_path(model_name: str) -> Optional[str]:
+    """
+    통합 모델 경로 함수 (manage_test_LLM.py와 동일한 패턴)
+    1. config.yaml 기반 경로 우선
+    2. config.json 존재 여부로 검증 
+    3. 기존 DB/FS 해결 함수 폴백
+    """
+    admin_logger = logging.getLogger(__name__)
+    
+    # 1차: config.yaml 기반 경로
+    config_based_path = LLM_MODELS_PATH / model_name
+    if (config_based_path / "config.json").exists():
+        admin_logger.debug(f"Using config-based path for {model_name}: {config_based_path}")
+        return str(config_based_path)
+    
+    # 2차: 기존 해결 함수 체인 폴백
+    try:
+        # 기존 _resolve_model_path_for_name 사용
+        resolved_path = _resolve_model_path_for_name(model_name)
+        if resolved_path and Path(resolved_path, "config.json").exists():
+            admin_logger.debug(f"Using resolved path for {model_name}: {resolved_path}")
+            return resolved_path
+            
+        # 3차: DB 직접 조회
+        db_path = _db_get_model_path(model_name)
+        if db_path and Path(db_path, "config.json").exists():
+            admin_logger.warning(f"Using DB path for {model_name}: {db_path}")
+            return db_path
+            
+        # 최종: FS 폴백
+        fs_path = _resolve_model_fs_path(model_name)
+        if fs_path and Path(fs_path, "config.json").exists():
+            admin_logger.warning(f"Using FS path for {model_name}: {fs_path}")
+            return fs_path
+            
+    except Exception as e:
+        admin_logger.exception(f"Path resolution failed for {model_name}: {e}")
+    
+    admin_logger.error(f"Model not found anywhere: {model_name}")
+    return None
 
 
 # ===== Pydantic models (변수명/스키마 고정) =====

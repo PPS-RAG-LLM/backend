@@ -39,10 +39,37 @@ TASK_TYPES = tuple(_RETRIEVAL_CFG.get("task_types") or ("doc_gen", "summary", "q
 LLM_TEST_DIR = Path(app_config.get("test_llm_raw_data_dir", "storage/raw_files/test_llm"))
 LLM_TEST_DIR.mkdir(parents=True, exist_ok=True)
 
+# LLM 모델 루트 경로 (config.yaml에서 가져오기)
+LLM_MODELS_ROOT = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
+LLM_MODELS_PATH = Path(LLM_MODELS_ROOT)
+
 LLM_TEST_DOC_TYPE = DocumentType.LLM_TEST.value
 
 def _session_doc_id(sid: str, base: str) -> str:
     return f"{sid}:{base}"
+
+def _get_model_path(model_name: str) -> Optional[str]:
+    """
+    모델 경로를 가져오는 통합 함수
+    1. config.yaml 기반 경로 우선
+    2. config.json 존재 여부로 검증
+    3. DB 폴백 지원
+    """
+    # 1차: config.yaml 기반 경로
+    config_based_path = LLM_MODELS_PATH / model_name
+    if (config_based_path / "config.json").exists():
+        logger.debug(f"Using config-based path for {model_name}: {config_based_path}")
+        return str(config_based_path)
+    
+    # 2차: DB 폴백
+    db_path = _admin_db_get_model_path(model_name)
+    if db_path and Path(db_path, "config.json").exists():
+        logger.warning(f"Using DB fallback path for {model_name}: {db_path}")
+        return db_path
+    
+    # 실패
+    logger.error(f"Model not found: {model_name} (tried: {config_based_path}, DB: {db_path})")
+    return None
 
 
 def _max_sec_level(sec_map: Dict[str, int]) -> int:
@@ -125,22 +152,11 @@ def _infer_answer_with_gemma3(prompt_text: str, model_name: str, max_tokens: int
             from utils.llms.huggingface.gemma3_27b import stream_chat
             from utils import free_torch_memory
             
-            # config.yaml의 models_dir.llm_models_path 사용
-            llm_models_path = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
-            model_dir = Path(llm_models_path) / model_name
+            # 통합 모델 경로 가져오기
+            model_dir = _get_model_path(model_name)
+            if not model_dir:
+                return f"⚠️ 모델을 찾을 수 없습니다: {model_name}"
             
-            # config.json 존재 여부로 유효성 검증
-            if not (model_dir / "config.json").exists():
-                logger.error(f"Model config not found: {model_dir}/config.json")
-                # DB 경로도 시도해보기 (폴백)
-                fallback_dir = _admin_db_get_model_path(model_name)
-                if fallback_dir and Path(fallback_dir, "config.json").exists():
-                    logger.warning(f"Using DB fallback path: {fallback_dir}")
-                    model_dir = Path(fallback_dir)
-                else:
-                    return f"⚠️ 모델을 찾을 수 없습니다: {model_name} (경로: {model_dir})"
-            
-            model_dir = str(model_dir)
             logger.info(f"Using Gemma3 model from: {model_dir}")
             
             messages = [
@@ -198,18 +214,8 @@ def _infer_answer_with_gemma3(prompt_text: str, model_name: str, max_tokens: int
 def _infer_answer_fallback(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
     """기존 추론 로직 (폴백용)"""
     try:
-        # config.yaml의 models_dir.llm_models_path 사용 (폴백에서도 동일하게)
-        llm_models_path = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
-        model_dir = str(Path(llm_models_path) / model_name)
-        
-        # config.json 존재 여부 확인
-        if not Path(model_dir, "config.json").exists():
-            # DB 폴백 시도
-            fallback_dir = _admin_db_get_model_path(model_name)
-            if fallback_dir and Path(fallback_dir, "config.json").exists():
-                model_dir = fallback_dir
-            else:
-                model_dir = None
+        # 통합 모델 경로 가져오기
+        model_dir = _get_model_path(model_name)
         
         backend = _select_stream_backend(model_name)
         if backend and model_dir:
