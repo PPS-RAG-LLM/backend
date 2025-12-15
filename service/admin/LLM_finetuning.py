@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import logger
 from errors.exceptions import BadRequestError, InternalServerError
+from config import config as app_config
 
 # --- Repository Imports ---
 from repository.llm_finetuning import update_job_status, finish_job_success, fail_job
@@ -75,7 +76,11 @@ MAX_OOM_RETRIES = int(os.getenv("FT_MAX_OOM_RETRIES", "1"))
 
 # ===== Paths =====
 BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))  # backend/
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / "storage" / "models" / "llm"))
+
+# Config.yaml 기반 경로 사용 (manage_admin_LLM.py, manage_test_LLM.py와 통일)
+LLM_MODELS_ROOT = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm") 
+STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / LLM_MODELS_ROOT))
+
 TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
 
 # ===== SQLAlchemy ORM (Session) =====

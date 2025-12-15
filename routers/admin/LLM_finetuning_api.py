@@ -77,7 +77,7 @@ def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
 )
 async def launch_fine_tuning(
     # 텍스트(옵션) 파라미터들 — 값이 오면 사용, 없으면 기본값
-    category: str | None = Form(None, description="qna | doc_gen | summary"),
+    category: str | None = Form(None, description="qa | doc_gen | summary"),
     baseModelName: str | None = Form(None, description="베이스 모델 이름(예: gpt-oss)"),
     saveModelName: str | None = Form(None, description="저장될 모델 표시 이름(미지정 시 자동 생성)"),
     systemPrompt: str | None = Form(None, description="시스템 프롬프트"),
