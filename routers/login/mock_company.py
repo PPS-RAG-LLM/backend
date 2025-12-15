@@ -57,3 +57,54 @@ def company_login(username: str = Form(...), password: str = Form(...)):
         "message": "login success",
         "sso_token": sso_token,
     }
+
+"""
+실제 SSO 로그인 도입시 구현방법
+
+## 1단계: 사전 협의 및 설정 (개발 전)
+- 가장 먼저 양쪽 개발 담당자가 만나서 다음 정보들을 교환
+
+### 1. 키 생성 (파트너사 수행):
+- 파트너사가 스스로 개인키(Private Key)와 공개키(Public Key) 쌍을 생성합니다.
+- 파트너사는 개인키를 절대 외부로 유출하지 않고 자기 서버에 깊숙이 숨깁니다.
+
+### 2. 공개키 전달 (파트너사 → 우리):
+- 파트너사가 우리에게 공개키(Public Key)를 전달합니다.
+- [권장 방식 - JWKS]: 파일을 직접 주는 대신, https://partner.com/.well-known/jwks.json 같은 URL을 알려줍니다. (키가 바뀌어도 URL은 그대로라 관리가 편함)
+- [단순 방식]: public_key.pem 파일을 메일이나 보안 채널로 전달합니다.
+
+### 3. 리다이렉트 URL 등록 (우리 → 파트너사):
+- 로그인 성공 후 파트너사가 사용자를 보내줄 우리 서비스 주소를 알려줍니다.
+- 예: https://api.ruah.com/v1/sso/callbackd = jwt.decode(token, public_key, algorithms=["RS256"])
+
+
+## 2단계: 로그인 요청 및 토큰 발급 (파트너사 개발)
+사용자가 파트너사 포털에서 "NIQ 접속하기" 버튼을 눌렀을 때의 로직
+
+### 1. 토큰 생성 (Payload 작성):
+- 누가 접속하는지 정보(username, email, role 등)를 담습니다.
+- 중요: aud (Audience) 필드에 "이 토큰은 Ruah 전용입니다"라는 표식을 넣습니다.
+### 2. 서명 (Signing):
+- 파트너사가 가진 개인키(Private Key)로 RS256 서명을 합니다.
+### 3. 전송 (Redirect):
+- 만들어진 JWT 토큰을 들고 사용자를 우리 서비스(https://api.ruah.com/v1/sso/callback)로 리다이렉트 시킵니다.
+
+## 3단계: 토큰 검증 및 로그인 처리 (우리 서비스 개발)
+이제 사용자가 토큰을 들고 우리 서버에 도착 이후, `service/users/session.py` 같은 곳에서 할 일.
+
+### 1. 공개키 준비:
+- 미리 받아둔 public_key.pem 파일을 로드하거나, JWKS URL에서 실시간으로 키를 조회합니다.
+
+### 2. 서명 검증 (Verify):
+- 가져온 공개키로 JWT 서명을 풉니다.
+>>> jwt.decode(token, public_key, algorithms=["RS256"])
+- 이 과정이 통과되면 "아, 이건 파트너사가 발급한 게 확실하구나"라고 믿을 수 있습니다.
+
+### 3. 추가 보안 검증 (필수):
+- 만료 시간(exp): 토큰이 너무 오래되지 않았는지 확인.
+- 발행자(iss): 파트너사가 발급한 게 맞는지 확인.
+- 수신자(aud): 다른 서비스용 토큰을 훔쳐서 우리한테 온 건 아닌지 확인.
+
+### 4. 세션 생성:
+- 검증이 끝났으니 우리 DB에 세션을 만들고 로그인 완료 처리
+"""
