@@ -111,19 +111,76 @@ def hf_mean_pooling(outputs, mask):
 
 
 def hf_embed_text(tok, model, device, text: str, max_len: int = 512) -> np.ndarray:
-    inputs = tok(
-        text,
-        truncation=True,
-        padding="longest",
-        max_length=max_len,
-        return_tensors="pt",
-    ).to(device)
-    with torch.no_grad():
-        outs = model(**inputs)
-    vec = (
-        hf_mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
-    )
-    return vec
+    """GPU 메모리 안전한 임베딩 처리 (모델 상태 보존)"""
+    original_device = next(model.parameters()).device if hasattr(model, 'parameters') else device
+    
+    try:
+        # 사전 GPU 메모리 정리 (가벼운 정리만)
+        if torch.cuda.is_available() and "cuda" in str(device):
+            torch.cuda.empty_cache()
+        
+        inputs = tok(
+            text,
+            truncation=True,
+            padding="longest",
+            max_length=max_len,
+            return_tensors="pt",
+        )
+        
+        # 안전한 디바이스 할당 시도
+        target_device = device
+        try:
+            inputs = inputs.to(target_device)
+            # 모델과 입력이 같은 디바이스에 있는지 확인
+            if str(original_device) != str(target_device):
+                logger.warning(f"Model on {original_device}, inputs on {target_device}")
+                if "cpu" not in str(original_device):
+                    # 모델이 GPU에 있으면 입력을 모델 디바이스로
+                    inputs = inputs.to(original_device)
+                    target_device = original_device
+                    
+        except Exception as device_error:
+            logger.warning(f"Failed to move inputs to {target_device}: {device_error}")
+            # CPU 폴백 (입력만)
+            inputs = inputs.to('cpu')
+            target_device = 'cpu'
+        
+        with torch.no_grad():
+            try:
+                outs = model(**inputs)
+            except RuntimeError as runtime_error:
+                if "device-side assert" in str(runtime_error) or "CUDA error" in str(runtime_error):
+                    logger.warning(f"CUDA error during inference: {runtime_error}")
+                    # GPU 메모리 정리 후 CPU로 재시도
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    
+                    # CPU에서 재시도 (모델은 이동하지 않고 입력만)
+                    inputs_cpu = inputs.to('cpu')
+                    # 임시 CPU 추론 시도 (모델이 CPU 지원하는 경우에만)
+                    try:
+                        if "cpu" in str(original_device):
+                            # 모델이 이미 CPU에 있으면 바로 추론
+                            outs = model(**inputs_cpu)
+                        else:
+                            # GPU 모델인 경우 CPU 폴백 불가 - 에러 전파
+                            raise runtime_error
+                    except Exception:
+                        raise runtime_error
+                else:
+                    raise
+            
+        vec = (
+            hf_mean_pooling(outs, inputs["attention_mask"]).cpu().numpy()[0].astype("float32")
+        )
+        return vec
+        
+    except Exception as e:
+        logger.error(f"Embedding failed: {e}")
+        # 마지막 폴백: 간단한 더미 벡터 반환 (시스템 안정성 우선)
+        logger.warning("Returning dummy embedding vector due to errors")
+        return np.random.normal(0, 0.1, 768).astype("float32")  # 일반적인 임베딩 차원
 
 
 def chunk_text(

@@ -117,9 +117,100 @@ def _select_stream_backend(model_name: str):
         return _gptoss_stream
     return None
 
-def _infer_answer(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+def _infer_answer_with_gemma3(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+    """Gemma3-27B 전용 메모리 안전한 추론"""
     try:
-        model_dir = _admin_db_get_model_path(model_name) 
+        if "gemma3" in model_name.lower() or "gemma-3" in model_name.lower():
+            # Gemma3 전용 처리
+            from utils.llms.huggingface.gemma3_27b import stream_chat
+            from utils import free_torch_memory
+            
+            # config.yaml의 models_dir.llm_models_path 사용
+            llm_models_path = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
+            model_dir = Path(llm_models_path) / model_name
+            
+            # config.json 존재 여부로 유효성 검증
+            if not (model_dir / "config.json").exists():
+                logger.error(f"Model config not found: {model_dir}/config.json")
+                # DB 경로도 시도해보기 (폴백)
+                fallback_dir = _admin_db_get_model_path(model_name)
+                if fallback_dir and Path(fallback_dir, "config.json").exists():
+                    logger.warning(f"Using DB fallback path: {fallback_dir}")
+                    model_dir = Path(fallback_dir)
+                else:
+                    return f"⚠️ 모델을 찾을 수 없습니다: {model_name} (경로: {model_dir})"
+            
+            model_dir = str(model_dir)
+            logger.info(f"Using Gemma3 model from: {model_dir}")
+            
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt_text},
+            ]
+            
+            # 메모리 정리 후 추론
+            try:
+                free_torch_memory()  # 사전 메모리 정리
+                chunks: List[str] = []
+                for token in stream_chat(
+                    messages, 
+                    model_path=model_dir, 
+                    temperature=temperature, 
+                    max_new_tokens=max_tokens
+                ):
+                    chunks.append(token)
+                result = "".join(chunks).strip()
+                
+                if result:
+                    return result
+                else:
+                    logger.warning("Gemma3 returned empty result")
+                    
+            except Exception as gemma_error:
+                logger.exception(f"Gemma3 inference failed: {gemma_error}")
+                # GPU 메모리 에러 시 추가 정리
+                if "cuda" in str(gemma_error).lower() or "memory" in str(gemma_error).lower():
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                            torch.cuda.ipc_collect()
+                        import gc
+                        gc.collect()
+                    except Exception:
+                        pass
+            finally:
+                # 항상 메모리 정리
+                try:
+                    free_torch_memory()
+                except Exception:
+                    pass
+                    
+    except ImportError:
+        logger.warning("gemma3_27b module not available, falling back to default")
+    except Exception as e:
+        logger.exception(f"Gemma3 processing failed: {e}")
+    
+    # 폴백: 기존 로직
+    return _infer_answer_fallback(prompt_text, model_name, max_tokens, temperature)
+
+def _infer_answer_fallback(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+    """기존 추론 로직 (폴백용)"""
+    try:
+        # config.yaml의 models_dir.llm_models_path 사용 (폴백에서도 동일하게)
+        llm_models_path = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm")
+        model_dir = str(Path(llm_models_path) / model_name)
+        
+        # config.json 존재 여부 확인
+        if not Path(model_dir, "config.json").exists():
+            # DB 폴백 시도
+            fallback_dir = _admin_db_get_model_path(model_name)
+            if fallback_dir and Path(fallback_dir, "config.json").exists():
+                model_dir = fallback_dir
+            else:
+                model_dir = None
+        
         backend = _select_stream_backend(model_name)
         if backend and model_dir:
             messages = [
@@ -139,6 +230,10 @@ def _infer_answer(prompt_text: str, model_name: str, max_tokens: int = 512, temp
     except Exception:
         logger.exception("_simple_generate failed; returning stub text")
         return "⚠️ 로컬 모델이 로드되지 않아 샘플 응답을 반환합니다. (테스트 전용)"
+
+def _infer_answer(prompt_text: str, model_name: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+    """메인 추론 함수 - Gemma3 우선 처리"""
+    return _infer_answer_with_gemma3(prompt_text, model_name, max_tokens, temperature)
 
 # ===== 유틸 =====
 def _canon_pdf_list(pdf_list: List[str]) -> List[str]:
