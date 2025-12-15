@@ -4,6 +4,8 @@ from __future__ import annotations
 # Unsloth는 필요시에만 MXFP4 분기에서 import (Gemma 패치 충돌 방지)
 
 import os
+import re
+from urllib.parse import quote_plus
 # 🔧 CUDA 메모리 단편화 완화 (권장)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512,expandable_segments:True,roundup_power2_divisions:16")
 
@@ -17,11 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from pathlib import Path
-from contextlib import contextmanager
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from utils import logger
-from errors.exceptions import BadRequestError, InternalServerError
+from errors.exceptions import BadRequestError, InternalServerError, NotFoundError
 from config import config as app_config
 
 # --- Repository Imports ---
@@ -45,43 +46,27 @@ def _get_model_device(model):
     return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
 
 
-# ===== 캐시/임시 디렉토리 관리 =====
-@contextmanager
-def _ephemeral_cache_env():
-    """훈련 중에만 임시 캐시 디렉토리를 사용하고 끝나면 삭제"""
-    keys = [
-        "HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE",
-        "XDG_CACHE_HOME", "UNSLOTH_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR",
-    ]
-    tmpdir = tempfile.mkdtemp(prefix="ft_cache_")
-    old = {k: os.environ.get(k) for k in keys}
-    try:
-        for k in keys:
-            os.environ[k] = tmpdir
-        yield
-    finally:
-        for k, v in old.items():
-            if v is None: 
-                os.environ.pop(k, None)
-            else: 
-                os.environ[k] = v
-        shutil.rmtree(tmpdir, ignore_errors=True)
+# ===== Config.yaml 기반 설정 로드 =====
+ft_conf = app_config.get("fine_tuning")
+if not ft_conf:
+    raise ValueError("config.yaml: 'fine_tuning' section is required")
 
-# ===== Progress interval (seconds) =====
-FT_PROGRESS_INTERVAL_SEC = int(os.getenv("FT_PROGRESS_INTERVAL_SEC", "2"))
-# ===== Heartbeat timeout (seconds) for liveness detection =====
-FT_HEARTBEAT_TIMEOUT_SEC = int(os.getenv("FT_HEARTBEAT_TIMEOUT_SEC", "300"))
-# ===== OOM retry limit =====
-MAX_OOM_RETRIES = int(os.getenv("FT_MAX_OOM_RETRIES", "1"))
+FT_PROGRESS_INTERVAL_SEC = ft_conf.get("progress_interval_sec", 2)
+FT_HEARTBEAT_TIMEOUT_SEC = ft_conf.get("heartbeat_timeout_sec", 300)
+MAX_OOM_RETRIES = ft_conf.get("max_oom_retries", 1)
 
 # ===== Paths =====
-BASE_BACKEND = Path(os.getenv("COREIQ_BACKEND_ROOT", str(Path(__file__).resolve().parents[2])))  # backend/
+# BASE_BACKEND 계산: 이 파일의 상위 3단계(service/admin/ -> service/ -> backend/)
+BASE_BACKEND = Path(__file__).resolve().parents[2]
 
-# Config.yaml 기반 경로 사용 (manage_admin_LLM.py, manage_test_LLM.py와 통일)
-LLM_MODELS_ROOT = app_config.get("models_dir", {}).get("llm_models_path", "storage/models/llm") 
-STORAGE_MODEL_ROOT = os.getenv("STORAGE_MODEL_ROOT", str(BASE_BACKEND / LLM_MODELS_ROOT))
+# 모델 경로 (필수)
+LLM_MODELS_ROOT = app_config.get("models_dir", {}).get("llm_models_path")
+STORAGE_MODEL_ROOT = str(BASE_BACKEND / LLM_MODELS_ROOT)
 
-TRAIN_DATA_ROOT   = os.getenv("TRAIN_DATA_ROOT", str(BASE_BACKEND / "storage" / "train_data"))
+# 학습 데이터 경로 (필수)
+_TRAIN_DATA_REL = ft_conf.get("train_data_dir")
+TRAIN_DATA_ROOT = str(BASE_BACKEND / _TRAIN_DATA_REL)
+
 
 # ===== SQLAlchemy ORM (Session) =====
 from sqlalchemy import create_engine, select, func
@@ -775,7 +760,12 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     return k
             return None
 
-        optim_name = os.getenv("FT_OPTIM", ("adamw_torch" if tuning_type in ("FULL","LORA") else "paged_adamw_8bit"))
+        # config.yaml의 fine_tuning 섹션에서 optimizer 설정을 가져오거나 기본값 사용
+        ft_optim = ft_conf.get("optimizer")
+        if ft_optim:
+            optim_name = ft_optim
+        else:
+            optim_name = "adamw_torch" if tuning_type in ("FULL", "LORA") else "paged_adamw_8bit"
         save_strategy_val = "epoch" if use_eval else "no"
         eval_strategy_val = "epoch" if use_eval else "no"
 
@@ -812,7 +802,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         class ProgressCallback(TrainerCallback):
             def __init__(self, job_id: str, every_steps: int | None = None):
                 self.job_id = job_id
-                self.every_steps = every_steps if every_steps else max(1, int(os.getenv("FT_PROGRESS_EVERY_STEPS", "1")))
+                self.every_steps = every_steps if every_steps else max(1, int(ft_conf.get("progress_every_steps", 1)))
                 self.total_steps = None
             def on_train_begin(self, args, state, control, **kw):
                 _update_job_status(None, self.job_id, "running", progress=0)
@@ -941,7 +931,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 _save_stage("tokenizer", 90)
                 _append_log(log_path, f"[{_now_utc().isoformat()}] fallback save (trainer.save_model): {e}")
             # MXFP4 병합 저장은 선택(기본 비활성)
-            if is_mxfp4 and os.getenv("FT_UNSLOTH_MERGE_SAVE","0") == "1":
+            if is_mxfp4 and ft_conf.get("unsloth_merge_save", False):
                 try:
                     model.save_pretrained_merged(output_dir, tokenizer, save_method="mxfp4")
                     _append_log(log_path, f"[{_now_utc().isoformat()}] merged MXFP4 saved → {output_dir}")
@@ -1178,19 +1168,7 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
             "error": metrics.get("error"),
         }
 
-# ===== Admin util: wipe fine-tune related tables =====
-def reset_fine_tune_tables():
-    """Dangerous: delete all fine-tune jobs and model records (use for dev reset)"""
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM fine_tuned_models")
-        cur.execute("DELETE FROM fine_tune_jobs")
-        cur.execute("DELETE FROM fine_tune_datasets")
-        cur.execute("DELETE FROM llm_models")
-        conn.commit()
-    finally:
-        conn.close()
+_FEEDBACK_FILE_RE = re.compile(r"^feedback_(qna|doc_gen|summary)_p(\d+)\.csv$", re.IGNORECASE)
 
 def list_feedback_datasets() -> dict:
     """

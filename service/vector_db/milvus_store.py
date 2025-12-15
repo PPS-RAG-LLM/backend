@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 _RETRIEVAL_CFG = app_config.get("retrieval", {}) or {}
 _MILVUS_CFG = _RETRIEVAL_CFG.get("milvus", {}) or {}
 
-MILVUS_URI = os.getenv("MILVUS_URI", _MILVUS_CFG.get("uri", "http://localhost:19530"))
-MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", _MILVUS_CFG.get("token") or None)
+MILVUS_URI = _MILVUS_CFG.get("uri")
+MILVUS_TOKEN = _MILVUS_CFG.get("token") or None
 _COLLECTIONS = _MILVUS_CFG.get("collections", {})
 
 def resolve_collection(doc_type: str) -> str:

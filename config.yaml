@@ -63,6 +63,17 @@ test_llm_raw_data_dir: storage/documents/raw_files/test_llm
 # 문서생성 / 텍스트 요약 전체 텍스트 저장 경로
 full_text_dir : storage/documents/full_text 
 
+# 파인튜닝 관련 설정
+fine_tuning:
+  train_data_dir: storage/train_data
+  progress_interval_sec: 2
+  heartbeat_timeout_sec: 300
+  max_oom_retries: 1
+  disable_bnb: false  # (선택) BitsAndBytes 양자화 비활성화 여부
+  optimizer: "paged_adamw_8bit"  # (선택) 옵티마이저 설정
+  unsloth_merge_save: false  # (선택) MXFP4 모델 병합 저장 활성화 여부
+  progress_every_steps: 1  # (선택) 몇 스텝마다 진행률 업데이트할지 설정
+
 retrieval:
   temp_ttl_hours: 12
   paths:
@@ -80,3 +91,8 @@ retrieval:
     - doc_gen
     - summary
     - qna
+
+# 로깅 설정
+logging:
+  level: DEBUG        # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  no_color: false     # true: ANSI 색상 비활성화

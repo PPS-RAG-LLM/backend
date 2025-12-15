@@ -591,7 +591,9 @@ class _ModelManager:
                 # Optional quantization (disable via env LLM_DISABLE_BNB=1)
                 bnb_config = None
                 try:
-                    if os.getenv("LLM_DISABLE_BNB", "0") not in ("1", "true", "TRUE", "True"):
+                    # config.yaml의 fine_tuning.disable_bnb 설정 확인 (기본값: False -> BNB 활성화)
+                    disable_bnb = app_config.get("fine_tuning", {}).get("disable_bnb", False)
+                    if not disable_bnb:
                         from transformers import BitsAndBytesConfig  # type: ignore
                         bnb_config = BitsAndBytesConfig(
                             load_in_4bit=True,

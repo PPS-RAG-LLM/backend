@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse, FileResponse
 import asyncio
@@ -13,13 +13,12 @@ from service.admin.LLM_finetuning import (
     start_fine_tuning,
     get_fine_tuning_status,
     TRAIN_DATA_ROOT,
-    BadRequestError,
     list_feedback_datasets,
     resolve_feedback_download,
-
 )
+from errors import COMMON_ERRORS, InternalServerError
 
-router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"], responses={200: {"description": "Success"}})
+router = APIRouter(prefix="/v1/admin/llm", tags=["Admin LLM - FineTuning"])
 
 
 # ---- Response Schemas (for enriched docs) ----
@@ -71,8 +70,8 @@ def _save_upload_csv(file: UploadFile, subdir: str | None = None) -> str:
     response_model=FineTuneLaunchResponse,
     responses={
         200: {"description": "작업이 생성되었고 즉시 실행 여부가 반환됩니다."},
-        400: {"description": "요청 파라미터 오류 또는 중복 실행 락"},
-        500: {"description": "서버 내부 오류"},
+        400: COMMON_ERRORS[400],
+        500: COMMON_ERRORS[500],
     },
 )
 async def launch_fine_tuning(
@@ -149,7 +148,8 @@ async def launch_fine_tuning(
     response_model=FineTuneStatusResponse,
     responses={
         200: {"description": "현재 진행 상태 및 진행률을 반환합니다."},
-        404: {"description": "해당 작업이 존재하지 않습니다."},
+        404: COMMON_ERRORS[404],
+        500: COMMON_ERRORS[500],
     },
 )
 async def read_fine_tuning_status(jobId: str = Query(..., description="조회할 작업 ID")):
@@ -160,8 +160,9 @@ async def read_fine_tuning_status(jobId: str = Query(..., description="조회할
     summary="피드백 CSV 목록/다운로드 (단일 API)",
     responses={
         200: {"description": "목록(JSON) 또는 파일 다운로드(csv)"},
-        400: {"description": "요청 오류"},
-        404: {"description": "파일 없음"},
+        400: COMMON_ERRORS[400],
+        404: COMMON_ERRORS[404],
+        500: COMMON_ERRORS[500],
     },
 )
 async def feedback_datasets(file: str | None = Query(
@@ -170,16 +171,13 @@ async def feedback_datasets(file: str | None = Query(
 )):
     # 다운로드 분기
     if file:
-        try:
-            abs_path, filename = resolve_feedback_download(file)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
-        except BadRequestError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # 서비스 함수가 NotFoundError/BadRequestError를 발생시킴 -> 중앙 핸들러가 처리
+        abs_path, filename = resolve_feedback_download(file)
         return FileResponse(abs_path, media_type="text/csv", filename=filename)
 
     # 목록 반환
     try:
         return list_feedback_datasets()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"목록 조회 중 오류: {e}")
+        # 예상치 못한 에러는 500으로
+        raise InternalServerError(f"목록 조회 중 오류: {e}")

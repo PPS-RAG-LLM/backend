@@ -4,12 +4,9 @@ import sys
 from typing import Optional
 from datetime import datetime
 
-from zoneinfo import ZoneInfo 
-# try:
-#     from zoneinfo import ZoneInfo 
-# except Exception:  # pragma: no cover
-#     ZoneInfo = None  # type: ignore
+from zoneinfo import ZoneInfo
 
+from config import config as app_config 
 
 # ANSI color codes
 RESET = "\033[0m"
@@ -41,8 +38,8 @@ class ColorFormatter(logging.Formatter):
         self.use_kst = use_kst and (ZoneInfo is not None)
 
     def _supports_color(self) -> bool:
-        no_color_env = os.getenv("LOG_NO_COLOR", "").lower() in {"1", "true", "yes"}
-        return sys.stderr.isatty() and not no_color_env
+        no_color = app_config.get("logging", {}).get("no_color", False)
+        return sys.stderr.isatty() and not no_color
 
     def format(self, record: logging.LogRecord) -> str:
         level_color = COLORS.get(record.levelno, "") if self.use_colors else ""
@@ -76,8 +73,8 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
     """
     logger = logging.getLogger(name)
     if level is None:
-        level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
-        level = getattr(logging, level_name, logging.DEBUG)
+        level_name = app_config.get("logging", {}).get("level", "DEBUG").upper()
+        level = getattr(logging, level_name, logging.DEBUG) # 설정값이 잘못되었을 때만 DEBUG
     logger.setLevel(level)
     logger.propagate = False
     # 여러 번 호출될 때 중복 핸들러를 방지
