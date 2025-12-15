@@ -1,7 +1,7 @@
 server:
   host: 127.0.0.1
   port: 3005
-  sso_secret_key: "NIQ-SECURE-SECRET-KEY-FOR-SSO-HANDSHAKE" 
+  sso_secret_key: ${SSO_SECRET_KEY}
 
   # CORS middleware 설정
   cors_origins:

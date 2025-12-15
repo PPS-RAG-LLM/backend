@@ -56,5 +56,4 @@ def company_login(username: str = Form(...), password: str = Form(...)):
     return {
         "message": "login success",
         "sso_token": sso_token,
-        "redirect_url": config.get("server").get("redirect_url") # 필요하다면 프론트에 알려줌
     }
