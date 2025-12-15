@@ -1,11 +1,15 @@
 from typing import Optional, Dict, Any
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import json
+from utils import logger
 
 from utils.database import get_session
 from storage.db_models import FineTuneJob, FineTunedModel, LlmModel
+
+log = logger(__name__)
 
 def update_job_status(
     job_id: str, 
@@ -67,44 +71,90 @@ def finish_job_success(
         # 2. 상태 완료 처리
         update_job_status(job_id, "succeeded", progress=100)
 
-        # 3. LlmModel 등록 (Fine-tuned 모델로)
-        # category는 job 요청정보나 파라미터에서 옴
-        new_llm = LlmModel(
-            provider="local",  # 로컬 학습 모델
-            name=save_name,
-            revision=0,
-            model_path=f"./storage/models/llm/{save_name}", # 규칙에 따른 경로
-            category=category,
-            type=tuning_type.lower(), # lora, qlora, full
-            is_active=True,
-            trained_at=datetime.utcnow()
-        )
-        session.add(new_llm)
-        session.flush() # ID 생성
+        # 3. LlmModel 등록/업데이트 (Fine-tuned 모델로) - Upsert 패턴
+        # 기존 모델이 있으면 업데이트, 없으면 새로 생성
+        existing_llm = session.execute(
+            select(LlmModel).where(LlmModel.name == save_name)
+        ).scalars().first()
+        
+        if existing_llm:
+            # 기존 모델 업데이트
+            log.info(f"Updating existing LlmModel: {save_name}")
+            existing_llm.provider = "local"
+            existing_llm.model_path = f"./storage/models/llm/{save_name}"
+            existing_llm.category = category
+            existing_llm.type = tuning_type.lower()
+            existing_llm.is_active = True
+            existing_llm.trained_at = datetime.utcnow()
+            new_llm = existing_llm
+        else:
+            # 새 모델 생성
+            log.info(f"Creating new LlmModel: {save_name}")
+            new_llm = LlmModel(
+                provider="local",  # 로컬 학습 모델
+                name=save_name,
+                revision=0,
+                model_path=f"./storage/models/llm/{save_name}", # 규칙에 따른 경로
+                category=category,
+                type=tuning_type.lower(), # lora, qlora, full
+                is_active=True,
+                trained_at=datetime.utcnow()
+            )
+            session.add(new_llm)
+        
+        session.flush() # ID 생성/확인
 
-        # 4. FineTunedModel 등록
-        # base_model_id 등을 job 정보에서 가져와야 하지만, 
-        # 여기서는 job.dataset_id 등을 통해 역추적하거나, 인자로 받아야 함.
-        # 기존 로직 상 baseModelName을 request에서 썼음.
+        # 4. FineTunedModel 등록/업데이트 - Upsert 패턴
+        # 같은 job_id로 이미 등록된 FineTunedModel이 있는지 확인
+        existing_ft = session.execute(
+            select(FineTunedModel).where(FineTunedModel.job_id == job.id)
+        ).scalars().first()
         
-        # request 정보 파싱
-        req = {}
-        # Job 테이블에 request 컬럼이 없어서(DB모델상), 
-        # 기존 코드는 메모리의 job 객체(Pydantic)를 썼음.
-        # 여기서는 DB Job 레코드만으로는 부족할 수 있으나, 
-        # FineTunedModel 연결을 위해 최소한의 정보를 저장
+        if existing_ft:
+            # 기존 FineTunedModel 업데이트
+            log.info(f"Updating existing FineTunedModel for job: {job_id}")
+            existing_ft.model_id = new_llm.id
+            existing_ft.provider_model_id = save_name
+            existing_ft.lora_weights_path = f"./storage/models/llm/{save_name}" if tuning_type in ("LORA", "QLORA") else None
+            existing_ft.type = tuning_type
+            existing_ft.rouge1_f1 = rouge_score
+            existing_ft.is_active = True
+        else:
+            # 새 FineTunedModel 생성
+            log.info(f"Creating new FineTunedModel for job: {job_id}")
+            ft_model = FineTunedModel(
+                model_id=new_llm.id,
+                job_id=job.id,
+                provider_model_id=save_name,
+                lora_weights_path=f"./storage/models/llm/{save_name}" if tuning_type in ("LORA", "QLORA") else None,
+                type=tuning_type,
+                rouge1_f1=rouge_score,
+                is_active=True
+            )
+            session.add(ft_model)
         
-        ft_model = FineTunedModel(
-            model_id=new_llm.id,
-            job_id=job.id,
-            provider_model_id=save_name,
-            lora_weights_path=f"./storage/models/llm/{save_name}" if tuning_type in ("LORA", "QLORA") else None,
-            type=tuning_type,
-            rouge1_f1=rouge_score,
-            is_active=True
-        )
-        session.add(ft_model)
-        session.commit()
+        try:
+            session.commit()
+            log.info(f"Successfully registered/updated model: {save_name} for job: {job_id}")
+        except IntegrityError as e:
+            session.rollback()
+            log.error(f"Failed to register model {save_name}: {e}")
+            # 재시도: 기존 모델 강제 업데이트
+            try:
+                existing_llm = session.execute(
+                    select(LlmModel).where(LlmModel.name == save_name)
+                ).scalars().first()
+                if existing_llm:
+                    existing_llm.model_path = f"./storage/models/llm/{save_name}"
+                    existing_llm.category = category
+                    existing_llm.type = tuning_type.lower()
+                    existing_llm.is_active = True
+                    existing_llm.trained_at = datetime.utcnow()
+                    session.commit()
+                    log.warning(f"Force-updated existing model: {save_name}")
+            except Exception as e2:
+                log.exception(f"Force update also failed: {e2}")
+                raise
 
 def fail_job(job_id: str, error_msg: str) -> None:
     """작업 실패 처리"""
