@@ -93,7 +93,7 @@ class ExecuteBody(BaseModel):
     rerank_topN: int = Field(5, gt=0, description="리랭크 후 최종 반환 개수")
     securityLevel: int = Field(1, ge=1)
     sourceFilter: Optional[List[str]] = None
-    taskType: Literal["doc_gen", "summary", "qna"]
+    taskType: Literal["summary", "doc_gen", "qna"]
     searchMode: Optional[Literal["hybrid", "semantic", "bm25"]] = None
     
     model_config = {
@@ -109,7 +109,6 @@ class ExecuteBody(BaseModel):
             }
         }
     }
-
 
 class SingleIngestBody(BaseModel):
     pdfPath: str

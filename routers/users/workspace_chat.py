@@ -19,11 +19,13 @@ logger = logger(__name__)
 
 chat_router = APIRouter(tags=["Workspace Chat"], prefix="/v1/workspace")
 
-# 채팅
-class Attachment(BaseModel):
+### QnA
+
+class Attachment(BaseModel): 
+    """사용자가 임시파일을 업로드 할 경우"""
     name: str  # 파일명
     mime: str  # image/png, image/jpeg, application/pdf, etc.
-    contentString: str  # data:image/png;base64,...
+    contentString: str  # data:image/png;base64,... 이미지 BASE64 인코딩 값
     docId: Optional[str] = None # 문서 ID
 
 
@@ -32,10 +34,29 @@ class StreamChatRequest(BaseModel):
     model       : Optional[str] = None # 모델
     message     : str # 메시지
     mode        : Optional[str] = Field(None, pattern="^(chat|query)$")
-    sessionId   : Optional[str] = None # 세션 ID
     attachments : List[Attachment] = Field(default_factory=list) # 첨부 파일
-    reset       : Optional[bool] = False # 리셋
-    rag_flag    : Optional[bool] = True # RAG 플래그
+    sessionId   : Optional[str] = None      # 세션 ID - 현재 사용하지 않음
+    reset       : Optional[bool] = False    # 리셋 - 현재 사용하지 않음
+    rag_flag    : Optional[bool] = True     # RAG 플래그 - 현재 사용하지 않음
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "provider": "huggingface",
+                "model": "Gemma3-27B",
+                "message": "안녕하세요.",
+                "mode": "chat",
+                "attachments":[
+                    {
+                        "name": "example.pdf",
+                        "mime": "application/pdf",
+                        "contentString": "이미지일경우 base64 인코딩값",
+                        "docId": "doc_12345"
+                    }
+                ],
+                "rag_flag": True
+            }
+        }
+    }
 
 @chat_router.post(
     "/{slug}/thread/{thread_slug}/stream-chat", summary="QnA 스트리밍 채팅 실행"
@@ -105,13 +126,25 @@ def to_see(gen):
     f"({len(complete_response)} chars): \n\n{complete_response}\n\n======================\n")
 
 
-# ====== Unified POST APIs ======
+### Summary
+
 class SummaryRequest(BaseModel):
     provider    : Optional[str] = None # 공급자
     model       : Optional[str] = None # 모델
     systemPrompt: Optional[str] = None # 시스템 프롬프트
     originalText: Optional[str] = "오리지널 텍스트" # 원문
     userPrompt  : Optional[str] = "요청사항" # 요청사항
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "provider": "huggingface",
+                "model": "Gemma3-27B",
+                "systemPrompt": "You are a helpful assistant that summarizes text.",
+                "originalText": "긴 텍스트 원문...",
+                "userPrompt": "3줄로 요약해줘"
+            }
+        }
+    }
 
 @chat_router.post("/{slug}/summary/stream", summary="문서 요약 실행 (스트리밍)")
 def summary_stream_endpoint(
@@ -147,6 +180,8 @@ def summary_stream_endpoint(
     return StreamingResponse(to_see(gen), media_type="text/event-stream; charset=utf-8")
 
 
+### Doc Gen
+
 class VariableItem(BaseModel):
     key     : str
     value   : str
@@ -158,6 +193,21 @@ class DocGenRequest(BaseModel):
     systemPrompt: Optional[str] = None
     userPrompt  : Optional[str] = None
     variables   : List[VariableItem] = Field(default_factory=list)
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "provider": "huggingface",
+                "model": "Gemma3-27B",
+                "templateId": 1,
+                "systemPrompt": "You are a helpful assistant that writes documents.",
+                "userPrompt": "공손하게 작성해줘",
+                "variables": [
+                    {"key": "name","value": "홍길동"},
+                    {"key": "subject","value": "초대장"}
+                ],
+            }
+        }
+    }
 
 
 @chat_router.post("/{slug}/doc-gen/stream", summary="문서 생성 실행 (스트리밍)")
@@ -204,6 +254,13 @@ def doc_gen_stream_endpoint(
 
 class UpdateMetricsRequest(BaseModel):
     reasoningDuration: float = Field(..., description="추론 시간 (초)", ge=0)
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "reasoningDuration": 1.25
+            }
+        }
+    }
 
 @chat_router.patch(
     "/{slug}/chat/{chat_id}/metrics",

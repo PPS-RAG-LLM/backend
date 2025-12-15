@@ -21,6 +21,15 @@ class ChatFeedbackRequest(BaseModel):
     chatId: int = Field(..., description="채팅 ID")
     like: bool = Field(..., description="좋아요(true)/싫어요(false)")
     promptId: Optional[int] = Field(None, description="프롬프트 템플릿 ID (선택사항)")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "chatId": 12345,
+                "like": True,
+                "promptId": 1
+            }
+        }
+    }
 
 
 @feedback_router.post(

@@ -1,10 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends,Path,Query,Body
+from fastapi import APIRouter, Depends,Path,Body
 from service.users.chat_history import list_thread_chats_for_workspace
-from service.users.workspace_thread import update_thread_name_for_workspace, create_new_workspace_thread_for_workspace, delete_workspace_thread_for_workspace
+from service.users.workspace_thread import (
+    update_thread_name_for_workspace, 
+    create_new_workspace_thread_for_workspace, 
+    delete_workspace_thread_for_workspace
+)
 from utils import logger
-from errors import BadRequestError
 from utils.auth import get_user_id_from_cookie
 
 logger = logger(__name__)
@@ -23,6 +26,28 @@ class ChatHistoryItem(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     history : List[ChatHistoryItem]
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "history": [
+                    {
+                        "chatId": 101,
+                        "role": "user",
+                        "content": "안녕하세요, 이 문서를 요약해 주세요.",
+                        "sentAt": "2024-01-01T12:00:00Z"
+                    },
+                    {
+                        "chatId": 102,
+                        "role": "assistant",
+                        "content": "네, 알겠습니다. 요약 내용은 다음과 같습니다...",
+                        "sentAt": "2024-01-01T12:00:05Z",
+                        "reasoningDuration": 1.5,
+                        "sources": [{"doc_id": "doc_1", "page": 5}]
+                    }
+                ]
+            }
+        }
+    }
 
 @thread_router.get("/{slug}/thread/{thread_slug}/chats", summary="워크스페이스에서 쓰레드채팅 히스토리 조회")
 def get_workspace_thread_chats(
@@ -42,6 +67,14 @@ def get_workspace_thread_chats(
 ########
 class ThreadUpdateRequest(BaseModel):
     name: str = Field(..., min_length=1, description="새 스레드 이름")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "업데이트할 스레드 명"
+            }
+        }
+    }
+
 
 @thread_router.post("/{slug}/thread/{thread_slug}/update", summary="워크스페이스의 스레드 이름 업데이트")
 def update_workspace_thread_name(
@@ -69,9 +102,29 @@ class ThreadInfo(BaseModel):
 class NewThreadResponse(BaseModel):
     thread: ThreadInfo
     message: Optional[str] = None
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "thread": {
+                    "id": 55,
+                    "name": "새로운 채팅방",
+                    "threadSlug": "new-thread-xyz123",
+                    "workspaceId": 10
+                },
+                "message": "Thread created successfully"
+            }
+        }
+    }
 
 class NewWorkspaceThreadRequest(BaseModel):
     name: str = Field(..., min_length=1, description="새 스레드 이름")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "새로운 채팅방"
+            }
+        }
+    }
 
 @thread_router.post("/{slug}/new-thread", summary="워크스페이스에 새로운 스레드 생성", response_model=NewThreadResponse)
 def create_new_workspace_thread(

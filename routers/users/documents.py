@@ -48,6 +48,14 @@ async def upload_endpoint(
 class TempCleanupBody(BaseModel):
     workspaceSlug: str = None
     docIds: Optional[List[str]]
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "workspaceSlug": "my-workspace-slug",
+                "docIds": ["doc_12345", "doc_67890"]
+            }
+        }
+    }
 
 @router.delete("/delete-documents", summary="서버문서 삭제 / 워크스페이스 문서+임베딩 삭제 || 임시 문서 삭제")
 async def temp_cleanup_endpoint(body: TempCleanupBody, user_id: int = Depends(get_user_id_from_cookie)):

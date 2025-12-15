@@ -22,7 +22,14 @@ router_singular = APIRouter(tags=["Workspace"], prefix="/v1/workspace")
 
 
 class NewWorkspaceBody(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, description="새 워크스페이스 이름")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "새 워크스페이스 이름"
+            }
+        }
+    }
 
 
 class Workspace(BaseModel):
@@ -36,6 +43,20 @@ class Workspace(BaseModel):
 class NewWorkspaceResponse(BaseModel):
     workspace: Workspace
     message: str
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "workspace": {
+                    "id": 1,
+                    "category": "qna",
+                    "name": "나만의 연구 워크스페이스",
+                    "slug": "user-123-research-abc",
+                    "createdAt": "2024-01-01 12:00:00"
+                },
+                "message": "Workspace created"
+            }
+        }
+    }
 
 
 class WorkspaceListItem(BaseModel):
@@ -50,6 +71,23 @@ class WorkspaceListItem(BaseModel):
 
 class WorkspaceListResponse(BaseModel):
     workspaces: List[WorkspaceListItem]
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "workspaces": [
+                    {
+                        "id": 1,
+                        "category": "qna",
+                        "name": "Project A",
+                        "slug": "project-a-slug",
+                        "createdAt": "2024-01-01 10:00:00",
+                        "updatedAt": "2024-01-02 10:00:00",
+                        "threads": []
+                    }
+                ]
+            }
+        }
+    }
 
 
 class WorkspaceDetailResponse(BaseModel):
@@ -70,24 +108,67 @@ class WorkspaceDetailResponse(BaseModel):
     topN: Optional[int] = None
     similarityThreshold: Optional[float] = None
     vectorCount: Optional[int] = None
-    # threads: List[Any] = []
-
-
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "id": 1,
+                "name": "Project A",
+                "category": "'qna' or 'doc_gen' or 'summary'",
+                "slug": "project-a-slug",
+                "createdAt": "2024-01-01 10:00:00",
+                "updatedAt": "2024-01-02 10:00:00",
+                "temperature": 0.7,
+                "chatHistory": 10,
+                "provider": "huggingface",
+                "chatModel": "Gemma3-27B",
+                "chatMode": "chat",
+                "queryRefusalResponse": "정보가 없습니다.",
+                "systemPrompt": "당신은 유용한 봇입니다.",
+                "vectorSearchMode": "hybrid",
+                "topN": 4,
+                "similarityThreshold": 0.25,
+                "vectorCount": 100
+            }
+        }
+    }
+    
 class WorkspaceUpdateBody(BaseModel):
     temperature: Optional[float] = None
     chatHistory: Optional[int] = None
     systemPrompt: Optional[str] = ""
-    provider: Optional[str] =None # ['openai', 'huggingface']
+    provider: Optional[str] =None # ['huggingface']
     systemPrompt: Optional[str] = ""
-    vectorSearchMode: Optional[str] = None #['hybrid', 'semantic']
+    vectorSearchMode: Optional[str] = None # ['hybrid', 'semantic']
     similarityThreshold: Optional[float] = 0.25
     topN: Optional[int] = 4
     queryRefusalResponse: Optional[str] 
-
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "temperature": 0.5,
+                "chatHistory": 20,
+                "systemPrompt": "새로운 시스템 프롬프트",
+                "provider": "huggingface",
+                "vectorSearchMode": "hybrid",
+                "similarityThreshold": 0.3,
+                "topN": 5,
+                "queryRefusalResponse": "관련 정보를 찾을 수 없습니다."
+            }
+        }
+    }
 
 class WorkspaceUpdateResponse(BaseModel):
     message: Optional[str] = ""
 
+class WorkspaceNameUpdateBody(BaseModel):
+    name: str
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "새로운 워크스페이스 이름"
+            }
+        }
+    }
 
 ### 워크스페이스 사용자별 목록 조회
 @router.get(
@@ -113,8 +194,8 @@ def list_all_workspaces(user_id: int = Depends(get_user_id_from_cookie)):
 )
 def create_new_workspace(
     validated_category: str = Depends(validate_category),
-    body: NewWorkspaceBody = ...,
-    user_id: int = Depends(get_user_id_from_cookie),
+    body    : NewWorkspaceBody = ...,
+    user_id : int = Depends(get_user_id_from_cookie),
 ):
     category = validated_category
     logger.debug({"category": category, "body": body.model_dump(exclude_unset=True)})
@@ -143,9 +224,6 @@ def get_workspace_by_slug(slug: str, user_id: int = Depends(get_user_id_from_coo
 def delete_workspace(slug: str, user_id: int = Depends(get_user_id_from_cookie)):
     delete_workspace_service(user_id, slug)
     return {"message": "Workspace deleted"}
-
-class WorkspaceNameUpdateBody(BaseModel):
-    name: str
 
 @router_singular.post("/{slug}/name-update", summary="워크스페이스 이름 업데이트")
 def update_workspace_name(slug: str, body: WorkspaceNameUpdateBody, user_id: int = Depends(get_user_id_from_cookie)):
