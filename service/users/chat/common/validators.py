@@ -1,6 +1,7 @@
 """검증 로직"""
 from typing import Dict, Any
 from errors import NotFoundError, BadRequestError
+from repository.user import get_api_keys_by_user_id
 from repository.workspace import get_workspace_by_workspace_id, get_workspace_id_by_slug_for_user
 from repository.workspace_thread import get_thread_id_by_slug_for_user
 
@@ -27,6 +28,11 @@ def preflight_stream_chat_for_workspace(
     ws = get_workspace_by_workspace_id(user_id, workspace_id)
     if not ws:
         raise NotFoundError("워크스페이스를 찾을 수 없습니다")
+        
+    # [추가] 유저의 API 키를 조회하여 ws 딕셔너리에 병합
+    api_keys = get_api_keys_by_user_id(user_id)
+    if api_keys:
+        ws.update(api_keys) # openai_api_key, anthropic_api_key 등 추가됨
 
     # QA는 thread_id 필수
     if category == "qna":

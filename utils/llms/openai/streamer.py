@@ -3,20 +3,11 @@ logger = logger(__name__)
 
 def _init_client(api_key: str = None):
     from openai import OpenAI
-    from dotenv import load_dotenv
     from config import config
-     # 인자로 받은 api_key가 없으면 config에서 조회
-    if api_key:
-        final_key = api_key
-    else:
-        logger.debug("#### No API key in the worksapce, using config.yaml ###")
-        load_dotenv()
-        provider_conf = config.get("provider", {}).get("openai", {})
-        final_key = provider_conf.get("api_key")
-        
-    if not final_key:
-        # 키가 없으면 에러를 내거나 처리를 해야 함
-        raise ValueError("OpenAI API Key is missing. Please check config or user settings.")
+
+    # [수정] config에서 조회하는 로직 제거. api_key가 없으면 즉시 에러 발생.
+    if not api_key:
+        raise ValueError("OpenAI API Key is missing. Please check user settings.")
 
     client = OpenAI(api_key=api_key)
     return client, config.get("default", {})
@@ -26,7 +17,9 @@ def stream_chat(messages, **gen_kwargs):
     - model: 호출자가 지정한 모델명(예: gpt-4o-mini)
     - gen_kwargs: max_tokens, temperature, top_p, timeout 등
     """
-    client, conf = _init_client()
+    api_key = gen_kwargs.get("api_key")
+    
+    client, conf = _init_client(api_key)
     model_name = gen_kwargs.get("model")
 
     params = {

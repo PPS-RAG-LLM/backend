@@ -36,8 +36,24 @@ def stream_and_persist(
         thread_id: 스레드 ID (QA만 해당)
     """
     temperature = ws.get("temperature")
+    # [추가] 워크스페이스의 provider에 맞는 API 키 추출
+    provider = ws.get("provider", "openai")
+    # 키가 필요 없는 provider 목록
+    NO_KEY_PROVIDERS = ("huggingface", "ollama", "local")
+    
+    api_key = None
+    if provider not in NO_KEY_PROVIDERS:
+        # openai -> openai_api_key, anthropic -> anthropic_api_key
+        api_key_name = f"{provider}_api_key"
+        api_key = ws.get(api_key_name)
+        
+        # 상용 API인데 키가 없는 경우 로그 경고 (실제 에러는 runner에서 발생시킴)
+        if not api_key:
+             logger.warning(f"No API key found for provider: {provider}")
+
     acc_text: List[str] = []
     t0 = time.perf_counter()
+
 
     sources = []
     for snippet in snippets:
@@ -59,7 +75,13 @@ def stream_and_persist(
         logger.debug("__SOURCES__: []")
 
     # 스트리밍 응답 생성
-    for chunk in runner.stream(messages, temperature=temperature):
+    try:
+        # stream 함수가 api_key 인자를 지원하도록 수정되었다고 가정
+        stream_gen = runner.stream(messages, temperature=temperature, api_key=api_key)
+    except TypeError:
+        # 만약 runner.stream이 api_key를 안 받는 구버전이면 없이 호출
+        stream_gen = runner.stream(messages, temperature=temperature)
+    for chunk in stream_gen:
         if chunk:
             acc_text.append(chunk)
             yield chunk
