@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from config import config
 from repository.documents import list_doc_ids_by_workspace
 from repository.rag_settings import get_rag_settings_row
@@ -18,6 +18,7 @@ from repository.workspace import (
     get_workspace_id_by_slug_for_user,
     update_workspace_name_by_slug_for_user
 )
+from repository.user import get_api_keys_by_user_id
 from repository.workspace_thread import (
     create_default_thread, 
     get_threads_by_workspace_id,
@@ -103,6 +104,7 @@ def create_workspace_for_user(user_id: int, category: str, payload: Dict[str, An
 ### 리스트 조회
 
 def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
+    
     rows = get_workspaces_by_user(user_id)
     items = []
     for ws in rows:
@@ -117,11 +119,12 @@ def list_workspaces(user_id: int) -> list[Dict[str, Any]]:
             "slug"      : ws["slug"],
             "createdAt" : ws["created_at"],
             "updatedAt" : ws["updated_at"],
+            "provider"  : ws["provider"],
             "threads": [
                 {
                     "id"            : thread["id"],
                     "name"          : thread["name"],
-                    "thread_slug"   : thread["slug"],
+                    "threadSlug"    : thread["slug"],
                     "createdAt"     : thread["created_at"],
                     "updatedAt"     : thread["updated_at"],
                 } for thread in threads
@@ -136,13 +139,15 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug)
     if not workspace_id:
         raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
+    
     ws = get_workspace_by_workspace_id(user_id, workspace_id)
+    
+    # api_keys가 None일 경우 빈 딕셔너리로 처리 (에러 방지)
+    api_keys = get_api_keys_by_user_id(user_id) or {}
 
     if not ws:
         raise NotFoundError("요청한 워크스페이스를 찾을 수 없습니다")
 
-    # from repository.documents import get_documents_by_workspace_id
-    # threads = get_threads_by_workspace_id(workspace_id)
     return {
         "id"                    : ws["id"],
         "name"                  : ws["name"],
@@ -154,13 +159,17 @@ def get_workspace_detail(user_id: int, slug: str) -> Dict[str, Any]:
         "chatHistory"           : ws["chat_history"],
         "systemPrompt"          : ws["system_prompt"],
         "provider"              : ws["provider"],
+        # 민감 정보 마스킹 처리
+        "openaiApiKey"          : api_keys.get("openai_api_key"),
+        "anthropicApiKey"       : api_keys.get("anthropic_api_key"),
+        "geminiApiKey"          : api_keys.get("gemini_api_key"),
         "chatModel"             : ws["chat_model"],
         "topN"                  : ws["top_n"],
         "chatMode"              : ws["chat_mode"],
         "queryRefusalResponse"  : ws["query_refusal_response"],
         "vectorSearchMode"      : ws["vector_search_mode"],
         "similarityThreshold"   : ws["similarity_threshold"],
-        "vectorCount": ws["vector_count"],
+        "vectorCount"           : ws["vector_count"],
     }
 
 
@@ -193,10 +202,30 @@ def update_workspace(user_id: int, slug: str, payload: Dict[str, Any]) -> Dict[s
     if not updates:
         return None
 
-    # # 이름 변경 시 slug도 자동 갱신
-    # if "name" in updates and isinstance(updates["name"], str) and updates["name"].strip():
-    #     updates["slug"] = generate_unique_slug(updates["name"]) 
+    # 1. API Key 필드 분리 (User 테이블용)
+    user_updates = {}
+    api_key_map = {
+        "openaiApiKey": "openai_api_key",
+        "anthropicApiKey": "anthropic_api_key",
+        "geminiApiKey": "gemini_api_key",
+    }
+    
+    for body_key, db_col in api_key_map.items():
+        if body_key in payload:
+            val = payload.pop(body_key)
+            
+            # 중요: 마스킹된 키(**** 포함)가 그대로 돌아온 경우 업데이트 대상에서 제외
+            if val and isinstance(val, str) and "****" in val:
+                continue
+                
+            # 빈 문자열이면 None으로 저장 (삭제), 아니면 값 저장
+            user_updates[db_col] = val if val and str(val).strip() else None
 
+    # 2. User 테이블 업데이트 (API 키가 있을 경우)
+    if user_updates:
+        from repository.user import update_user_api_keys # (새로 만들 함수)
+        update_user_api_keys(user_id, user_updates)
+        
     workspace_id = get_workspace_id_by_slug_for_user(user_id, slug) # 워크스페이스 아이디 조회
     update_workspace_by_slug_for_user(user_id, slug, updates) # 워크스페이스 업데이트
     ws = get_workspace_by_workspace_id(user_id, workspace_id) # 워크스페이스 상세 조회

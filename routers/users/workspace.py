@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -57,16 +58,22 @@ class NewWorkspaceResponse(BaseModel):
             }
         }
     }
-
+class ThreadInfo(BaseModel):
+    id: int
+    name: str
+    threadSlug: str
+    createdAt: datetime
+    updatedAt: datetime
 
 class WorkspaceListItem(BaseModel):
     id: int
     category: str
     name: str
     slug: str
+    provider: str
     createdAt: str
     updatedAt: str
-    threads: List[Any] = []
+    threads: List[ThreadInfo] = []
 
 
 class WorkspaceListResponse(BaseModel):
@@ -80,9 +87,18 @@ class WorkspaceListResponse(BaseModel):
                         "category": "qna",
                         "name": "Project A",
                         "slug": "project-a-slug",
+                        "provider": "huggingface",
                         "createdAt": "2024-01-01 10:00:00",
                         "updatedAt": "2024-01-02 10:00:00",
-                        "threads": []
+                        "threads": [
+                            {
+                                "id": 9,
+                                "name": "thread-리눅스마스터",
+                                "threadSlug": "3d14504e-9a6c-4f95-99c3-575534022bbd",
+                                "createdAt": "2025-12-16T14:06:31.455440",
+                                "updatedAt": "2025-12-16T14:06:31.455447"
+                            }
+                        ]
                     }
                 ]
             }
@@ -100,6 +116,9 @@ class WorkspaceDetailResponse(BaseModel):
     temperature: Optional[float] = None
     chatHistory: int
     provider: Optional[str] = None
+    openaiApiKey: Optional[str] = None
+    anthropicApiKey: Optional[str] = None
+    geminiApiKey: Optional[str] = None
     chatModel: Optional[str] = None
     chatMode: Optional[str] = None
     queryRefusalResponse: Optional[str] = None
@@ -120,6 +139,9 @@ class WorkspaceDetailResponse(BaseModel):
                 "temperature": 0.7,
                 "chatHistory": 10,
                 "provider": "huggingface",
+                "openaiApiKey": "****...",
+                "anthropicApiKey": "*****...",
+                "geminiApiKey": "********...",
                 "chatModel": "Gemma3-27B",
                 "chatMode": "chat",
                 "queryRefusalResponse": "정보가 없습니다.",
@@ -137,6 +159,9 @@ class WorkspaceUpdateBody(BaseModel):
     chatHistory: Optional[int] = None
     systemPrompt: Optional[str] = ""
     provider: Optional[str] =None # ['huggingface']
+    openaiApiKey: Optional[str] = None
+    anthropicApiKey: Optional[str] = None
+    geminiApiKey: Optional[str] = None
     systemPrompt: Optional[str] = ""
     vectorSearchMode: Optional[str] = None # ['hybrid', 'semantic']
     similarityThreshold: Optional[float] = 0.25
@@ -149,6 +174,9 @@ class WorkspaceUpdateBody(BaseModel):
                 "chatHistory": 20,
                 "systemPrompt": "새로운 시스템 프롬프트",
                 "provider": "huggingface",
+                "openaiApiKey": "****...",
+                "anthropicApiKey": "*****...",
+                "geminiApiKey": "********...",
                 "vectorSearchMode": "hybrid",
                 "similarityThreshold": 0.3,
                 "topN": 5,

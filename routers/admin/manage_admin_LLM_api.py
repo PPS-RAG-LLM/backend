@@ -39,8 +39,11 @@ def model_list(
     subcategory: str | None = Query(
         None, description="doc_gen 서브테스크(=template.name, 예: '출장계획서')"
     ),
+    provider: str | None = Query(
+        None, description="openai | anthropic | gemini | huggingface"
+    ),
 ):
-    return get_model_list(category, subcategory)
+    return get_model_list(category, subcategory, provider)
 
 
 @router.post(

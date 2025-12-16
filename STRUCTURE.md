@@ -67,7 +67,7 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 ```
 
 # 2. 서빙 구조
-- 모델 파일(Qwen2.5-7B-Instruct-1M)은 models/qwen/loader.py에서 로드해서 사용.
+- 모델 파일(Gemma3-27B)은 models/qwen/loader.py에서 로드해서 사용.
 - API 서버는 src/api/main.py에서 실행.
 - 각 기능별 라우트(routes/)와 비즈니스 로직(core/)을 분리해서 관리.
 - 관리자 페이지는 별도의 프론트엔드(React, Vue 등)에서 API 호출로 구현(백엔드는 routes/admin.py 등에서 처리).
@@ -83,3 +83,22 @@ backend/                              # Python(FastAPI) 백엔드 - REST/RAG 서
 
 
 
+### 2. 아키텍처 설명 (보고서/산출물용)
+- 산출물 문서에 넣을 때는 아래 4가지 계층으로 설명하면 명확합니다.
+
+1) Presentation Layer (Frontend)
+    - 사용자가 접근하는 웹 애플리케이션입니다.
+    - 백엔드 API 서버와 REST API로 통신합니다.
+2) Application Layer (Backend - FastAPI)
+    - API Router: 클라이언트의 요청을 받아 적절한 서비스로 라우팅합니다. (routers/)
+    - Service & Logic:
+    - RAG Core: 문서 파싱, 임베딩, 검색(Retrieval), 답변 생성(Generation)을 수행합니다.
+    - Admin Features: 파인튜닝, 프롬프트 관리 등을 수행합니다.
+    - LLM Loader: Qwen, OpenAI 등 다양한 모델을 로드하고 추론을 수행하는 모듈입니다.
+3) Data Layer
+    - PostgreSQL: 사용자 정보(User), 채팅 세션(Session), 문서 메타데이터 등을 저장하는 관계형 데이터베이스입니다.
+    - Milvus: 문서 내용을 벡터화하여 저장하고, 유사도 및 하이브리드 검색을 수행하는 벡터 데이터베이스입니다.
+    - File Storage: 업로드된 원본 문서(PDF, DOCX)와 파인튜닝된 모델 가중치(Weights)를 저장합니다.
+4) External Interface   
+    - SSO: 사내 통합 인증 시스템과 연동합니다.
+    - External LLM: 필요 시 OpenAI 등 외부 API를 호출합니다.

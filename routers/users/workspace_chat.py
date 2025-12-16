@@ -113,11 +113,11 @@ def to_see(gen):
         ):
             # logger.debug(f"[flush] {repr(text)}")
             yield f'{json.dumps({"content": chunk})}\n\n'
-            buf.clear()
-            last_flush = time.monotonic()
-    if buf:
-        text = "".join(buf)
-        yield f'{json.dumps({"content": chunk})}\n\n'
+    #         buf.clear()
+    #         last_flush = time.monotonic()
+    # if buf:
+    #     text = "".join(buf)
+    #     yield f'{json.dumps({"content": chunk})}\n\n'
     if chat_id:
         yield f'{json.dumps({"chat_id": chat_id, "done":True})}\n\n'
 

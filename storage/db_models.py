@@ -167,6 +167,9 @@ class User(Base):
     pfp_filename = Column(Text)
     bio = Column(Text, server_default=text("''"))
     daily_message_limit = Column(Integer)
+    openai_api_key = Column(Text, nullable=True)
+    anthropic_api_key = Column(Text, nullable=True)
+    gemini_api_key = Column(Text, nullable=True)
     suspended = Column(Integer, nullable=False, server_default=text("0"))
     security_level = Column(Integer, nullable=False, server_default=text("3"))
     created_at = Column(
@@ -211,7 +214,7 @@ class Workspace(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(Text, nullable=False)
     slug = Column(Text, nullable=False, unique=True)
-    category = Column(Text, nullable=False)  # CHECK constraint는 DB 레벨에서 처리
+    category = Column(Text, nullable=False)          # CHECK constraint는 DB 레벨에서 처리
     vector_count = Column(Integer, server_default=text("0"))
     created_at = Column(
         DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False

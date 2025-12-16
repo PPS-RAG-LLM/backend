@@ -205,6 +205,7 @@ def get_workspaces_by_user(user_id: int) -> list[Dict[str, Any]]:
                 Workspace.id,
                 Workspace.name,
                 Workspace.slug,
+                Workspace.provider,
                 Workspace.category,
                 Workspace.created_at,
                 Workspace.updated_at,

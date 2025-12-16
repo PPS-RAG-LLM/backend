@@ -33,8 +33,7 @@ def _resolve_model_path(local_path: str) -> str:
     if not local_path:
         raise NotFoundError("DB에 model_path가 비어 있습니다.")
     
-    project_root = Path(__file__).resolve().parents[2]
-    base = Path((config.get("models") or {}).get("root") or (project_root / "storage" / "models" / "llm"))
+    base = Path(config.get("models_dir").get("llm_models_path"))
 
     if os.path.isabs(local_path):
         abs_path = Path(local_path)
@@ -84,10 +83,6 @@ def hf_factory(model_key: str) -> Streamer:
         logger.info("Alibaba | Qwen Model Qwen3-vl")
         streamer = _Wrap(lambda messages, **kw: qwen_vl.stream_chat(messages, model_path=local_path, **kw))
 
-    elif model_key.startswith("Qwen2.5-7B-Instruct-1M"):
-        logger.info("Alibaba | Qwen Model Qwen2.5-7B-Instruct-1M")
-        streamer = _Wrap(lambda messages, **kw: qwen.stream_chat(messages, model_path=local_path, **kw))
-
     elif model_key.startswith("Gemma"):
         logger.info("Google | Gemma Model %s", model_key)
         streamer = _Wrap(lambda messages, **kw: gemma3_27b.stream_chat(messages, model_path=local_path, **kw))
@@ -129,12 +124,24 @@ def preload_adapter_model(model_key: str) -> bool:
 ### OpenAI API
 
 class OpenAIStreamer:
-	def __init__(self, model: str):
-		self.model = model
-	def stream(self, messages, **kw):
-		from utils.llms.openai.streamer import stream_chat as openai_stream
-		return openai_stream(messages, model=self.model, **kw)
+    # 생성자에서 api_key를 받아서 저장해둠
+    def __init__(self, default_model: str, api_key: str = None):
+        self.default_model = default_model
+        self.api_key = api_key  # <-- 저장!
+
+    def stream(self, messages, **kw):
+        from utils.llms.openai.streamer import stream_chat as openai_stream
+        
+        if "model" not in kw or not kw["model"]:
+            kw["model"] = self.default_model
+        
+        # 생성자에서 받은 api_key를 호출 시점에 주입 (이미 kw에 있으면 덮어쓰지 않음)
+        if self.api_key and "api_key" not in kw:
+            kw["api_key"] = self.api_key
+            
+        return openai_stream(messages, **kw)
 
 @register("openai")
-def openai_factory(model_key: str) -> Streamer:
-	return OpenAIStreamer(model_key)
+def openai_factory(model_key: str, **kwargs) -> Streamer:
+    api_key = kwargs.get("api_key")
+    return OpenAIStreamer(default_model=model_key, api_key=api_key)

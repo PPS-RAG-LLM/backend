@@ -967,77 +967,130 @@ def _unload_via_adapters(model_name: str) -> bool:
 # ================================================================
 
 
-def get_model_list(category: str, subcategory: Optional[str] = None):
-    cat = _norm_category(category)
-    sub = (subcategory or "").strip()   # = system_prompt_template.name
+def get_model_list(category: str, subcategory: Optional[str] = None, provider: Optional[str] = None):
 
-    # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
-    ft_ids: set[int] = set()
-    try:
-        ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
-    except Exception:
-        ft_ids = set()
+    # ---------------------------------------------------------
+    # 1. Config에서 API Provider 모델 가져오기
+    # ---------------------------------------------------------
+    from config import config
+    api_models_list = []
+    # ID 카운터 시작값 (음수로)
+    api_id_counter = -1 
+    
+    # 요청된 provider가 있고, 그게 'huggingface'가 아니면 API 모델부터 확인
+    target_providers = ["openai", "anthropic", "gemini"]
+    
+    # provider 필터가 없거나, API provider 중 하나라면 Config 조회
+    if not provider or provider in target_providers:
+        providers_conf = config.get("provider", {})
+        
+        # 특정 provider만 볼 건지, 전체 API provider를 볼 건지 결정
+        loop_providers = [provider] if provider and provider in target_providers else target_providers
+        
+        for prov_name in loop_providers:
+            p_conf = providers_conf.get(prov_name)
+            if not p_conf:
+                continue
+            
+            p_models = p_conf.get("models") or []
+            for m_name in p_models:
+                api_models_list.append({
+                    "id": api_id_counter,  # API 모델은 가상 ID
+                    "name": m_name,
+                    "provider": prov_name,
+                    "loaded": True,
+                    "category": category if category != "all" else "api",
+                    "subcategory": None,
+                    "active": False, # 활성 상태 로직 필요 시 추가
+                    "isActive": True,
+                    "createdAt": None,
+                    "rougeScore": None,
+                    "isFineTuned": False,
+                })
+                api_id_counter -= 1
+    # 만약 provider가 API 전용(예: openai)으로 특정되었다면, DB 조회(HuggingFace)는 스킵하고 바로 반환
+    if provider and provider in target_providers:
+        return {"category": category, "models": api_models_list}
+    
+    # ---------------------------------------------------------
+    # 2. DB에서 로컬 모델(HuggingFace) 가져오기
+    # ---------------------------------------------------------
+    # provider가 'huggingface'이거나, 지정되지 않았을 때만 실행
 
-    # 1) category=all → 전체(활/비활 포함)
-    if cat == "all":
-        rows = repo_get_llm_models_by_category_all()
+    db_models = []
+    if not provider or provider == "huggingface":
+        cat = _norm_category(category)
+        sub = (subcategory or "").strip()   # = system_prompt_template.name
 
-    # 2) doc_gen + subcategory → 매핑 rouge 점수순
-    elif cat == "doc_gen" and sub:
-        rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
-
-    # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
-    else:
-        rows = repo_get_llm_models_by_category(cat)
-
-    # 현재 카테고리 활성 모델명(캐시)
-    try:
-        current_active_name = None if cat in ("all", None) else _active_model_name_for_category(cat)
-    except Exception:
-        current_active_name = None
-
-    models = []
-    for i, r in enumerate(rows):
+        # --- (ADD) 파인튜닝 모델 id 세트 미리 로딩 ---
+        ft_ids: set[int] = set()
         try:
-            cols = r.keys()
+            ft_ids = set(repo_get_distinct_model_ids_from_fine_tuned_models())
         except Exception:
-            cols = []
-        rouge = r["rougeScore"] if ("rougeScore" in cols) else None
+            ft_ids = set()
 
-        name = r["name"]
+        # 1) category=all → 전체(활/비활 포함)
+        if cat == "all":
+            rows = repo_get_llm_models_by_category_all()
 
-        # ✅ 로드 상태: 클러스터 기준만 사용
-        try:
-            is_loaded_cluster = _get_cluster_load_state(name)
-        except Exception:
-            is_loaded_cluster = False
+        # 2) doc_gen + subcategory → 매핑 rouge 점수순
+        elif cat == "doc_gen" and sub:
+            rows = repo_get_llm_models_by_category_and_subcategory(cat, sub)
 
-        # active 규칙
-        if cat == "doc_gen" and sub:
-            active_flag = (i == 0)
-        elif cat != "all" and current_active_name:
-            active_flag = (name == current_active_name)
+        # 3) 그 외(qna/summary/doc_gen 전체) → 활성만
         else:
-            active_flag = False
+            rows = repo_get_llm_models_by_category(cat)
 
-        # --- (ADD) fine-tuned 여부 ---
-        is_finetuned = bool(r["id"] in ft_ids)
+        # 현재 카테고리 활성 모델명(캐시)
+        try:
+            current_active_name = None if cat in ("all", None) else _active_model_name_for_category(cat)
+        except Exception:
+            current_active_name = None
 
-        models.append({
-            "id": r["id"],
-            "name": name,
-            "provider": r["provider"],
-            "loaded": bool(is_loaded_cluster),
-            "category": r["category"],
-            "subcategory": sub if (cat == "doc_gen" and sub) else None,
-            "active": bool(active_flag),
-            "isActive": bool(r["isActive"]),
-            "createdAt": r["created_at"],
-            "rougeScore": rouge,
-            "isFineTuned": is_finetuned,  # ← 추가 필드 하나만
-        })
+        models = []
+        for i, r in enumerate(rows):
+            try:
+                cols = r.keys()
+            except Exception:
+                cols = []
+            rouge = r["rougeScore"] if ("rougeScore" in cols) else None
 
-    return {"category": cat, "models": models}
+            name = r["name"]
+
+            # ✅ 로드 상태: 클러스터 기준만 사용
+            try:
+                is_loaded_cluster = _get_cluster_load_state(name)
+            except Exception:
+                is_loaded_cluster = False
+
+            # active 규칙
+            if cat == "doc_gen" and sub:
+                active_flag = (i == 0)
+            elif cat != "all" and current_active_name:
+                active_flag = (name == current_active_name)
+            else:
+                active_flag = False
+
+            # --- (ADD) fine-tuned 여부 ---
+            is_finetuned = bool(r["id"] in ft_ids)
+
+            models.append({
+                "id": r["id"],
+                "name": name,
+                "provider": r["provider"],
+                "loaded": bool(is_loaded_cluster),
+                "category": r["category"],
+                "subcategory": sub if (cat == "doc_gen" and sub) else None,
+                "active": bool(active_flag),
+                "isActive": bool(r["isActive"]),
+                "createdAt": r["created_at"],
+                "rougeScore": rouge,
+                "isFineTuned": is_finetuned,  # ← 추가 필드 하나만
+            })
+            # 변수명 충돌 방지를 위해 기존 로직의 결과를 db_models에 할당한다고 가정
+            db_models = models 
+
+        return {"category": cat, "models": db_models}
 
 
 def lazy_load_if_needed(model_name: str) -> Dict[str, Any]:

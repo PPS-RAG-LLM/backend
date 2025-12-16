@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Generator, List, Protocol
+from typing import Any, Callable, Dict, Generator, List, Protocol
 from utils import logger
 
 logger = logger(__name__)
@@ -28,16 +28,40 @@ def _ensure_adapters_loaded():
     _INITIALIZED = True
 
 # 주어진 프로바이더와 모델 키에 따라 적절한 Streamer를 반환
-def resolve(provider: str, model_key: str) -> Streamer:
+def resolve(provider: str, model_key: str, **kwargs) -> Streamer:
     _ensure_adapters_loaded()
     try:
+        # factory 함수들에게 kwargs를 전달
+        return _REGISTRY[provider.lower()](model_key, **kwargs)
+    except TypeError:
+        # 기존 factory들이 kwargs를 안 받을 수도 있으니 호환성 유지
         return _REGISTRY[provider.lower()](model_key)
     except KeyError:
         raise ValueError(f"Unsupported provider: {provider}")
 
+
 # LLM 클래스: 워크스페이스 정보를 기반으로 Streamer를 생성
+
 class LLM:
     @staticmethod
-    def from_workspace(provider: str, model_key: str) -> Streamer:
-        # 주어진 워크스페이스 정보에서 프로바이더와 모델 키를 사용하여 Streamer 생성
-        return resolve(provider, model_key)
+    def from_workspace(provider_or_ws: Any, model_key: str = None, **kwargs) -> Streamer:
+        """
+        사용법 1: LLM.from_workspace(workspace_obj)
+        사용법 2: LLM.from_workspace("openai", "gpt-4", api_key="sk-...")
+        """
+        
+        # 1. Workspace 객체가 넘어온 경우
+        if hasattr(provider_or_ws, "provider") and hasattr(provider_or_ws, "chat_model"):
+            ws = provider_or_ws
+            provider = ws.provider
+            model = ws.chat_model
+            # DB 모델에서 api_key 추출 (없으면 None)
+            api_key = getattr(ws, "openai_api_key", None)
+            return resolve(provider, model, api_key=api_key)
+
+        # 2. 문자열(provider, model)이 넘어온 경우 (기존 호환성 + api_key 추가 지원)
+        else:
+            provider = provider_or_ws
+            model = model_key
+            # kwargs에 api_key가 있으면 resolve로 전달됨
+            return resolve(provider, model, **kwargs)

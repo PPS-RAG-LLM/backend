@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Optional, Tuple
 from utils import now_kst
+from utils.crypto import decrypt_data, encrypt_data
 from utils.database import get_session
 from sqlalchemy import select
 from storage.db_models import User
@@ -148,14 +149,56 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             # 호출부 호환을 위해 dict 형태로 반환
             m = row._mapping
             return {
-                "id": m["id"],
-                "role": m["role"],
-                "username": m["username"],
-                "name": m["name"],
-                "department": m["department"],
-                "position": m["position"],
+                "id"            : m["id"],
+                "role"          : m["role"],
+                "username"      : m["username"],
+                "name"          : m["name"],
+                "department"    : m["department"],
+                "position"      : m["position"],
                 "security_level": m["security_level"],
             }
     finally:
         pass
 
+def update_user_api_keys(user_id: int, updates: Dict[str, Any]):
+    from utils.database import get_session
+    from storage.db_models import User
+    
+    # [수정] 값 암호화 처리 후 업데이트
+    encrypted_updates = {}
+    for k, v in updates.items():
+        if v and isinstance(v, str):
+            encrypted_updates[k] = encrypt_data(v)
+        else:
+            encrypted_updates[k] = v
+
+    session = get_session()
+    try:
+        session.query(User).filter(User.id == user_id).update(encrypted_updates)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_api_keys_by_user_id(user_id: int) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        stmt = select(
+            User.openai_api_key,
+            User.anthropic_api_key,
+            User.gemini_api_key,
+        ).where(User.id == user_id).limit(1)
+        row = session.execute(stmt).first()
+        
+        if not row:
+            return None
+            
+        # [수정] 복호화하여 반환 (Row 객체를 딕셔너리로 변환)
+        # decrypt_data는 평문인 경우 그대로 반환하므로 기존 데이터와 호환됩니다.
+        return {
+            "openai_api_key"    : decrypt_data(row.openai_api_key),
+            "anthropic_api_key" : decrypt_data(row.anthropic_api_key),
+            "gemini_api_key"    : decrypt_data(row.gemini_api_key),
+        }

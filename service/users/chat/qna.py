@@ -226,25 +226,34 @@ def stream_chat_for_qna(
 
     # 5. RAG context 검색
     snippets : List[Dict[str, Any]] = []
-    temp_doc_ids: List[str] = []
+    temp_doc_ids: List[str] = []# rag_flag 파싱 (문자열/Boolean 처리 및 기본값 설정)
 
-    rag_flag = body.get("rag_flag") 
-    if isinstance(rag_flag, str):               # 프런트에서 true/false 문자열이나 실제 bool을 보내도 문제 없이 처리되고,
-        rag_flag = rag_flag.lower() == "true"   # snippets 와 temp_doc_ids 는 항상 정의된 상태로 아래 로직에 전달
-    rag_flag = True if rag_flag is None else bool(rag_flag) # rag_flag 가 None 이면 True, 그 외는 bool 값으로 변환
-
-    if rag_flag:
-        snippets, temp_doc_ids = _insert_rag_context(security_level, ws, body) # 보안레벨, 워크스페이스, 정보 전달
-        # logger.debug(f"\n## SEARCHED SNIPPETS from RAG: \n{snippets[:100]}...\n")
+    raw_rag_flag = body.get("rag_flag")
+    if str(raw_rag_flag).lower() == "false":
+        should_use_rag = False
+    elif raw_rag_flag is False:
+        should_use_rag = False
     else:
-        logger.info("RAG disabled for this request; skipping context retrieval.")
+        # None이거나 True이거나 그 외의 값일 때는 기본적으로 RAG 활성화
+        should_use_rag = True
+
+    if should_use_rag:
+        logger.debug(f"RAG MODE: SEARCHING SNIPPETS from RAG...\n")
+        snippets, temp_doc_ids = _insert_rag_context(security_level, ws, body) # 보안레벨, 워크스페이스, 정보 전달
+    else:
+        logger.info("DISCARD RAG MODE: skipping RAG context retrieval.")
 
     # 6. User message에 context 포함
-    user_message = build_user_message_with_context(
-        body["message"], 
-        snippets, 
-        ws.get("query_refusal_response", "")
-    )
+    if should_use_rag:
+        user_message = build_user_message_with_context(
+            body["message"], 
+            snippets, 
+            ws.get("query_refusal_response", "")
+        )
+    else:
+        # RAG를 안 쓸 때는 문맥 추가 없이 질문만 전달
+        user_message = body["message"]
+    
     messages.append({"role": "user", "content": user_message})
     logger.debug(f"\nMESSAGES:\n{messages}")
 
