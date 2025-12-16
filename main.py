@@ -101,7 +101,14 @@ async def lifspan(app):
     except asyncio.CancelledError:
         pass
 
-app = FastAPI(lifespan=lifspan)
+app = FastAPI(
+    title="NIQ Backend API",
+    description="NIQ 프로젝트를 위한 백엔드 API 명세서입니다.",
+    version="1.0.0",
+    docs_url="/docs",  # Swagger UI 주소 (기본값)
+    redoc_url="/redoc", # ReDoc 주소 (기본값)
+    lifespan=lifspan
+)
 
 ######################### Middleware ######################### 
 
@@ -171,6 +178,8 @@ def read_root():
 
 if __name__ == "__main__":
     import uvicorn
+    import json
+
     uvicorn.run(
         "main:app", 
         host=config["server"]["host"], 
@@ -184,3 +193,8 @@ if __name__ == "__main__":
         ],
         reload_dirs=["routers", "repository", "service", "utils"],                        
     )
+
+    # 서버 켜질 때 openapi.json도 같이 갱신 (API 명세 수정 위함)
+    with open("openapi.json", "w", encoding="utf-8") as f:
+        json.dump(app.openapi(), f, ensure_ascii=False)
+    print("openapi.json 파일이 업데이트 되었습니다.")
