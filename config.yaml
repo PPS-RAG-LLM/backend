@@ -28,8 +28,25 @@ database:
 
 provider:
   openai:
-    api_key: ${OPENAI_API_KEY}
-    base_url: "https://api.openai.com/v1"
+    # api_key: ${OPENAI_API_KEY}
+    models:
+      - "gpt-5.2"
+      - "gpt-5.2-pro-2025-12-11"
+      - "gpt-5.1"
+      - "gpt-5"
+      - "gpt-4.1"
+  anthropic:
+    # api_key: ${ANTHROPIC_API_KEY}
+    models:
+      - "claude-sonnet-4-5-20250929"
+      - "claude-haiku-4-5-20251001"
+      - "claude-opus-4-5-20251101"
+      - "claude-opus-4-1-20250805"
+  gemini:
+    # api_key: ${GEMINI_API_KEY}
+    models:
+      - "gemini-3-pro-preview"
+      - "gemini-2.5-flash"
   huggingface: {}
   # ollama:
   #   base_url: "http://localhost:11434"
@@ -96,3 +113,5 @@ retrieval:
 logging:
   level: DEBUG        # DEBUG | INFO | WARNING | ERROR | CRITICAL
   no_color: false     # true: ANSI 색상 비활성화
+
+
