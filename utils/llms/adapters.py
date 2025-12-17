@@ -145,3 +145,30 @@ class OpenAIStreamer:
 def openai_factory(model_key: str, **kwargs) -> Streamer:
     api_key = kwargs.get("api_key")
     return OpenAIStreamer(default_model=model_key, api_key=api_key)
+
+
+### Gemini API
+
+class GeminiStreamer:
+    # 생성자에서 api_key를 받아서 저장해둠
+    def __init__(self, default_model: str, api_key: str = None):
+        self.default_model = default_model
+        self.api_key = api_key
+
+    def stream(self, messages, **kw):
+        from utils.llms.gemini.streamer import stream_chat as gemini_stream
+        
+        if "model" not in kw or not kw["model"]:
+            kw["model"] = self.default_model
+            
+        # 생성자에서 받은 api_key를 호출 시점에 주입 (이미 kw에 있으면 덮어쓰지 않음)
+        if self.api_key and "api_key" not in kw:
+            kw["api_key"] = self.api_key
+            
+        return gemini_stream(messages, **kw)
+
+@register("gemini")
+@register("google")
+def gemini_factory(model_key: str, **kwargs) -> Streamer:
+    api_key = kwargs.get("api_key")
+    return GeminiStreamer(default_model=model_key, api_key=api_key)

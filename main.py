@@ -181,6 +181,11 @@ def read_root():
 if __name__ == "__main__":
     import uvicorn
     import json
+    
+    # 서버 켜질 때 openapi.json도 같이 갱신 (API 명세 수정 위함)
+    with open("openapi.json", "w", encoding="utf-8") as f:
+        json.dump(app.openapi(), f, ensure_ascii=False)
+    print("openapi.json 파일이 업데이트 되었습니다.")
 
     uvicorn.run(
         "main:app", 
@@ -195,8 +200,3 @@ if __name__ == "__main__":
         ],
         reload_dirs=["routers", "repository", "service", "utils"],                        
     )
-
-    # 서버 켜질 때 openapi.json도 같이 갱신 (API 명세 수정 위함)
-    with open("openapi.json", "w", encoding="utf-8") as f:
-        json.dump(app.openapi(), f, ensure_ascii=False)
-    print("openapi.json 파일이 업데이트 되었습니다.")
