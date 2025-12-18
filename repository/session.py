@@ -37,15 +37,17 @@ def save_session_to_db(session_id: str, user_id: int):
 
 def _parse_db_datetime(value) -> Optional[datetime]:
     """DB 값을 datetime으로 변환 (문자열인 경우 파싱)"""
+    from dateutil import parser 
+
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
     if isinstance(value, str):
         try:
-            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            # [수정] dateutil.parser로 파싱하면 밀리초가 있든 없든 처리 가능
+            return parser.parse(value).replace(tzinfo=None)
         except Exception:
             return None
     return None
-
 
 def get_session_from_db(session_id: str) -> Optional[dict]:
     """세션 조회 (users 테이블과 JOIN해서 사용자 정보도 함께)"""
@@ -73,6 +75,8 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
 
         # 만료 체크
         expires_dt = _parse_db_datetime(expires_at)
+        logger.info(f"expires_at: {expires_at}")
+        logger.info(f"expires_dt: {expires_dt}")
         
         now_dt = now_kst()
         if not expires_dt or expires_dt <= now_dt:

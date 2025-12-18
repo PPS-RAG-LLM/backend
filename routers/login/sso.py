@@ -27,7 +27,7 @@ def sso_login(company_user: CompanyUserInfo, response: Response):
             key     =server_conf.get("cookie_name").lower(),
             value   =session_id,
             max_age =int(server_conf.get("cookie_session_max_age")),    # 8 hours
-            expires = datetime.now(timezone.utc) + timedelta(seconds=int(server_conf.get("cookie_session_max_age"))),
+            # expires = datetime.now(timezone.utc) + timedelta(seconds=int(server_conf.get("cookie_session_max_age"))),
             httponly=server_conf.get("cookie_httponly"),     
             samesite=server_conf.get("cookie_samesite"),     
             secure  =server_conf.get("cookie_secure"),

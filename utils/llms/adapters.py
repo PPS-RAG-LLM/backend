@@ -121,26 +121,38 @@ def preload_adapter_model(model_key: str) -> bool:
             pass
         return False
 
-### OpenAI API
 
-class OpenAIStreamer:
-    # 생성자에서 api_key를 받아서 저장해둠
+### Base Streamer
+
+class BaseAPIStreamer:
     def __init__(self, default_model: str, api_key: str = None):
         self.default_model = default_model
-        self.api_key = api_key  # <-- 저장!
+        self.api_key = api_key
+
+    def _get_stream_function(self):
+        """자식 클래스에서 구현할 추상 메서드"""
+        raise NotImplementedError
 
     def stream(self, messages, **kw):
-        from utils.llms.openai.streamer import stream_chat as openai_stream
+        stream_func = self._get_stream_function()
         
         if "model" not in kw or not kw["model"]:
             kw["model"] = self.default_model
         
-        # 생성자에서 받은 api_key를 호출 시점에 주입 (이미 kw에 있으면 덮어쓰지 않음)
+        # 생성자에서 받은 api_key 주입 (우선순위: kw > 생성자)
         if self.api_key and "api_key" not in kw:
             kw["api_key"] = self.api_key
             
-        return openai_stream(messages, **kw)
+        return stream_func(messages, **kw)
 
+
+### OpenAI API
+
+class OpenAIStreamer(BaseAPIStreamer):
+    
+    def _get_stream_function(self):
+        from utils.llms.openai.streamer import stream_chat as openai_stream
+        return openai_stream
 @register("openai")
 def openai_factory(model_key: str, **kwargs) -> Streamer:
     api_key = kwargs.get("api_key")
@@ -149,26 +161,27 @@ def openai_factory(model_key: str, **kwargs) -> Streamer:
 
 ### Gemini API
 
-class GeminiStreamer:
-    # 생성자에서 api_key를 받아서 저장해둠
-    def __init__(self, default_model: str, api_key: str = None):
-        self.default_model = default_model
-        self.api_key = api_key
-
-    def stream(self, messages, **kw):
+class GeminiStreamer(BaseAPIStreamer):
+    def  _get_stream_function(self):
         from utils.llms.gemini.streamer import stream_chat as gemini_stream
-        
-        if "model" not in kw or not kw["model"]:
-            kw["model"] = self.default_model
-            
-        # 생성자에서 받은 api_key를 호출 시점에 주입 (이미 kw에 있으면 덮어쓰지 않음)
-        if self.api_key and "api_key" not in kw:
-            kw["api_key"] = self.api_key
-            
-        return gemini_stream(messages, **kw)
+        return gemini_stream
 
 @register("gemini")
 @register("google")
 def gemini_factory(model_key: str, **kwargs) -> Streamer:
     api_key = kwargs.get("api_key")
     return GeminiStreamer(default_model=model_key, api_key=api_key)
+
+
+### Anthropic (Claude) API
+
+class AnthropicStreamer(BaseAPIStreamer):
+    def _get_stream_function(self):
+        from utils.llms.anthropic.streamer import stream_chat as anthropic_stream
+        return anthropic_stream
+
+@register("anthropic")
+@register("claude")
+def anthropic_factory(model_key: str, **kwargs) -> Streamer:
+    api_key = kwargs.get("api_key")
+    return AnthropicStreamer(default_model=model_key, api_key=api_key)
