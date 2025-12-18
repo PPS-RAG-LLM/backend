@@ -541,6 +541,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 Trainer,
                 BitsAndBytesConfig,
                 TrainerCallback,
+                EarlyStoppingCallback,
             )
         except Exception as e:
             _append_log(log_path, f"[{_now_utc().isoformat()}] import error: {e}")
@@ -750,6 +751,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         eval_ds  = RagDataset(eval_data,  tokenizer, max_len=max_len) if eval_size > 0 else None
         use_eval = eval_ds is not None and len(eval_data) > 0
 
+        # ===== Overfitting prevention: Early Stopping =====
+        # 요구사항: overfittingPrevention=True면, eval 개선이 없을 때 자동으로 학습 중단
+        overfit_prevent = bool(job.request.get("overfittingPrevention", True))
+        early_stop_enabled = bool(overfit_prevent and use_eval)
+        early_stop_patience = int(ft_conf.get("early_stopping_patience", 2))
+        early_stop_threshold = float(ft_conf.get("early_stopping_threshold", 0.0))
+
         # ===== TrainingArguments (버전 호환 키 자동 매핑) =====
         from inspect import signature as _sig
         def _supported_args(cls): return set(_sig(cls.__init__).parameters.keys())
@@ -795,6 +803,14 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             _put_kw(sup, _ta, "metric_for_best_model", "eval_loss")
             _put_kw(sup, _ta, "greater_is_better", False)
             _put_kw(sup, _ta, "per_device_eval_batch_size", max(1, job.request.get("batchSize", 1)))
+        if early_stop_enabled:
+            # EarlyStoppingCallback이 동작하려면 eval이 주기적으로 돌아야 함.
+            # 또한 load_best_model_at_end + metric_for_best_model이 설정되어 있어야 함.
+            _append_log(
+                log_path,
+                f"[{_now_utc().isoformat()}] early_stopping enabled: "
+                f"patience={early_stop_patience} threshold={early_stop_threshold}",
+            )
 
         training_args = TrainingArguments(**_ta)
 
@@ -829,13 +845,21 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     _append_log(log_path, f"[{_now_utc().isoformat()}] step={state.global_step} loss={logs['loss']}")
 
         def _build_trainer():
+            callbacks = [ProgressCallback(job.job_id), LogCallback()]
+            if early_stop_enabled:
+                callbacks.append(
+                    EarlyStoppingCallback(
+                        early_stopping_patience=early_stop_patience,
+                        early_stopping_threshold=early_stop_threshold,
+                    )
+                )
             return Trainer(
                 model=model,
                 args=training_args,
                 train_dataset=train_ds,
                 eval_dataset=eval_ds,
                 tokenizer=tokenizer,  # FutureWarning은 무시 가능 (추후 processing_class로 마이그레이션)
-                callbacks=[ProgressCallback(job.job_id), LogCallback()],
+                callbacks=callbacks,
             )
 
         trainer = _build_trainer()
