@@ -1181,13 +1181,25 @@ def get_fine_tuning_status(job_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # 진행률 계산:
+        # - 기존 metrics["learningProgress"]가 있으면 우선 사용
+        # - 없거나 0이면 saveProgress / 과거 progress 값을 fallback으로 사용
+        raw_lp = metrics.get("learningProgress", None)
+        raw_sp = metrics.get("saveProgress", None)
+        raw_legacy_p = metrics.get("progress", None)
+        lp_val = raw_lp if raw_lp not in (None, "") else (raw_sp if raw_sp not in (None, "") else raw_legacy_p)
+        if lp_val is None:
+            lp_val = 0
+
+        sp_val = raw_sp if raw_sp is not None else 0
+
         return {
             "jobId": row.provider_job_id,
             "status": row_status,
-            "learningProgress": int(metrics.get("learningProgress", 0)),
+            "learningProgress": int(lp_val or 0),
             "roughScore": int(metrics.get("roughScore", 0)),
             "rouge1F1": metrics.get("rouge1F1"),
-            "saveProgress": int(metrics.get("saveProgress", 0)),
+            "saveProgress": int(sp_val or 0),
             "saveStage": metrics.get("saveStage"),
             "error": metrics.get("error"),
         }
