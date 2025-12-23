@@ -777,12 +777,24 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         save_strategy_val = "epoch" if use_eval else "no"
         eval_strategy_val = "epoch" if use_eval else "no"
 
+        # 파라미터 추출 (API 기본값과 일치시키기)
+        batch_size = job.request.get("batchSize", 1)
+        grad_accum_steps = job.request.get("gradientAccumulationSteps", 16)  # API 기본값과 일치
+        num_epochs = job.request.get("epochs", 3)
+        lr = job.request.get("learningRate", 2e-4)
+        
+        # 로그에 실제 사용되는 파라미터 기록
+        effective_batch_size = batch_size * grad_accum_steps
+        _append_log(log_path, f"[{_now_utc().isoformat()}] Training params: batch_size={batch_size}, "
+                               f"grad_accum_steps={grad_accum_steps}, effective_batch_size={effective_batch_size}, "
+                               f"epochs={num_epochs}, lr={lr}")
+        
         _ta = dict(
             output_dir=output_dir,
-            num_train_epochs=job.request.get("epochs", 3),
-            per_device_train_batch_size=job.request.get("batchSize", 1),
-            gradient_accumulation_steps=job.request.get("gradientAccumulationSteps", 8),
-            learning_rate=job.request.get("learningRate", 2e-4),
+            num_train_epochs=num_epochs,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=grad_accum_steps,
+            learning_rate=lr,
             bf16=True,
             logging_steps=10,
             report_to="none",
@@ -802,7 +814,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             _put_kw(sup, _ta, "load_best_model_at_end", True)
             _put_kw(sup, _ta, "metric_for_best_model", "eval_loss")
             _put_kw(sup, _ta, "greater_is_better", False)
-            _put_kw(sup, _ta, "per_device_eval_batch_size", max(1, job.request.get("batchSize", 1)))
+            _put_kw(sup, _ta, "per_device_eval_batch_size", max(1, batch_size))
         if early_stop_enabled:
             # EarlyStoppingCallback이 동작하려면 eval이 주기적으로 돌아야 함.
             # 또한 load_best_model_at_end + metric_for_best_model이 설정되어 있어야 함.
@@ -873,9 +885,13 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             if "out of memory" in str(re).lower():
                 # 🔻 배치/시퀀스 동시 축소 + **이전 Trainer/그래프 완전 정리**
                 old_bs = training_args.per_device_train_batch_size
+                old_gas = training_args.gradient_accumulation_steps
                 new_bs = max(1, old_bs // 2)
+                new_gas = old_gas  # gradient_accumulation_steps는 유지 (메모리 부담 적음)
+                new_eff_bs = new_bs * new_gas
                 new_len = max(1024, int(max_len * 0.75))
-                _append_log(log_path, f"[{_now_utc().isoformat()}] OOM → retry with batch={new_bs}, max_len={new_len}")
+                _append_log(log_path, f"[{_now_utc().isoformat()}] OOM → retry with batch={new_bs}, "
+                                      f"grad_accum={new_gas}, effective_batch={new_eff_bs}, max_len={new_len}")
                 # 메모리 해제
                 try:
                     del trainer
@@ -884,6 +900,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     pass
                 # 재구성
                 training_args.per_device_train_batch_size = new_bs
+                training_args.gradient_accumulation_steps = new_gas
                 train_ds = RagDataset(train_data, tokenizer, max_len=new_len)
                 eval_ds  = RagDataset(eval_data,  tokenizer, max_len=new_len) if use_eval else None
                 trainer = Trainer(
