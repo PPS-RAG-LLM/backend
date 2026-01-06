@@ -45,7 +45,7 @@ def _load_reranker() -> Tuple[Any, Any, torch.device, int, int]:
         str(RERANK_MODEL_PATH),
         trust_remote_code=True,
         local_files_only=True,
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
     ).to(device).eval()
 
     token_true_id = tokenizer.convert_tokens_to_ids("yes")

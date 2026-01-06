@@ -29,7 +29,7 @@ def load_qwen_instruct_7b(model_dir):
         device_map="auto",
         local_files_only=True,
         trust_remote_code=True,
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
     )
     model.eval()
     return model, tokenizer

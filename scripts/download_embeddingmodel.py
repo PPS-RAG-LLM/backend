@@ -1,5 +1,5 @@
 """
-python /home/wzxcv123/NIQ/jo/backend/scripts/download_embeddingmodel.py
+python scripts/download_embeddingmodel.py
 """
 
 
@@ -8,7 +8,7 @@ import os
 
 # 모델 저장 기본 경로
 # base_dir = "/home/work/CoreIQ/backend/storage/models/embedding"
-base_dir = "/home/wzxcv123/NIQ/jo/backend/storage/models/embedding"
+base_dir = "storage/models/embedding"
 
 # 다운로드 대상 모델과 저장 폴더명 매핑
 models = {

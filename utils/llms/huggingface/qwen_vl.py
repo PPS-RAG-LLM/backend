@@ -31,7 +31,7 @@ def load_qwen3_vl_32b(model_dir):
     # Vision-Language 모델 로딩 (AutoModelForVision2Seq가 자동으로 Qwen3VL 클래스 선택)
     model = AutoModelForVision2Seq.from_pretrained(
         model_dir,
-        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto",
         local_files_only=True,
         trust_remote_code=True,

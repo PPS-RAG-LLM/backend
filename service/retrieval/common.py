@@ -92,7 +92,7 @@ def get_or_load_hf_embedder(model_path: str) -> Tuple[AutoTokenizer, AutoModel, 
             model_path,
             trust_remote_code=True,
             local_files_only=True,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         ).to(device)
         model.eval()
 

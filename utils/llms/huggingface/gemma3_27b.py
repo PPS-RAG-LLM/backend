@@ -32,7 +32,7 @@ def load_gemma3_27b(model_dir):
 
     model = Gemma3ForConditionalGeneration.from_pretrained(
         model_dir,
-        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,  # bfloat16 권장
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,  # bfloat16 권장
         device_map="auto",
         local_files_only=True,
         trust_remote_code=True,

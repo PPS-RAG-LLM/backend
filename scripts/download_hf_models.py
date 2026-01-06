@@ -1,7 +1,7 @@
 """
 # 다운로드 예시
 
-python scripts/download_hf_models.py --base_dir /home/wzxcv123/NIQ/jo/backend/storage/models/llm --hf_token ""
+python scripts/download_hf_models.py --base_dir ./storage/models/llm --hf_token ""
 
 """ 
 from __future__ import annotations
@@ -60,31 +60,31 @@ def download_default_two(
     include 패턴은 필수 파일 중심으로 지정(용량 절감).
     """
     plans = [
-        {
-            "model_id": "openai/gpt-oss-20b",
-            "dst": os.path.join(base_dir, "gpt-oss-20b"),
-            # gpt-oss 파일 구성: *.safetensors, *config.json, tokenizer.*, chat_template 등
-            "include": [
-                "*.safetensors",
-                "*.json",
-                "tokenizer.*",
-                "vocab.json",
-                "merges.txt",
-                "special_tokens_map.json",
-                "chat_template*",
-            ],
-        },
-        {
-            "model_id": "Qwen/Qwen2.5-7B-Instruct-1M",
-            "dst": os.path.join(base_dir, "Qwen2.5-7B-Instruct-1M"),
-            "include": [
-                "*.safetensors",
-                "*.json",
-                "tokenizer.*",
-                "vocab.json",
-                "merges.txt",
-            ],
-        },
+        # {
+        #     "model_id": "openai/gpt-oss-20b",
+        #     "dst": os.path.join(base_dir, "gpt-oss-20b"),
+        #     # gpt-oss 파일 구성: *.safetensors, *config.json, tokenizer.*, chat_template 등
+        #     "include": [
+        #         "*.safetensors",
+        #         "*.json",
+        #         "tokenizer.*",
+        #         "vocab.json",
+        #         "merges.txt",
+        #         "special_tokens_map.json",
+        #         "chat_template*",
+        #     ],
+        # },
+        # {
+        #     "model_id": "Qwen/Qwen2.5-7B-Instruct-1M",
+        #     "dst": os.path.join(base_dir, "Qwen2.5-7B-Instruct-1M"),
+        #     "include": [
+        #         "*.safetensors",
+        #         "*.json",
+        #         "tokenizer.*",
+        #         "vocab.json",
+        #         "merges.txt",
+        #     ],
+        # },
         {
             "model_id": "Qwen/Qwen3-8B",
             "dst": os.path.join(base_dir, "Qwen3-8B"),
@@ -99,34 +99,34 @@ def download_default_two(
             ],
         },
         # === 추가: Qwen/Qwen3-14B ===
-        {
-            "model_id": "Qwen/Qwen3-14B",
-            "dst": os.path.join(base_dir, "Qwen3-14B"),
-            "include": [
-                "*.safetensors",
-                "*.json",
-                "tokenizer.*",
-                "vocab.json",
-                "merges.txt",
-                "special_tokens_map.json",
-                "chat_template*",
-            ],
-        },
-        {
-            "model_id": "google/gemma-3-27b-it",
-            "dst": os.path.join(base_dir, "gemma-3-27b-it"),
-            # Gemma 3는 모델 샤드, config, tokenizer, chat_template, processor 계열 json이 핵심
-            "include": [
-                "*.safetensors",             # model-0000x-of-0000y.safetensors, model.safetensors.index.json 등
-                "*.json",                    # config.json, generation_config.json, *processor_config.json, *tokenizer_config.json, added_tokens.json 등
-                "tokenizer.*",               # tokenizer.model, tokenizer.json 등
-                "vocab.json",                # 존재 시
-                "merges.txt",                # 존재 시
-                "special_tokens_map.json",   # 존재 시
-                "chat_template*",            # chat_template(.jinja/.json 등)
-                "*.model",                   # 추가 안전장치: tokenizer.model 등
-            ],
-        }
+        # {
+        #     "model_id": "Qwen/Qwen3-14B",
+        #     "dst": os.path.join(base_dir, "Qwen3-14B"),
+        #     "include": [
+        #         "*.safetensors",
+        #         "*.json",
+        #         "tokenizer.*",
+        #         "vocab.json",
+        #         "merges.txt",
+        #         "special_tokens_map.json",
+        #         "chat_template*",
+        #     ],
+        # },
+        # {
+        #     "model_id": "google/gemma-3-27b-it",
+        #     "dst": os.path.join(base_dir, "gemma-3-27b-it"),
+        #     # Gemma 3는 모델 샤드, config, tokenizer, chat_template, processor 계열 json이 핵심
+        #     "include": [
+        #         "*.safetensors",             # model-0000x-of-0000y.safetensors, model.safetensors.index.json 등
+        #         "*.json",                    # config.json, generation_config.json, *processor_config.json, *tokenizer_config.json, added_tokens.json 등
+        #         "tokenizer.*",               # tokenizer.model, tokenizer.json 등
+        #         "vocab.json",                # 존재 시
+        #         "merges.txt",                # 존재 시
+        #         "special_tokens_map.json",   # 존재 시
+        #         "chat_template*",            # chat_template(.jinja/.json 등)
+        #         "*.model",                   # 추가 안전장치: tokenizer.model 등
+        #     ],
+        # }
 
         # === 추가: Qwen/Qwen3-Omni-30B-A3B-Instruct (멀티모달: 하위 디렉터리 포함 보수적 패턴) ===
         # {
