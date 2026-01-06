@@ -58,7 +58,6 @@ isort
 itsdangerous==2.2.0
 jedi
 Jinja2==3.1.6
-jiter==0.10.0
 joblib==1.5.1
 jsonschema==4.25.1
 jsonschema-specifications==2025.4.1
@@ -92,7 +91,6 @@ nvidia-nccl-cu12==2.27.3
 nvidia-nvjitlink-cu12==12.8.93
 nvidia-nvtx-cu12==12.8.90
 onnxruntime==1.22.1
-openai==1.97.0
 openpyxl==3.1.5
 packaging
 pandas==2.3.1
@@ -118,7 +116,6 @@ pydeck==0.9.1
 pydocstyle==6.3.0
 pyflakes==3.2.0
 Pygments
-PyJWT==2.10.1
 pylint
 pymilvus==2.6.3
 PyMuPDF==1.26.3

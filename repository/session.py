@@ -2,7 +2,7 @@ from utils import logger
 from utils.database import get_session
 from typing import Optional
 from storage.db_models import UserSession, User
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from utils.time import now_kst, to_kst_string
 from datetime import timedelta, datetime
 
@@ -87,6 +87,20 @@ def get_session_from_db(session_id: str) -> Optional[dict]:
             session.commit()
             logger.info(f"delete expired session: {session_id}")
             return None
+
+        # 세션 연장 (Sliding Session)
+        # 남은 시간이 7시간 미만이면(1시간 이상 경과) 8시간으로 다시 연장
+        remaining = expires_dt - now_dt
+        if remaining < timedelta(hours=7):
+            new_expires_at = now_dt + timedelta(hours=8)
+            session.execute(
+                update(UserSession)
+                .where(UserSession.session_id == session_id)
+                .values(expires_at=new_expires_at)
+            )
+            session.commit()
+            # 반환값용 변수도 갱신
+            expires_dt = new_expires_at
 
         return {
             "user_id": user_id,
