@@ -1,8 +1,28 @@
 version: '3.5'
 
 services:
+
+  # --- PostgreSQL 서비스 ---
+  db:
+    image: postgres:15
+    container_name: pps-postgres-dev
+    restart: always
+    environment:
+      POSTGRES_USER: ${RDB_USER}
+      POSTGRES_PASSWORD: ${RDB_PASSWORD}
+      POSTGRES_DB: ${RDB_NAME}
+    ports:
+      - "${RDB_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    env_file:
+      - .env
+
+  # --- Milvus 서비스 (etcd, minio, standalone) --- 
+  # 분산 처리에 최적화된 벡터 검색 엔진이기 때문에 복잡한 구조를 가짐
+  # Milvus etcd : 메타데이터 저장소
   etcd:
-    container_name: milvus-etcd
+    container_name: milvus-etcd-dev
     image: quay.io/coreos/etcd:v3.5.18
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -10,7 +30,7 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/storage/volumes/etcd:/etcd
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
@@ -18,17 +38,18 @@ services:
       timeout: 20s
       retries: 3
 
+  # --- Milvus Minio : 데이터 저장소 ---
   minio:
-    container_name: milvus-minio
+    container_name: milvus-minio-dev
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
     ports:
-      - "9001:9001"
-      - "9000:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+      - "${MINIO_API_PORT}:9000"
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/storage/volumes/minio:/minio_data
     command: minio server /minio_data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -36,8 +57,9 @@ services:
       timeout: 20s
       retries: 3
 
+  # Milvus standalone : 벡터 검색 로직을 처리
   standalone:
-    container_name: milvus-standalone
+    container_name: milvus-standalone-dev
     image: milvusdb/milvus:v2.5.5
     command: ["milvus", "run", "standalone"]
     security_opt:
@@ -46,7 +68,7 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/storage/volumes/milvus:/var/lib/milvus
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -54,8 +76,8 @@ services:
       timeout: 20s
       retries: 3
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "${MILVUS_PORT}:19530"
+      - "${MILVUS_ADMIN_PORT}:9091"
     depends_on:
       - "etcd"
       - "minio"
@@ -63,3 +85,6 @@ services:
 networks:
   default:
     name: milvus
+
+volumes:
+  postgres_data:

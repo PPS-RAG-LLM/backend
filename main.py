@@ -184,7 +184,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         host=config["server"]["host"], 
-        port=config["server"]["port"],
+        port=int(config["server"]["port"]),
         reload=True,
         reload_excludes=[
             "**/unsloth_compiled_cache/**",

@@ -1,12 +1,12 @@
 server:
-  host: 127.0.0.1
-  port: 3005
+  host: ${HOST}
+  port: ${BACKEND_PORT}
   sso_secret_key: ${SSO_SECRET_KEY}
 
   # CORS middleware 설정
   cors_origins:
     - "http://localhost:5173"
-    - "http://localhost:5174"
+    - "http://localhost:8787"
   trusted_hosts:
     - "*"
   force_https: false
@@ -22,8 +22,8 @@ server:
 database:
   user: ${RDB_USER}
   password: ${RDB_PASSWORD}
-  host: 127.0.0.1
-  port: 8003
+  host: ${HOST}
+  port: ${RDB_PORT}
   database: ${RDB_NAME}
 
 provider:
@@ -111,7 +111,8 @@ retrieval:
 
 # 로깅 설정
 logging:
-  level: DEBUG        # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  level: ${LOG_LEVEL}        # DEBUG | INFO | WARNING | ERROR | CRITICAL
   no_color: false     # true: ANSI 색상 비활성화
+
 
 

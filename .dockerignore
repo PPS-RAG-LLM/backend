@@ -44,6 +44,7 @@ unsloth_compiled_cache/
 # Storage에서 모델은 포함하되, 불필요한 것만 제외
 # 모델은 포함: storage/models/llm/, storage/models/embedding/, storage/models/embedding-rerank/
 # 제외할 것들:
+storage/models/
 storage/user_data/
 storage/train_data/
 storage/documents/
