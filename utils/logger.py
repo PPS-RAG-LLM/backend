@@ -3,7 +3,7 @@ import os
 import sys
 from typing import Optional
 from datetime import datetime
-
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from config import config as app_config 
@@ -65,6 +65,29 @@ def _build_stream_handler(level: int) -> logging.Handler:
     handler.setFormatter(formatter)
     return handler
 
+def _build_file_handler(level: int, filename: str = "server.log") -> logging.Handler:
+    # 로그 디렉토리 생성 (/app/logs 또는 ./logs)
+    log_dir = "/app/logs"
+    if not os.path.exists(log_dir):
+        # 도커가 아니면 로컬 logs/backend 사용
+        log_dir = "logs/backend" 
+        os.makedirs(log_dir, exist_ok=True)
+    
+    file_path = os.path.join(log_dir, filename)
+    
+    # 10MB 단위로 최대 5개 파일 유지
+    handler = RotatingFileHandler(file_path, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+    handler.setLevel(level)
+    
+    # 파일에는 색상 코드 없이 깔끔하게 저장
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    handler.setFormatter(formatter)
+    return handler
+
+
 def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger:
     """설정된 컬러 콘솔 로거를 반환합니다.
 
@@ -80,6 +103,13 @@ def get_logger(name: str = "app", level: Optional[int] = None) -> logging.Logger
     # 여러 번 호출될 때 중복 핸들러를 방지
     if not logger.handlers:
         logger.addHandler(_build_stream_handler(level))
+        
+        # [추가] 파일 핸들러 추가
+        try:
+            logger.addHandler(_build_file_handler(level))
+        except Exception as e:
+            print(f"Failed to add file handler: {e}") # 권한 문제 등 대비
+            
     return logger
 
 

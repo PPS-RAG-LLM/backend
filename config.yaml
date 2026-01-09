@@ -5,8 +5,8 @@ server:
 
   # CORS middleware 설정
   cors_origins:
-    - "http://localhost:5173"
-    - "http://localhost:8787"
+    - ${FRONTEND_URL_1}
+    - ${FRONTEND_URL_2}
   trusted_hosts:
     - "*"
   force_https: false
@@ -97,8 +97,6 @@ retrieval:
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
-    uri: http://localhost:19530
-    # token: ${MILVUS_TOKEN:-""}
     collections:
       ADMIN_DOCS: admin_docs_collection
       LLM_TEST: llm_test_collection
