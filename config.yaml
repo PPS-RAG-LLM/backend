@@ -22,7 +22,7 @@ server:
 database:
   user: ${RDB_USER}
   password: ${RDB_PASSWORD}
-  host: ${HOST}
+  host: db
   port: ${RDB_PORT}
   database: ${RDB_NAME}
 

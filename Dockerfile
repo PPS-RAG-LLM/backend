@@ -27,8 +27,9 @@ COPY uv.lock pyproject.toml ./
 
 # uv를 사용하여 의존성 설치
 # uv sync는 uv.lock 파일을 기반으로 정확한 버전의 패키지들을 설치합니다
-# --frozen 옵션은 uv.lock 파일을 정확히 따르도록 보장합니다
-RUN uv sync --frozen
+# 변경 (lock 파일 무시하고 pyproject.toml 기반으로 설치)
+RUN uv sync || true
+RUN pip install psycopg2-binary
 
 # 모델 파일을 먼저 복사 (레이어 캐싱 최적화)
 # 모델은 크기가 크지만 자주 변경되지 않으므로 별도 레이어로 분리
@@ -50,12 +51,13 @@ ENV PYTHONPATH="/app"
 # docker run 시 -e CUDA_VISIBLE_DEVICES=0 등으로 변경 가능합니다
 # ENV CUDA_VISIBLE_DEVICES=all
 
-# 포트 노출
-# FastAPI 애플리케이션에서 사용할 포트를 노출합니다
-EXPOSE 3007
+# 기본값 설정 (혹시 환경변수가 없을 때를 대비)
+ENV BACKEND_PORT=8686
+
+EXPOSE $BACKEND_PORT
 
 # 애플리케이션 실행
 # LD_LIBRARY_PATH 조정 후 uvicorn을 실행합니다
 # torch 라이브러리 경로를 제거하여 라이브러리 충돌을 방지합니다
-CMD ["sh", "-c", "export LD_LIBRARY_PATH=$(echo \"$LD_LIBRARY_PATH\" | tr ':' '\\n' | grep -v '/usr/local/lib/python3.10/dist-packages/torch/lib' | paste -sd:) && exec uvicorn main:app --host 0.0.0.0 --port 3007"]
+CMD ["sh", "-c", "export LD_LIBRARY_PATH=$(echo \"$LD_LIBRARY_PATH\" | tr ':' '\\n' | grep -v '/usr/local/lib/python3.10/dist-packages/torch/lib' | paste -sd:) && exec uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT"]
 
