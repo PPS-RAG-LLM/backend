@@ -5,8 +5,8 @@ server:
 
   # CORS middleware 설정
   cors_origins:
-    - "http://localhost:5173"
-    - "http://localhost:8787"
+    - ${FRONTEND_URL_1}
+    - ${FRONTEND_URL_2}
   trusted_hosts:
     - "*"
   force_https: false
