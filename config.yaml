@@ -97,6 +97,7 @@ retrieval:
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
+    uri : "http://standalone:19530"
     collections:
       ADMIN_DOCS: admin_docs_collection
       LLM_TEST: llm_test_collection
