@@ -266,6 +266,7 @@ def _prepare_file_input(
         security_level_config=security_level_config,
         combined_text=(file_text or ""),
         tables=table_blocks_all or [],
+        filename=file_path.name,
     )
 
     stem = file_path.stem
@@ -384,6 +385,7 @@ def _resolve_security_map(
     security_level_config: Optional[Dict[str, Dict[str, Any]]],
     combined_text: str,
     tables: Sequence[Dict[str, Any]],
+    filename: str = "",
 ) -> Dict[str, int]:
     if override_level_map:
         return {t: int(override_level_map.get(t, 1)) for t in tasks}
@@ -394,6 +396,7 @@ def _resolve_security_map(
             t: determine_level_for_task(
                 payload,
                 security_level_config.get(t, {"maxLevel": 1, "levels": {}}),
+                filename=filename,
             )
             for t in tasks
         }

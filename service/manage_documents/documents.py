@@ -300,7 +300,8 @@ async def upload_document(
         for task in task_types:
             lvl = determine_level_for_task(
                 combined_text,
-                security_rules.get(task, {"maxLevel": 1, "levels": {}})
+                security_rules.get(task, {"maxLevel": 1, "levels": {}}),
+                filename=filename,
             )
             security_levels_map[task] = lvl
         security_level = max(security_levels_map.values()) if security_levels_map else 1

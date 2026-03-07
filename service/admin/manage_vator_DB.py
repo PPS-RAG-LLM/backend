@@ -248,6 +248,7 @@ def _process_single_raw_file(rel_path: str, level_rules: Dict[str, Dict]) -> Opt
         task: determine_level_for_task(
             combined_for_level,
             level_rules.get(task, {"maxLevel": 1, "levels": {}}),
+            filename=raw_path.name,
         )
         for task in TASK_TYPES
     }

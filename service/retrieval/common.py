@@ -342,19 +342,30 @@ def parse_doc_version(stem: str) -> Tuple[str, int]:
             return base, int(cand)
     return stem, 0
 
-def determine_level_for_task(text: str, task_rules: Dict) -> int:
+def determine_level_for_task(text: str, task_rules: Dict, *, filename: str = "") -> int:
     """
-    텍스트 내 키워드를 기반으로 보안 레벨 결정.
+    텍스트 내용 및 파일명에서 키워드를 기반으로 보안 레벨 결정.
+    태그가 파일명에 포함되어 있으면(띄어쓰기·확장자 무관) 해당 레벨로 분류.
     task_rules: {"maxLevel": N, "levels": {"1": [...], "2": [...]}}
     """
     max_level = int(task_rules.get("maxLevel", 1))
     levels = task_rules.get("levels", {})
     sel = 1
-    # 상위 레벨 우선
+
+    # 파일명에서 확장자 제거 후 비교용 문자열 생성
+    import os
+    fname_stem = os.path.splitext(os.path.basename(filename))[0] if filename else ""
+
     for lvl in range(1, max_level + 1):
         kws = levels.get(str(lvl), [])
         for kw in kws:
-            if kw and kw in text:
+            if not kw:
+                continue
+            # 텍스트 본문 매칭
+            if kw in text:
+                sel = max(sel, lvl)
+            # 파일명 매칭 (태그가 파일명에 포함되면 해당 레벨)
+            elif fname_stem and kw in fname_stem:
                 sel = max(sel, lvl)
     return sel
 

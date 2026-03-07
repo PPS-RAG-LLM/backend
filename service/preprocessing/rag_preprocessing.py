@@ -211,7 +211,8 @@ async def extract_documents(target_rel_paths: Optional[List[str]] = None):
             sec_map = {
                 task: determine_level_for_task(
                     whole_for_level,
-                    all_rules.get(task, {"maxLevel": 1, "levels": {}})
+                    all_rules.get(task, {"maxLevel": 1, "levels": {}}),
+                    filename=src.name,
                 )
                 for task in TASK_TYPES
             }
