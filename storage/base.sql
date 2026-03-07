@@ -9,7 +9,7 @@ INSERT INTO
     )
 VALUES 
     (
-        1,'admin','pps_admin','이용범1','AI 연구소','팀장', NULL,'',NULL,0,3,
+        1,'admin','pps_admin1','이용범1','AI 연구소','팀장', NULL,'',NULL,0,3,
         '2025-08-14 15:11:42','2025-08-14 15:11:42', NULL
     ),
     (

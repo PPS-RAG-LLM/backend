@@ -31,8 +31,14 @@ def _iter_hits(raw_results: Sequence[Any]) -> Iterable[Tuple[Dict[str, Any], flo
             entity = hit.get("entity", {}) or {}
             score = float(hit.get("distance", hit.get("score", 0.0)) or 0.0)
         else:
-            entity = getattr(hit, "entity", {}) or {}
-            score = float(getattr(hit, "score", 0.0) or 0.0)
+            # hybrid_search 결과의 Hit 객체는 .fields 에 실제 필드가 있음
+            entity = getattr(hit, "fields", None) or getattr(hit, "entity", {}) or {}
+            # entity 가 dict 가 아니거나 중첩 entity 구조인 경우 한 단계 더 꺼냄
+            if isinstance(entity, dict) and "entity" in entity and isinstance(entity["entity"], dict):
+                entity = entity["entity"]
+            elif not isinstance(entity, dict):
+                entity = {}
+            score = float(getattr(hit, "distance", 0.0) or getattr(hit, "score", 0.0) or 0.0)
         ent_text = entity.get("text") if isinstance(entity, dict) else None
         yield entity, score, ent_text
 

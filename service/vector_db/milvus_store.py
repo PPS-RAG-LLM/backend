@@ -226,19 +226,20 @@ def run_hybrid_search(
             anns_field="embedding",
             param={"metric_type": "IP", "params": {}},
             limit=int(limit),
+            expr=filter_expr,
         )
         sparse_req = AnnSearchRequest(
             data=[query_text],
             anns_field="text_sparse",
             param={"metric_type": "BM25", "params": {}},
             limit=int(limit),
+            expr=filter_expr,
         )
         return client.hybrid_search(
             collection_name=collection_name,
             reqs=[dense_req, sparse_req],
             ranker=RRFRanker(k=60),
             limit=int(limit),
-            filter=filter_expr,
             output_fields=list(output_fields),
         )
     except Exception as exc:  # pragma: no cover

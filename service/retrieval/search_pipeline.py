@@ -95,6 +95,21 @@ async def run_search_pipeline(
         )
 
     dense_hits = build_dense_hits(raw)
+
+    # ── task_type 후처리 필터: Milvus 결과 중 요청된 task_type이 아닌 것은 제거 ──
+    if task_type:
+        before_count = len(dense_hits)
+        dense_hits = [
+            h for h in dense_hits
+            if h.get("task_type") == task_type
+        ]
+        filtered_count = before_count - len(dense_hits)
+        if filtered_count > 0:
+            LOGGER.info(
+                "[PostFilter] task_type=%s 필터로 %d건 제거 (남은 hits: %d)",
+                task_type, filtered_count, len(dense_hits),
+            )
+
     if not dense_hits:
         return _empty_result(
             elapsed=time.perf_counter() - t0,

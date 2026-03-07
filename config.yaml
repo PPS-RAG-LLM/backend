@@ -97,7 +97,7 @@ retrieval:
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
-    uri: http://localhost:19530
+    uri: http://standalone:19530
     # token: ${MILVUS_TOKEN:-""}
     collections:
       ADMIN_DOCS: admin_docs_collection

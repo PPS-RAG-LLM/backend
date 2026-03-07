@@ -14,7 +14,7 @@ mock_company_router = APIRouter(prefix="/mock-company", tags=["TEST"])
 
 # 해시된 비밀번호로 변경
 FAKE_COMPANY_EMPLOYEES = {
-    "pps_admin": {"password": bcrypt.hashpw("admin1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
+    "pps_admin1": {"password": bcrypt.hashpw("admin1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "pps_admin2": {"password": bcrypt.hashpw("admin1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "pps_admin3": {"password": bcrypt.hashpw("admin1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
     "iju1234": {"password": bcrypt.hashpw("1234".encode("utf-8"), bcrypt.gensalt()).decode("utf-8")},
