@@ -22,7 +22,7 @@ server:
 database:
   user: ${RDB_USER}
   password: ${RDB_PASSWORD}
-  host: db
+  host: ${RDB_HOST}
   port: ${RDB_PORT}
   database: ${RDB_NAME}
 
@@ -97,7 +97,8 @@ retrieval:
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
-    uri : "http://standalone:19530"
+    uri: http://localhost:19530
+    # token: ${MILVUS_TOKEN:-""}
     collections:
       ADMIN_DOCS: admin_docs_collection
       LLM_TEST: llm_test_collection
