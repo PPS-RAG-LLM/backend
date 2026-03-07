@@ -1405,11 +1405,7 @@ def _collect_fs_delete_targets(model_path_value: str) -> list[str]:
     base = os.path.basename(s.rstrip("/"))
     if base:
         std = (LLM_MODEL_DIR / base).resolve()
-        for p in std:
-            try:
-                out.append(str(p.resolve()))
-            except Exception:
-                out.append(str(p))
+        out.append(str(std))
 
     # 3) 중복 제거
     seen = set()
