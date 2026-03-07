@@ -234,7 +234,7 @@ class FineTuneRequest(BaseModel):
     @field_validator("category")
     @classmethod
     def _v_category(cls, v: str) -> str:
-        allowed = {"qa", "doc_gen", "summary"}
+        allowed = {"qna", "doc_gen", "summary"}
         vv = (v or "").strip().lower()
         if vv not in allowed:
             raise ValueError(f"category must be one of {sorted(allowed)}")
