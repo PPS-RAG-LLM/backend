@@ -101,15 +101,6 @@ def load_embedding_model():
 _MODEL_MANAGER = None
 
 
-def get_model_manager():
-    """지연 로딩으로 MODEL_MANAGER 가져오기"""
-    global _MODEL_MANAGER
-    if _MODEL_MANAGER is None:
-        from utils.llms.registry import ModelManager
-        _MODEL_MANAGER = ModelManager()
-    return _MODEL_MANAGER
-
-
 def invalidate_embedder_cache() -> None:
     with _EMBED_LOCK:
         _EMBED_CACHE.clear()
