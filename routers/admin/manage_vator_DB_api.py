@@ -243,7 +243,10 @@ async def rag_full_ingest(
     user_id: int = Depends(get_user_id_from_cookie), 
     files: List[UploadFile] = File(...)
     ):
-    # 1) 저장 경로 준비 (기존 로직 유지: securityLevel1)
+    # 1) 보안 규칙 로드 (파일명·내용 기반 보안 레벨 자동 판별을 위해)
+    security_rules = get_security_level_rules_all()
+
+    # 2) 저장 경로 준비 (업로드 시점에는 레벨 미정이므로 임시로 securityLevel1 사용)
     target_folder = ADMIN_RAW_DATA_DIR / "securityLevel1"
     target_folder.mkdir(parents=True, exist_ok=True)
 
@@ -252,22 +255,19 @@ async def rag_full_ingest(
 
     for f in files:
         filename = f.filename or "unknown"
-        # upload_documents 내부에서 파일을 저장하므로 경로만 지정
         file_path = target_folder / filename
         raw_paths.append(str(file_path))
         saved_original_names.append(filename)
 
-    # 2) 통합 업로드 함수 호출
-    # 기존 로직이 securityLevel1 폴더에 저장했으므로, 보안 등급을 1로 강제 설정하여 일관성 유지
-    default_levels = {"qna": 1, "summary": 1, "doc_gen": 1}
-
+    # 3) 통합 업로드 함수 호출
+    # security_rules를 전달하여 파일 내용 + 파일명 기반 보안 레벨 자동 판별
     result = await upload_documents(
         user_id=user_id,
         files=files,
         raw_paths=raw_paths,
         add_to_workspaces=None,
         doc_type=DocumentType.ADMIN,  # 관리자 문서
-        override_security_levels=default_levels
+        security_rules=security_rules,
     )
     ingest_result = {"save": saved_original_names, "ingest": result}
     logger.info(f"[API] rag_full_ingest 호출 완료, 결과 ingest_result=\n\n{ingest_result}\n")

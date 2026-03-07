@@ -305,7 +305,26 @@ async def upload_document(
             )
             security_levels_map[task] = lvl
         security_level = max(security_levels_map.values()) if security_levels_map else 1
-    
+
+    # 4. [관리자 ADMIN] 보안 레벨에 맞는 폴더로 파일 이동
+    if doc_type == DocumentType.ADMIN and security_level > 0:
+        try:
+            current_path = Path(raw_path)
+            # 현재 경로에서 admin_raw_data 이하의 상대 경로를 분석
+            admin_raw_dir = Path(config.get("admin_raw_data_dir", "storage/raw_files/admin_raw_data"))
+            correct_folder = admin_raw_dir / f"securityLevel{security_level}"
+            correct_path = correct_folder / current_path.name
+            if current_path.exists() and current_path != correct_path:
+                correct_folder.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(current_path), str(correct_path))
+                raw_path = str(correct_path)
+                logger.info(
+                    "[upload_document] 보안 레벨 %d에 맞게 파일 이동: %s → %s",
+                    security_level, current_path, correct_path,
+                )
+        except Exception:
+            logger.exception("[upload_document] 보안 레벨 폴더 이동 실패 (무시하고 계속)")
+
     try:
         chunk_records = _build_chunk_records(page_texts_list)
     except Exception as exc:
