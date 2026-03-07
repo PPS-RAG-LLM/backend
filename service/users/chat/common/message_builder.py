@@ -52,6 +52,9 @@ def build_system_message(base_prompt: str, category: str, body: Dict[str, Any]) 
     system_text = (base_prompt + f"\n\n **Please think in <think> tag and answer in <answer> tag.**").strip()
     segments = [system_text or "**Please think in <think> tag and answer in <answer> tag.**"]
 
+    # 한국어 응답 고정 지시
+    segments.append("반드시 한국어(Korean)로 대답해 주세요.")
+
     if category == "doc_gen":
         tpl = render_template("doc_gen", body)
         if tpl:
