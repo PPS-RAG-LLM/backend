@@ -305,7 +305,7 @@ async def upload_document(
             )
             security_levels_map[task] = lvl
         security_level = max(security_levels_map.values()) if security_levels_map else 1
-
+    
     # 4. [관리자 ADMIN] 보안 레벨에 맞는 폴더로 파일 이동
     if doc_type == DocumentType.ADMIN and security_level > 0:
         try:
