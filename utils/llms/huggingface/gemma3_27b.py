@@ -41,6 +41,18 @@ def load_gemma3_27b(model_dir):
     model.eval()
     return model, tokenizer
 
+def _get_input_device(model) -> torch.device:
+    """device_map='auto'로 분산된 모델에서 input_ids를 보낼 디바이스를 안전하게 결정"""
+    try:
+        if hasattr(model, 'hf_device_map'):
+            first_device = next(iter(model.hf_device_map.values()))
+            if isinstance(first_device, int):
+                return torch.device(f"cuda:{first_device}")
+            return torch.device(first_device)
+        return model.device
+    except Exception:
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 def stream_chat(messages, **gen_kwargs):
     """
     Gemma-3 스트리밍 채팅 (공식 Hugging Face 방식)
@@ -59,12 +71,16 @@ def stream_chat(messages, **gen_kwargs):
         raise ValueError("누락된 파라미터: config.yaml의 model_path")
 
     model, tokenizer = load_gemma3_27b(model_dir)
+
+    # ✅ 안전한 디바이스 결정 (device_map="auto" 분산 환경 호환)
+    target_device = _get_input_device(model)
+
     input_ids = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_tensors="pt",
-    ).to(model.device)
+    ).to(target_device)
 
     defaults = config.get("default", {}) or {}
 

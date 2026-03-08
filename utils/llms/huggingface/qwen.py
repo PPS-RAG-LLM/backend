@@ -34,6 +34,20 @@ def load_qwen_instruct_7b(model_dir):
     model.eval()
     return model, tokenizer
 
+def _get_input_device(model) -> torch.device:
+    """device_map='auto'로 분산된 모델에서 input_ids를 보낼 디바이스를 안전하게 결정"""
+    try:
+        # device_map="auto" 시 hf_device_map 속성이 있음
+        if hasattr(model, 'hf_device_map'):
+            # 첫 번째 레이어(embed_tokens)의 디바이스를 사용
+            first_device = next(iter(model.hf_device_map.values()))
+            if isinstance(first_device, int):
+                return torch.device(f"cuda:{first_device}")
+            return torch.device(first_device)
+        return model.device
+    except Exception:
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 def stream_chat(messages, **gen_kwargs):
     logger.info(f"stream_chat: {gen_kwargs}")
 
@@ -43,6 +57,9 @@ def stream_chat(messages, **gen_kwargs):
 
     model, tokenizer = load_qwen_instruct_7b(model_dir)
 
+    # ✅ 안전한 디바이스 결정 (device_map="auto" 분산 환경 호환)
+    target_device = _get_input_device(model)
+
     # ✅ Qwen3 계열 권장: chat 템플릿으로 바로 인코딩
     #    add_generation_prompt=True 가 assistant 답변 시작 토큰을 자동으로 추가
     input_ids = tokenizer.apply_chat_template(
@@ -51,7 +68,7 @@ def stream_chat(messages, **gen_kwargs):
         add_generation_prompt=True,
         return_tensors="pt",
         
-    ).to(model.device)
+    ).to(target_device)
 
     defaults = config.get("default", {}) or {}
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)

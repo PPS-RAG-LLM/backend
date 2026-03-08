@@ -1,7 +1,44 @@
-version: '3.5'
 
 services:
 
+  backend:
+    container_name: niq-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    volumes:
+      # [중요] 모델 파일을 이미지에 굽지 않고 로컬 폴더를 직접 연결 (빌드 속도 최적화)
+      - ./storage/models:/app/storage/models
+      # 데이터 보존을 위한 마운트
+      - ./storage/user_data:/app/storage/user_data
+      - ./storage/train_data:/app/storage/train_data
+      - ./storage/documents:/app/storage/documents
+      - ./storage/extracted_texts:/app/storage/extracted_texts
+      - ./storage/val_data:/app/storage/val_data
+      # [추가] config.yaml 실시간 반영을 위해 마운트
+      - ./backend/config.yaml:/app/config.yaml
+    env_file:
+      - .env
+    environment:
+      # 컨테이너 간 통신을 위한 호스트 설정
+      - RDB_HOST=${RDB_HOST}
+      - MILVUS_HOST=standalone
+      - MINIO_HOST=19530
+      # [중요] DB 접속 포트는 내부 포트(5432) 사용
+      - RDB_PORT=5432
+    depends_on:
+      - db
+      - standalone
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
   # --- PostgreSQL 서비스 ---
   db:
     image: postgres:15
@@ -14,7 +51,7 @@ services:
     ports:
       - "${RDB_PORT}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_${CONTAINER_SUFFIX}:/var/lib/postgresql/data
     env_file:
       - .env
 
@@ -87,4 +124,4 @@ networks:
     name: milvus
 
 volumes:
-  postgres_data:
+  postgres_data_${CONTAINER_SUFFIX}:

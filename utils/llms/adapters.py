@@ -122,6 +122,109 @@ def preload_adapter_model(model_key: str) -> bool:
         return False
 
 
+### Local (fine-tuned) provider
+# 파인튜닝된 모델은 provider="local"로 DB에 저장됨.
+# 모델 이름 패턴에 따라 적절한 HuggingFace 스트리머를 자동 선택한다.
+
+
+def _detect_model_family(model_key: str, model_dir: str) -> str:
+    """
+    모델 이름 및 디렉토리의 config 파일을 분석하여 모델 패밀리를 감지한다.
+    반환값: "qwen", "gemma", "gpt_oss", "unknown"
+    """
+    import json
+
+    lower_key = model_key.lower()
+
+    # 1단계: 모델 이름 패턴 매칭
+    if "qwen" in lower_key:
+        return "qwen"
+    if "gemma" in lower_key:
+        return "gemma"
+    if "gpt_oss" in lower_key or "gpt-oss" in lower_key:
+        return "gpt_oss"
+
+    # 2단계: config.json / tokenizer_config.json 파일에서 모델 아키텍처 감지
+    config_candidates = [
+        os.path.join(model_dir, "config.json"),
+        os.path.join(model_dir, "tokenizer_config.json"),
+    ]
+    combined_text = ""
+    for cfg_path in config_candidates:
+        try:
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                combined_text += " " + json.dumps(data).lower()
+        except Exception as e:
+            logger.warning("모델 config 파일 읽기 실패 (%s): %s", cfg_path, e)
+
+    if combined_text:
+        if "qwen" in combined_text:
+            logger.info("config 파일에서 Qwen 계열 감지: %s", model_key)
+            return "qwen"
+        if "gemma" in combined_text:
+            logger.info("config 파일에서 Gemma 계열 감지: %s", model_key)
+            return "gemma"
+        if "gpt_oss" in combined_text or "gpt-oss" in combined_text:
+            logger.info("config 파일에서 GPT-OSS 계열 감지: %s", model_key)
+            return "gpt_oss"
+
+    logger.warning("모델 패밀리 감지 불가: %s (디렉토리: %s)", model_key, model_dir)
+    return "unknown"
+
+
+@register("local")
+def local_factory(model_key: str) -> Streamer:
+    from utils.llms.huggingface import qwen, gpt_oss_20b, gemma3_27b
+    from pathlib import Path
+
+    if model_key in _HF_STREAMER_CACHE:
+        logger.debug("local_factory cache hit: %s", model_key)
+        return _HF_STREAMER_CACHE[model_key]
+
+    logger.info(f"local_factory: {model_key}")
+
+    # DB에서 provider="local"인 모델 정보 조회
+    model_info = get_llm_model_by_provider_and_name("local", model_key)
+    if not model_info:
+        # 이름만으로 폴백 조회 시도
+        from repository.llm_models import repo_get_llm_model_by_name
+        model_info = repo_get_llm_model_by_name(model_key)
+        if not model_info:
+            raise NotFoundError(f"로컬 모델을 찾을 수 없습니다: {model_key}")
+
+    logger.info(f"local model_info: {model_info}")
+
+    local_path = _resolve_model_path(model_info.get("model_path"))
+    if not os.path.isdir(local_path):
+        raise NotFoundError(f"모델 디렉토리를 찾을 수 없습니다: {local_path}")
+
+    # 모델 이름 또는 config 파일 기반으로 모델 패밀리 감지 후 적절한 Streamer 생성
+    streamer: Optional[Streamer] = None
+    family = _detect_model_family(model_key, str(local_path))
+
+    if family == "qwen":
+        logger.info("Local | Qwen 계열 모델: %s", model_key)
+        streamer = _Wrap(lambda messages, **kw: qwen.stream_chat(messages, model_path=local_path, **kw))
+
+    elif family == "gemma":
+        logger.info("Local | Gemma 계열 모델: %s", model_key)
+        streamer = _Wrap(lambda messages, **kw: gemma3_27b.stream_chat(messages, model_path=local_path, **kw))
+
+    elif family == "gpt_oss":
+        logger.info("Local | GPT-OSS 모델: %s", model_key)
+        streamer = _Wrap(lambda messages, **kw: gpt_oss_20b.stream_chat(messages, model_path=str(local_path), **kw))
+
+    else:
+        # 감지 불가 시 Qwen 로더를 기본 폴백으로 사용
+        logger.warning("Local 모델 패밀리 감지 불가, Qwen 로더로 폴백: %s (감지결과: %s)", model_key, family)
+        streamer = _Wrap(lambda messages, **kw: qwen.stream_chat(messages, model_path=local_path, **kw))
+
+    _HF_STREAMER_CACHE[model_key] = streamer
+    return streamer
+
+
 ### Base Streamer
 
 class BaseAPIStreamer:
