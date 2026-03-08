@@ -46,6 +46,8 @@ def _get_model_device(model):
     return _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
 
 
+
+
 # ===== Config.yaml 기반 설정 로드 =====
 ft_conf = app_config.get("fine_tuning")
 if not ft_conf:
@@ -632,6 +634,11 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
         output_dir = os.path.join(STORAGE_MODEL_ROOT, save_name_with_suffix)
         is_mxfp4 = _looks_like_mxfp4_model(model_path) or _looks_like_mxfp4_model(job.request.get("baseModelName"))
 
+        # device_map="auto" 사용 시 모델이 여러 GPU에 파이프라인 병렬로 배치됨.
+        # 이때 Trainer가 자동으로 DataParallel을 씌우면 충돌 → CUDA 에러 발생.
+        # → device_map="auto"는 유지하되, Trainer의 DataParallel 래핑만 비활성화.
+        _append_log(log_path, f"[{_now_utc().isoformat()}] GPU 수: {torch.cuda.device_count()}개")
+
         # ===== 모델/토크나이저 로드 =====
         # gpt-oss(MXFP4) → Unsloth
         if tuning_type == "QLORA" and is_mxfp4:
@@ -789,6 +796,10 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                                f"grad_accum_steps={grad_accum_steps}, effective_batch_size={effective_batch_size}, "
                                f"epochs={num_epochs}, lr={lr}")
         
+        # device_map="auto"로 모델을 로드하면 파이프라인 병렬(여러 GPU에 레이어 분산)이 적용됨.
+        # 이때 Trainer가 자동으로 DataParallel을 씌우면 "illegal memory access" CUDA 에러 발생.
+        # → ddp_find_unused_parameters=False로 DDP 비활성화하고,
+        #   DataParallel도 사용하지 않도록 설정.
         _ta = dict(
             output_dir=output_dir,
             num_train_epochs=num_epochs,
@@ -803,6 +814,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             data_seed=42,
             save_total_limit=2,
             warmup_ratio=0.05,
+            ddp_find_unused_parameters=False,
         )
         sup = _supported_args(TrainingArguments)
         _put_kw(sup, _ta, "save_strategy", save_strategy_val)
@@ -874,7 +886,21 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                 callbacks=callbacks,
             )
 
+        # device_map="auto"로 모델이 여러 GPU에 파이프라인 병렬 배치되었을 때,
+        # Trainer가 자동으로 DataParallel 래핑하면 CUDA 메모리 접근 충돌 발생.
+        # → model_parallel 플래그를 설정하여 Trainer의 DataParallel 래핑을 비활성화.
+        # 이렇게 하면 큰 모델은 여러 GPU에 걸쳐 파이프라인 병렬로 학습되고,
+        # 작은 모델은 하나의 GPU에 자동 배치됨.
+        if hasattr(model, "is_parallelizable"):
+            model.is_parallelizable = True
+        if hasattr(model, "model_parallel"):
+            model.model_parallel = True
+        _append_log(log_path, f"[{_now_utc().isoformat()}] DataParallel 래핑 비활성화 (파이프라인 병렬 모드)")
+
         trainer = _build_trainer()
+        # Trainer 내부의 place_model_on_device를 False로 설정
+        # (device_map="auto"로 이미 배치된 모델을 다시 이동시키지 않도록)
+        trainer.place_model_on_device = False
 
         # ===== 학습 + OOM 세이프 재시도 =====
         import math
@@ -911,6 +937,7 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
                     tokenizer=tokenizer,
                     callbacks=[ProgressCallback(job.job_id), LogCallback()],
                 )
+                trainer.place_model_on_device = False
                 trainer.train()
             else:
                 raise
@@ -1026,7 +1053,6 @@ def _run_training_inline(job: FineTuneJob, save_name_with_suffix: str):
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
-        # conn.close()  <-- 제거됨
 
 # ===== Public APIs =====
 def _log_to_save_name(save_name_with_suffix: str, message: str):
