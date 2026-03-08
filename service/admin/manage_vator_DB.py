@@ -524,6 +524,102 @@ def get_security_level_rules_all() -> Dict:
 
 
 # -------------------------------------------------
+# 1-b) 보안 레벨 재계산 (security rules 변경 후 기존 문서에 반영)
+# -------------------------------------------------
+async def recalculate_security_levels() -> Dict[str, Any]:
+    """
+    현재 저장된 보안 규칙(security rules)을 기준으로
+    모든 관리자 문서의 security_level을 재계산하고 Milvus에 재인제스트한다.
+
+    흐름:
+    1. 현재 보안 규칙 로드
+    2. 모든 관리자 문서의 metadata(청크 텍스트) 로드
+    3. 각 문서에 대해 determine_level_for_task 재실행
+    4. documents 테이블의 payload.security_levels 갱신
+    5. Milvus 재인제스트 (기존 벡터 삭제 → 새 security_level로 재삽입)
+    """
+    level_rules = get_security_level_rules_all()
+    documents = _load_admin_documents()
+
+    if not documents:
+        return {"updated": 0, "message": "재계산할 관리자 문서가 없습니다."}
+
+    doc_ids = [doc["doc_id"] for doc in documents if doc.get("doc_id")]
+    metadata_by_doc = fetch_document_metadata_by_doc_ids(doc_ids)
+
+    updated = 0
+    changed_doc_ids: List[str] = []
+
+    for doc in documents:
+        doc_id = str(doc.get("doc_id") or "").strip()
+        if not doc_id:
+            continue
+
+        filename = doc.get("filename") or doc_id
+        payload = dict(doc.get("payload") or {})
+        old_sec = payload.get("security_levels") or {}
+
+        # 문서의 청크 텍스트를 합쳐서 combined_text 구성
+        meta_chunks = metadata_by_doc.get(doc_id) or []
+        combined_text = "\n\n".join(
+            entry.get("text", "") for entry in meta_chunks if entry.get("text")
+        )
+
+        # 보안 레벨 재계산
+        new_sec = {
+            task: determine_level_for_task(
+                combined_text,
+                level_rules.get(task, {"maxLevel": 1, "levels": {}}),
+                filename=filename,
+            )
+            for task in TASK_TYPES
+        }
+
+        # 변경이 있는 경우에만 업데이트
+        if new_sec != old_sec:
+            payload["security_levels"] = new_sec
+            upsert_document(
+                doc_id=doc_id,
+                doc_type=ADMIN_DOC_TYPE,
+                filename=filename,
+                source_path=doc.get("source_path"),
+                security_level=_max_security_level(new_sec),
+                payload=payload,
+            )
+            changed_doc_ids.append(doc_id)
+            logger.info(
+                "[recalculate] doc_id=%s (%s) 보안 레벨 변경: %s → %s",
+                doc_id, filename, old_sec, new_sec,
+            )
+            updated += 1
+
+    # 변경된 문서가 있으면 Milvus 재인제스트
+    reingest_result: Dict[str, Any] = {}
+    if changed_doc_ids:
+        settings = get_rag_settings_row()
+        model_key = settings.get("embedding_key")
+        reingest_result = await ingest_embeddings(
+            model_key=model_key,
+            target_tasks=TASK_TYPES,
+            collection_name=ADMIN_COLLECTION,
+            file_keys_filter=changed_doc_ids,
+        )
+        logger.info(
+            "[recalculate] Milvus 재인제스트 완료: %d건, inserted_chunks=%s",
+            len(changed_doc_ids),
+            reingest_result.get("inserted_chunks", 0),
+        )
+
+    return {
+        "message": f"보안 레벨 재계산 완료: {updated}건 변경됨",
+        "updated": updated,
+        "total_documents": len(documents),
+        "changed_doc_ids": changed_doc_ids,
+        "reingest": reingest_result,
+    }
+
+
+# -------------------------------------------------
 # 2) 인제스트 (bulk)
 #   - 작업유형별로 동일 청크를 각각 저장(task_type, security_level 분리)
 # -------------------------------------------------

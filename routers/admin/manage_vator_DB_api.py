@@ -18,6 +18,8 @@ from service.admin.manage_vator_DB import (
     get_security_level_rules_all,
     upsert_security_level_for_task,
     get_security_level_rules_for_task,
+    # 보안 레벨 재계산
+    recalculate_security_levels,
     # 파이프라인
     ingest_embeddings,
     execute_search,
@@ -219,9 +221,42 @@ async def set_security_levels_one(taskType: TaskLiteral, body: SecurityLevelSing
             max_level=int(body.maxLevel),
             levels_raw=body.levels,
         )
+        # 보안 규칙 변경 후 기존 문서에 자동 반영 (백그라운드)
+        import asyncio
+        asyncio.ensure_future(_run_recalculate_background())
         return res
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+async def _run_recalculate_background():
+    """보안 규칙 변경 시 기존 문서의 security_level을 백그라운드로 재계산."""
+    try:
+        result = await recalculate_security_levels()
+        logger.info(
+            "[API] 보안 레벨 자동 재계산 완료: updated=%s, total=%s",
+            result.get("updated", 0),
+            result.get("total_documents", 0),
+        )
+    except Exception:
+        logger.exception("[API] 보안 레벨 자동 재계산 실패")
+
+
+@router.post(
+    "/admin/vector/recalculate-security",
+    summary="보안 규칙에 따라 모든 문서의 security_level 재계산 및 Milvus 재인제스트",
+)
+async def recalculate_security_endpoint():
+    """
+    현재 저장된 보안 규칙을 기준으로 모든 관리자 문서의 security_level을 재계산하고
+    Milvus에 재인제스트합니다.
+    """
+    try:
+        result = await recalculate_security_levels()
+        return result
+    except Exception as e:
+        logger.exception("[API] recalculate-security 실패")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get(
