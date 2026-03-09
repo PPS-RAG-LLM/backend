@@ -13,7 +13,7 @@ from utils import logger
 from errors import BadRequestError
 import time, json
 
-from utils.auth import get_user_id_from_cookie
+from utils.auth import get_user_id_from_cookie, get_user_info_from_cookie
 
 logger = logger(__name__)
 
@@ -66,14 +66,15 @@ def stream_chat_qna_endpoint(
     slug            : str = Path(..., description="워크스페이스 슬러그"),
     thread_slug     : str = Path(..., description="채팅 스레드 슬러그"),
     body            : StreamChatRequest = Body(..., description="채팅 요청 본문"),
-    user_id         : int = Depends(get_user_id_from_cookie),
+    user_info       : dict = Depends(get_user_info_from_cookie),
 ):
-    security_level  = 2 # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
+    user_id = user_info["user_id"]
+    security_level = int(user_info.get("security_level") or 3)
     logger.info(f"\n\n[stream_chat_qna_endpoint] \n{body}\n")
 
     gen = stream_chat_for_qna(
         user_id         = user_id,   # 사용자 ID
-        security_level  = security_level,         # TODO : 유저정보에서 보안레벨 캐싱하여 사용하기 (default: 2)
+        security_level  = security_level,
         slug            = slug,      # 워크스페이스 슬러그
         thread_slug     = thread_slug, # 채팅 스레드 슬러그
         category        = category,  # 카테고리
