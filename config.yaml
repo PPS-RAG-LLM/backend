@@ -97,7 +97,7 @@ retrieval:
     resources_dir: service/admin/resources
     val_session_root: storage/val_data
   milvus:
-    uri: http://localhost:${MILVUS_PORT}
+    uri: http://${MILVUS_HOST}:${MILVUS_PORT}
     # token: ${MILVUS_TOKEN:-""}
     collections:
       ADMIN_DOCS: admin_docs_collection

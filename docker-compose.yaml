@@ -24,8 +24,9 @@ services:
       # 컨테이너 간 통신을 위한 호스트 설정
       - RDB_HOST=${RDB_HOST}
       - MILVUS_HOST=${MILVUS_HOST}
-      - MINIO_HOST=${MILVUS_PORT}
-      # [중요] DB 접속 포트는 내부 포트(5432) 사용
+      - MINIO_HOST=${MINIO_HOST}
+      # [중요] 컨테이너 간 통신은 내부 포트 사용
+      - MILVUS_PORT=19530
       - RDB_PORT=5432
     depends_on:
       - db
@@ -82,8 +83,8 @@ services:
     container_name: milvus-minio-${CONTAINER_SUFFIX}
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
     ports:
       - "${MINIO_CONSOLE_PORT}:9001"
       - "${MINIO_API_PORT}:9000"
@@ -106,6 +107,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY}
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/storage/volumes/milvus:/var/lib/milvus
     healthcheck:
